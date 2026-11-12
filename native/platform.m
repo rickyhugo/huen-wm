@@ -399,12 +399,31 @@ int platform_main(int argc, char **argv) {
             int descriptor = connectSocket(); if (descriptor < 0) { fprintf(stderr, "huen-wm is not running for this user\n"); return 1; }
             NSString *command = [[arguments componentsJoinedByString:@" "] stringByAppendingString:@"\n"];
             if ([command lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 511) { fputs("command too long\n", stderr); close(descriptor); return 1; }
-            write(descriptor, command.UTF8String, strlen(command.UTF8String));
+            int noSignal = 1;
+            setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+            const char *commandBytes = command.UTF8String;
+            size_t commandRemaining = strlen(commandBytes);
+            while (commandRemaining) {
+                ssize_t amount = write(descriptor, commandBytes, commandRemaining);
+                if (amount < 0 && errno == EINTR) continue;
+                if (amount <= 0) { perror("command write"); close(descriptor); return 1; }
+                commandBytes += amount;
+                commandRemaining -= (size_t)amount;
+            }
             NSMutableData *reply = [NSMutableData data]; char buffer[8192]; ssize_t received;
-            while ((received = read(descriptor, buffer, sizeof(buffer))) > 0) [reply appendBytes:buffer length:(NSUInteger)received];
+            for (;;) {
+                received = read(descriptor, buffer, sizeof(buffer));
+                if (received < 0 && errno == EINTR) continue;
+                if (received < 0) { perror("reply read"); close(descriptor); return 1; }
+                if (!received) break;
+                if (reply.length + (NSUInteger)received > 4 * 1024 * 1024) { fputs("runtime reply too large\n", stderr); close(descriptor); return 1; }
+                [reply appendBytes:buffer length:(NSUInteger)received];
+            }
             close(descriptor); if (!reply.length) { fputs("runtime did not respond\n", stderr); return 1; }
-            fwrite(reply.bytes, 1, reply.length, stdout);
-            id parsed = [NSJSONSerialization JSONObjectWithData:reply options:NSJSONReadingFragmentsAllowed error:nil];
+            NSError *parseError = nil;
+            id parsed = [NSJSONSerialization JSONObjectWithData:reply options:0 error:&parseError];
+            if (!parsed || parseError || (![parsed isKindOfClass:NSDictionary.class] && ![parsed isKindOfClass:NSArray.class])) { fputs("runtime returned invalid JSON\n", stderr); return 1; }
+            if (fwrite(reply.bytes, 1, reply.length, stdout) != reply.length || fflush(stdout) != 0) { perror("reply output"); return 1; }
             return [parsed isKindOfClass:NSDictionary.class] && parsed[@"error"] ? 1 : 0;
         }
         NSString *lockPath = [socketPath stringByAppendingString:@".lock"];
