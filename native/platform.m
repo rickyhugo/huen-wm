@@ -434,7 +434,7 @@ int platform_main(int argc, char **argv) {
         records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary]; applications = [NSMutableDictionary dictionary];
         if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
-        if (strstr(wm_command("reload"), "\"error\"")) { close(lockDescriptor); return 1; }
+        if (!wm_activate_config()) { close(lockDescriptor); return 1; }
         serverSocket = socket(AF_UNIX, SOCK_STREAM, 0);
         if (serverSocket < 0) { perror("IPC socket"); close(lockDescriptor); return 1; }
         struct sockaddr_un address = {0}; address.sun_family = AF_UNIX; strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
@@ -446,6 +446,7 @@ int platform_main(int argc, char **argv) {
         __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
+            wm_config_poll();
             if (interrupted) stopping = YES;
             double now = CACurrentMediaTime();
             if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
@@ -455,7 +456,7 @@ int platform_main(int argc, char **argv) {
                     BOOL deferred = NO;
                     if (lastModified.tv_sec) {
                         const char *result = wm_command("reload");
-                        deferred = strstr(result, "WorkspaceTransitionPending") != NULL;
+                        deferred = strstr(result, "WorkspaceTransitionPending") != NULL || strstr(result, "ConfigLoadPending") != NULL;
                         if (!deferred && strstr(result, "\"error\"")) fprintf(stderr, "automatic reload rejected: %s", result);
                     }
                     if (!deferred) lastModified = metadata.st_mtimespec;
@@ -484,7 +485,7 @@ int platform_main(int argc, char **argv) {
                 const char *reply = complete ? wm_command(command) : "{\"error\":\"incomplete or oversized command\"}\n";
                 size_t remaining = strlen(reply); while (remaining) { ssize_t amount = write(client, reply, remaining); if (amount <= 0) break; reply += amount; remaining -= amount; } close(client);
             }
-            if (stopping) { wm_shutdown(); [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
+            if (stopping && wm_shutdown()) { [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
         }];
         [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; [NSApp run]; [timer invalidate];
         close(serverSocket); unlink(socketPath.fileSystemRepresentation); close(lockDescriptor); return 0;

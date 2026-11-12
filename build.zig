@@ -12,6 +12,7 @@ pub fn build(builder: *std.Build) void {
     module.addLibraryPath(.{ .cwd_relative = builder.fmt("{s}/usr/lib", .{sdk}) });
     module.addIncludePath(builder.path("native"));
     module.addIncludePath(builder.path("native/vendor/lua-5.5.1"));
+    module.addCSourceFile(.{ .file = builder.path("native/config_worker.c"), .flags = &.{ "-Wall", "-Wextra" } });
     module.addCSourceFiles(.{ .root = builder.path("native/vendor/lua-5.5.1"), .files = &.{ "lapi.c", "lauxlib.c", "lbaselib.c", "lcode.c", "lcorolib.c", "lctype.c", "ldblib.c", "ldebug.c", "ldo.c", "ldump.c", "lfunc.c", "lgc.c", "linit.c", "liolib.c", "llex.c", "lmathlib.c", "lmem.c", "loadlib.c", "lobject.c", "lopcodes.c", "loslib.c", "lparser.c", "lstate.c", "lstring.c", "lstrlib.c", "ltable.c", "ltablib.c", "ltm.c", "lundump.c", "lutf8lib.c", "lvm.c", "lzio.c" }, .flags = &.{"-DLUA_USE_MACOSX"} });
     const native = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
     native.addArg("-I");

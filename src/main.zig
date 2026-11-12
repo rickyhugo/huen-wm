@@ -1,42 +1,15 @@
 const std = @import("std");
 const native = @import("native.zig");
+const configuration = @import("config.zig");
+const commands = @import("command.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
-const Layout = enum { dwindle, master };
-const Direction = enum { left, right, up, down };
-const Command = union(enum) {
-    status,
-    windows,
-    monitors,
-    workspaces,
-    reload,
-    quit,
-    restore,
-    focus: Direction,
-    swap: Direction,
-    move: Direction,
-    resize: f64,
-    toggle_floating,
-    layout: Layout,
-    workspace: usize,
-    send_to_workspace: usize,
-};
+const Layout = commands.Layout;
+const Direction = commands.Direction;
+const parseCommand = commands.parse;
 const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
 const Display = struct { identity: u32, frame: Rect, name: [128]u8, workspace: usize = 0 };
-const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55 };
-const Rule = struct { bundle: [256:0]u8 = @splat(0), floating: bool = false, workspace: ?usize = null };
-const Config = struct {
-    gap: f64 = 12,
-    border_width: f64 = 2,
-    border_color: u32 = 0x9bafff,
-    duration: f64 = 0.12,
-    workspaces: [10]Workspace = @splat(.{}),
-    workspace_count: usize = 5,
-    bindings: [128]native.WMBinding = undefined,
-    binding_count: usize = 0,
-    rules: [64]Rule = @splat(.{}),
-    rule_count: usize = 0,
-};
+const Config = configuration.ConfigCandidate;
 var config: Config = .{};
 var windows: std.ArrayList(Window) = .empty;
 var displays: std.ArrayList(Display) = .empty;
@@ -48,20 +21,22 @@ const Transition = struct { display: u32, workspace: usize, generation: u64 };
 var transition: ?Transition = null;
 var generation: u64 = 0;
 var transition_error: ?[]const u8 = null;
+var config_request: configuration.Request = .{};
+var config_generation: u64 = 0;
+var config_state: enum { idle, pending, ready, failed } = .idle;
+var config_error: ?[]const u8 = null;
 
 pub fn main(initial: std.process.Init.Minimal) u8 {
     const arguments = initial.args.vector;
+    if (arguments.len >= 2 and std.mem.eql(u8, std.mem.span(arguments[1]), "--config-worker")) {
+        if (arguments.len != 3) return 1;
+        return configuration.workerMain(arguments[2]);
+    }
     return @intCast(native.platform_main(@intCast(arguments.len), @ptrCast(arguments.ptr)));
 }
 
 fn text(buffer: anytype) []const u8 {
     return std.mem.sliceTo(buffer, 0);
-}
-fn copyText(destination: []u8, source: []const u8) !void {
-    if (source.len >= destination.len) return error.TextTooLong;
-    if (!std.unicode.utf8ValidateSlice(source) or std.mem.indexOfScalar(u8, source, 0) != null) return error.InvalidText;
-    @memset(destination, 0);
-    @memcpy(destination[0..source.len], source);
 }
 fn json(value: anytype) [*:0]const u8 {
     if (reply_buffer) |previous| allocator.free(previous);
@@ -74,209 +49,63 @@ fn json(value: anytype) [*:0]const u8 {
 fn failure(message: []const u8) [*:0]const u8 {
     return json(.{ .err_message = message, .@"error" = true });
 }
-fn parseCommand(input: []const u8, workspace_count: usize) !Command {
-    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n");
-    const verb = tokens.next() orelse return error.MissingCommand;
-    const argument = tokens.next();
-    if (tokens.next() != null) return error.ExtraArgument;
-    const plain = .{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore" };
-    inline for (plain) |name| if (std.mem.eql(u8, verb, name)) {
-        if (argument != null) return error.ExtraArgument;
-        return @unionInit(Command, name, {});
-    };
-    if (std.mem.eql(u8, verb, "stop")) {
-        if (argument != null) return error.ExtraArgument;
-        return .quit;
-    }
-    if (std.mem.eql(u8, verb, "recover")) {
-        if (argument != null) return error.ExtraArgument;
-        return .restore;
-    }
-    if (std.mem.eql(u8, verb, "toggle-floating")) {
-        if (argument != null) return error.ExtraArgument;
-        return .toggle_floating;
-    }
-    const value = argument orelse return error.MissingArgument;
-    inline for (.{ "focus", "swap", "move" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);
-    if (std.mem.eql(u8, verb, "layout")) return .{ .layout = std.meta.stringToEnum(Layout, value) orelse return error.InvalidLayout };
-    if (std.mem.eql(u8, verb, "resize")) {
-        const delta = try std.fmt.parseFloat(f64, value);
-        if (!std.math.isFinite(delta) or @abs(delta) > 0.5) return error.InvalidRatioDelta;
-        return .{ .resize = delta };
-    }
-    const index = std.fmt.parseInt(usize, value, 10) catch return error.UnknownCommand;
-    if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
-    if (std.mem.eql(u8, verb, "workspace")) return .{ .workspace = index - 1 };
-    if (std.mem.eql(u8, verb, "send-to-workspace")) return .{ .send_to_workspace = index - 1 };
-    return error.UnknownCommand;
-}
-
-fn pop(state: *native.lua_State) void {
-    native.lua_settop(state, -2);
-}
-fn checkKeys(state: *native.lua_State, allowed: []const []const u8) !void {
-    native.lua_pushnil(state);
-    while (native.lua_next(state, -2) != 0) {
-        if (native.lua_type(state, -2) != native.LUA_TSTRING) return error.ExpectedNamedField;
-        const key = std.mem.span(native.lua_tolstring(state, -2, null));
-        var found = false;
-        for (allowed) |name| if (std.mem.eql(u8, name, key)) {
-            found = true;
-            break;
-        };
-        if (!found) return error.UnknownConfigurationField;
-        pop(state);
-    }
-}
-fn fieldNumber(state: *native.lua_State, key: [*:0]const u8, default: f64, minimum: f64, maximum: f64) !f64 {
-    const kind = native.lua_getfield(state, -1, key);
-    defer pop(state);
-    if (kind == native.LUA_TNIL) return default;
-    if (kind != native.LUA_TNUMBER) return error.ExpectedNumber;
-    const number = native.lua_tonumberx(state, -1, null);
-    if (!std.math.isFinite(number) or number < minimum or number > maximum) return error.NumberOutOfRange;
-    return number;
-}
-fn fieldString(state: *native.lua_State, key: [*:0]const u8) !?[]const u8 {
-    const kind = native.lua_getfield(state, -1, key);
-    defer pop(state);
-    if (kind == native.LUA_TNIL) return null;
-    if (kind != native.LUA_TSTRING) return error.ExpectedString;
-    var length: usize = 0;
-    const pointer = native.lua_tolstring(state, -1, &length);
-    return pointer[0..length];
-}
-fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: bool) !bool {
-    const kind = native.lua_getfield(state, -1, key);
-    defer pop(state);
-    if (kind == native.LUA_TNIL) return default;
-    if (kind != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
-    return native.lua_toboolean(state, -1) != 0;
-}
-fn keyCode(name: []const u8) !u32 {
-    const Key = struct { name: []const u8, code: u32 };
-    const keys = [_]Key{
-        .{ .name = "a", .code = 0x00 },      .{ .name = "s", .code = 0x01 },     .{ .name = "d", .code = 0x02 },       .{ .name = "f", .code = 0x03 },
-        .{ .name = "h", .code = 0x04 },      .{ .name = "g", .code = 0x05 },     .{ .name = "z", .code = 0x06 },       .{ .name = "x", .code = 0x07 },
-        .{ .name = "c", .code = 0x08 },      .{ .name = "v", .code = 0x09 },     .{ .name = "section", .code = 0x0a }, .{ .name = "b", .code = 0x0b },
-        .{ .name = "q", .code = 0x0c },      .{ .name = "w", .code = 0x0d },     .{ .name = "e", .code = 0x0e },       .{ .name = "r", .code = 0x0f },
-        .{ .name = "y", .code = 0x10 },      .{ .name = "t", .code = 0x11 },     .{ .name = "1", .code = 0x12 },       .{ .name = "2", .code = 0x13 },
-        .{ .name = "3", .code = 0x14 },      .{ .name = "4", .code = 0x15 },     .{ .name = "6", .code = 0x16 },       .{ .name = "5", .code = 0x17 },
-        .{ .name = "=", .code = 0x18 },      .{ .name = "9", .code = 0x19 },     .{ .name = "7", .code = 0x1a },       .{ .name = "-", .code = 0x1b },
-        .{ .name = "8", .code = 0x1c },      .{ .name = "0", .code = 0x1d },     .{ .name = "]", .code = 0x1e },       .{ .name = "o", .code = 0x1f },
-        .{ .name = "u", .code = 0x20 },      .{ .name = "[", .code = 0x21 },     .{ .name = "i", .code = 0x22 },       .{ .name = "p", .code = 0x23 },
-        .{ .name = "return", .code = 0x24 }, .{ .name = "l", .code = 0x25 },     .{ .name = "j", .code = 0x26 },       .{ .name = "'", .code = 0x27 },
-        .{ .name = "k", .code = 0x28 },      .{ .name = ";", .code = 0x29 },     .{ .name = "\\", .code = 0x2a },      .{ .name = ",", .code = 0x2b },
-        .{ .name = "/", .code = 0x2c },      .{ .name = "n", .code = 0x2d },     .{ .name = "m", .code = 0x2e },       .{ .name = ".", .code = 0x2f },
-        .{ .name = "tab", .code = 0x30 },    .{ .name = "space", .code = 0x31 }, .{ .name = "`", .code = 0x32 },       .{ .name = "backspace", .code = 0x33 },
-        .{ .name = "escape", .code = 0x35 }, .{ .name = "left", .code = 0x7b },  .{ .name = "right", .code = 0x7c },   .{ .name = "down", .code = 0x7d },
-        .{ .name = "up", .code = 0x7e },
-    };
-    for (keys) |key| if (std.mem.eql(u8, key.name, name)) return key.code;
-    return error.UnknownKey;
-}
-fn modifiers(value: []const u8) !u32 {
-    var parts = std.mem.tokenizeScalar(u8, value, '+');
-    var flags: u32 = 0;
-    while (parts.next()) |part| {
-        const flag: u32 = if (std.mem.eql(u8, part, "cmd")) 256 else if (std.mem.eql(u8, part, "shift")) 512 else if (std.mem.eql(u8, part, "alt")) 2048 else if (std.mem.eql(u8, part, "ctrl")) 4096 else return error.UnknownModifier;
-        if (flags & flag != 0) return error.DuplicateModifier;
-        flags |= flag;
-    }
-    if (flags == 0) return error.ModifierRequired;
-    return flags;
-}
-fn loadConfig(path: [*:0]const u8) !Config {
-    var result: Config = .{};
-    for (&result.workspaces, 0..) |*workspace, index| {
-        const name = try std.fmt.bufPrint(&workspace.name, "{d}", .{index + 1});
-        workspace.name[name.len] = 0;
-    }
-    const state = native.platform_lua_open() orelse return error.LuaAllocationFailed;
-    defer native.lua_close(state);
-    if (native.luaL_loadfilex(state, path, "t") != native.LUA_OK or native.lua_pcallk(state, 0, 1, 0, 0, null) != native.LUA_OK) {
-        native.platform_error(native.lua_tolstring(state, -1, null));
-        return error.LuaConfigurationFailed;
-    }
-    if (native.lua_type(state, -1) != native.LUA_TTABLE) return error.ExpectedReturnedTable;
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "rules" });
-    result.gap = try fieldNumber(state, "gap", 12, 0, 100);
-    result.border_width = try fieldNumber(state, "border_width", 2, 0, 12);
-    result.duration = try fieldNumber(state, "motion_duration", 0.12, 0, 0.5);
-    if (try fieldString(state, "border_color")) |color| {
-        if (color.len != 7 or color[0] != '#') return error.InvalidColor;
-        result.border_color = try std.fmt.parseInt(u32, color[1..], 16);
-    }
-    const layout = if (try fieldString(state, "layout")) |name| std.meta.stringToEnum(Layout, name) orelse return error.InvalidLayout else .dwindle;
-    const ratio = try fieldNumber(state, "master_ratio", 0.55, 0.1, 0.9);
-    for (&result.workspaces) |*workspace| {
-        workspace.layout = layout;
-        workspace.ratio = ratio;
-    }
-    const workspaceKind = native.lua_getfield(state, -1, "workspaces");
-    if (workspaceKind != native.LUA_TNIL) {
-        if (workspaceKind != native.LUA_TTABLE) return error.ExpectedWorkspaces;
-        result.workspace_count = native.lua_rawlen(state, -1);
-        if (result.workspace_count == 0 or result.workspace_count > 10) return error.InvalidWorkspaceCount;
-        for (0..result.workspace_count) |index| {
-            if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedWorkspaceName;
-            var length: usize = 0;
-            const name = native.lua_tolstring(state, -1, &length);
-            if (length == 0) return error.EmptyWorkspaceName;
-            try copyText(&result.workspaces[index].name, name[0..length]);
-            pop(state);
-        }
-    }
-    pop(state);
-    const bindingsKind = native.lua_getfield(state, -1, "bindings");
-    if (bindingsKind != native.LUA_TNIL) {
-        if (bindingsKind != native.LUA_TTABLE) return error.ExpectedBindings;
-        result.binding_count = native.lua_rawlen(state, -1);
-        if (result.binding_count > 128) return error.TooManyBindings;
-        for (0..result.binding_count) |index| {
-            if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TTABLE) return error.ExpectedBinding;
-            try checkKeys(state, &.{ "key", "mods", "command" });
-            var binding: native.WMBinding = std.mem.zeroes(native.WMBinding);
-            binding.key = try keyCode((try fieldString(state, "key")) orelse return error.MissingKey);
-            binding.modifiers = try modifiers((try fieldString(state, "mods")) orelse return error.MissingModifiers);
-            const command = (try fieldString(state, "command")) orelse return error.MissingCommand;
-            _ = try parseCommand(command, result.workspace_count);
-            try copyText(&binding.command, command);
-            for (result.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;
-            result.bindings[index] = binding;
-            pop(state);
-        }
-    }
-    pop(state);
-    const rulesKind = native.lua_getfield(state, -1, "rules");
-    if (rulesKind != native.LUA_TNIL) {
-        if (rulesKind != native.LUA_TTABLE) return error.ExpectedRules;
-        result.rule_count = native.lua_rawlen(state, -1);
-        if (result.rule_count > 64) return error.TooManyRules;
-        for (0..result.rule_count) |index| {
-            if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TTABLE) return error.ExpectedRule;
-            try checkKeys(state, &.{ "bundle", "floating", "workspace" });
-            var rule: Rule = .{};
-            try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
-            rule.floating = try fieldBool(state, "floating", false);
-            const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
-            if (@floor(workspace) != workspace) return error.InvalidWorkspace;
-            if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
-            result.rules[index] = rule;
-            pop(state);
-        }
-    }
-    return result;
-}
-
 export fn wm_initialize(path: [*:0]const u8) bool {
-    const candidate = loadConfig(path) catch |err| {
+    const candidate = configuration.load(path) catch |err| {
         native.platform_error(@errorName(err));
         return false;
     };
     config = candidate;
+    config_state = .ready;
     initialized = true;
     return true;
+}
+
+export fn wm_activate_config() bool {
+    return native.platform_bindings(&config.bindings, config.binding_count);
+}
+
+fn rejectConfig(message: [:0]const u8) void {
+    config_state = .failed;
+    config_error = message;
+    native.platform_error(message.ptr);
+}
+
+export fn wm_config_poll() void {
+    const completion = config_request.take() orelse return;
+    if (completion.generation != config_generation or config_state != .pending) return;
+    const candidate = switch (completion.result) {
+        .ready => |candidate| candidate,
+        .failed => |err| {
+            rejectConfig(@errorName(err));
+            return;
+        },
+    };
+    if (transition != null) {
+        rejectConfig("WorkspaceTransitionPending");
+        return;
+    }
+    if (suspended) {
+        rejectConfig("RuntimeSuspendedRestartToResume");
+        return;
+    }
+    if (!native.platform_bindings(&candidate.bindings, candidate.binding_count)) {
+        rejectConfig("HotkeyCollision");
+        return;
+    }
+    config = candidate;
+    config_state = .ready;
+    config_error = null;
+    for (displays.items) |*display| display.workspace = @min(display.workspace, config.workspace_count - 1);
+    for (windows.items) |*window| window.workspace = @min(window.workspace, config.workspace_count - 1);
+    native.platform_config_changed();
+    reconcile();
+}
+
+fn cancelConfig() void {
+    if (config_state != .pending) return;
+    config_request.cancel();
+    config_state = .failed;
+    config_error = "ConfigLoadCancelled";
 }
 fn displayIndex(identity: u32) ?usize {
     for (displays.items, 0..) |display, index| if (display.identity == identity) return index;
@@ -650,7 +479,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
-        .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "offscreen-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .transition_pending = transition != null, .transition_error = transition_error }),
+        .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "offscreen-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
         .windows => {
             const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
             var items: std.ArrayList(Item) = .empty;
@@ -676,21 +505,22 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
         },
         .reload => {
             if (transition != null) return failure("WorkspaceTransitionPending");
-            const candidate = loadConfig(native.platform_config_path()) catch |err| return failure(@errorName(err));
-            if (!native.platform_bindings(&candidate.bindings, candidate.binding_count)) return failure("HotkeyCollision");
-            config = candidate;
-            for (displays.items) |*display| display.workspace = @min(display.workspace, config.workspace_count - 1);
-            for (windows.items) |*window| window.workspace = @min(window.workspace, config.workspace_count - 1);
-            native.platform_config_changed();
-            reconcile();
-            return json(.{ .ok = true });
+            if (suspended) return failure("RuntimeSuspendedRestartToResume");
+            const request_id = config_generation + 1;
+            config_request.start(native.platform_config_path(), request_id) catch |err| return failure(@errorName(err));
+            config_generation = request_id;
+            config_state = .pending;
+            config_error = null;
+            return json(.{ .ok = true, .accepted = true, .request_id = request_id });
         },
         .quit => {
+            cancelConfig();
             cancelTransition();
             native.platform_quit();
             return json(.{ .ok = true });
         },
         .restore => {
+            cancelConfig();
             cancelTransition();
             suspended = true;
             const outstanding = native.platform_restore();
@@ -772,9 +602,12 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     native.platform_config_changed();
     return json(.{ .ok = true });
 }
-export fn wm_shutdown() void {
+export fn wm_shutdown() bool {
+    cancelConfig();
+    if (config_request.inFlight()) return false;
     cancelTransition();
     const outstanding = native.platform_restore();
     if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
     native.platform_border(0, 0, 0);
+    return true;
 }

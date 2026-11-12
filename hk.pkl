@@ -11,7 +11,7 @@ steps {
     fix = "mise exec -- zig fmt {{files}}"
   }
   ["names"] {
-    glob = List("*.zig", "*.m", "*.mm", "*.h", "*.lua")
+    glob = List("*.zig", "*.c", "*.m", "*.mm", "*.h", "*.lua")
     check = "mise exec -- lua scripts/check-names.lua {{files}}"
   }
   ["lua-syntax"] {

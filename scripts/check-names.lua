@@ -40,7 +40,7 @@ local function check_file(filename)
         end
     end
     local language = filename:match("%.([^.]+)$")
-    if language ~= "zig" and language ~= "lua" and language ~= "m"
+    if language ~= "zig" and language ~= "lua" and language ~= "c" and language ~= "m"
         and language ~= "mm" and language ~= "h" then
         return true
     end
