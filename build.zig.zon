@@ -1,0 +1,7 @@
+.{
+    .name = .huen_wm,
+    .fingerprint = 0xc06ca2dacb6fa0e6,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{ "build.zig", "build.zig.zon", "src", "native", "LICENSE" },
+}

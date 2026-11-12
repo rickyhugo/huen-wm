@@ -1,0 +1,414 @@
+#import <Cocoa/Cocoa.h>
+#import <ApplicationServices/ApplicationServices.h>
+#import <Carbon/Carbon.h>
+#import <QuartzCore/QuartzCore.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include "platform.h"
+#include "scene.h"
+
+@interface WindowRecord : NSObject
+@property AXUIElementRef element;
+@property WMWindow observation;
+@property WMRect original;
+@property WMRect target;
+@property WMRect animationStart;
+@property double animationTime;
+@property double animationDuration;
+@property BOOL changed;
+@end
+@implementation WindowRecord
+- (void)dealloc { if (_element) CFRelease(_element); }
+@end
+
+static NSMutableArray<WindowRecord *> *records;
+static NSMutableDictionary<NSNumber *, NSValue *> *observers;
+static uint64_t nextIdentity = 1;
+static BOOL dirty = YES;
+static BOOL stopping;
+static NSString *configPath;
+static NSString *bundleFilter;
+static NSPanel *borderPanel;
+static NSPanel *hudPanel;
+static double hudDeadline;
+static int serverSocket = -1;
+static NSString *socketPath;
+static EventHotKeyRef hotkeyRefs[256];
+static WMBinding currentBindings[256];
+static volatile sig_atomic_t interrupted;
+void platform_error(const char *message) { fprintf(stderr, "%s\n", message ?: "unknown error"); }
+static void copyUTF8(char *destination, size_t capacity, NSString *source) {
+    NSUInteger used = 0;
+    [source getBytes:destination maxLength:capacity - 1 usedLength:&used encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, source.length) remainingRange:NULL];
+    destination[used] = 0;
+}
+
+static void luaBudget(lua_State *state, lua_Debug *debug) { (void)debug; luaL_error(state, "configuration instruction budget exceeded"); }
+static size_t luaMemory;
+static void *luaAllocate(void *context, void *pointer, size_t oldSize, size_t newSize) {
+    (void)context;
+    if (!pointer) oldSize = 0;
+    if (!newSize) { free(pointer); luaMemory -= oldSize; return NULL; }
+    if (newSize > 16 * 1024 * 1024 || luaMemory - oldSize > 16 * 1024 * 1024 - newSize) return NULL;
+    void *result = realloc(pointer, newSize);
+    if (result) luaMemory = luaMemory - oldSize + newSize;
+    return result;
+}
+lua_State *platform_lua_open(void) {
+    luaMemory = 0;
+    lua_State *state = lua_newstate(luaAllocate, NULL, 0);
+    if (!state) return NULL;
+    luaL_requiref(state, "_G", luaopen_base, 1); lua_pop(state, 1);
+    luaL_requiref(state, "table", luaopen_table, 1); lua_pop(state, 1);
+    luaL_requiref(state, "string", luaopen_string, 1); lua_pop(state, 1);
+    luaL_requiref(state, "math", luaopen_math, 1); lua_pop(state, 1);
+    for (const char **name = (const char *[]){"dofile", "loadfile", "load", "collectgarbage", NULL}; *name; name++) { lua_pushnil(state); lua_setglobal(state, *name); }
+    lua_sethook(state, luaBudget, LUA_MASKCOUNT, 1000000);
+    return state;
+}
+
+static id attribute(AXUIElementRef element, CFStringRef name) {
+    CFTypeRef result = NULL;
+    if (AXUIElementCopyAttributeValue(element, name, &result) != kAXErrorSuccess) return nil;
+    return CFBridgingRelease(result);
+}
+
+static BOOL readFrame(AXUIElementRef element, WMRect *frame) {
+    id position = attribute(element, kAXPositionAttribute);
+    id size = attribute(element, kAXSizeAttribute);
+    CGPoint origin; CGSize extent;
+    if (!position || !size || CFGetTypeID((__bridge CFTypeRef)position) != AXValueGetTypeID() || CFGetTypeID((__bridge CFTypeRef)size) != AXValueGetTypeID()) return NO;
+    if (!AXValueGetValue((__bridge AXValueRef)position, kAXValueCGPointType, &origin) || !AXValueGetValue((__bridge AXValueRef)size, kAXValueCGSizeType, &extent)) return NO;
+    *frame = (WMRect){origin.x, origin.y, extent.width, extent.height};
+    return YES;
+}
+
+static BOOL writeFrame(WindowRecord *record, WMRect frame) {
+    if ([attribute(record.element, kAXMinimizedAttribute) boolValue] || [attribute(record.element, CFSTR("AXFullScreen")) boolValue]) return NO;
+    CGPoint origin = CGPointMake(frame.left, frame.top);
+    CGSize extent = CGSizeMake(frame.width, frame.height);
+    AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
+    AXValueRef size = AXValueCreate(kAXValueCGSizeType, &extent);
+    AXError sizeResult = AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size);
+    AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
+    CFRelease(position); CFRelease(size);
+    return positionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess;
+}
+
+static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
+    (void)observer; (void)element; (void)notification; (void)context;
+    dirty = YES;
+}
+
+static void scanWindows(void) {
+    NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
+    for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
+        if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+        if (bundleFilter.length && ![application.bundleIdentifier isEqualToString:bundleFilter]) continue;
+        NSNumber *process = @(application.processIdentifier);
+        [livePids addObject:process];
+        AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
+        AXUIElementSetMessagingTimeout(appElement, 0.08);
+        if (!observers[process]) {
+            AXObserverRef observer;
+            if (AXObserverCreate(application.processIdentifier, observationCallback, &observer) == kAXErrorSuccess) {
+                for (NSString *name in @[(__bridge NSString *)kAXWindowCreatedNotification, (__bridge NSString *)kAXFocusedWindowChangedNotification, (__bridge NSString *)kAXApplicationHiddenNotification, (__bridge NSString *)kAXApplicationShownNotification]) AXObserverAddNotification(observer, appElement, (__bridge CFStringRef)name, NULL);
+                CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes);
+                observers[process] = [NSValue valueWithPointer:observer];
+            }
+        }
+        CFTypeRef windowValues = NULL;
+        AXError scanResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windowValues);
+        if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
+            if (windowValues) CFRelease(windowValues);
+            for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+            CFRelease(appElement); continue;
+        }
+        NSArray *windows = CFBridgingRelease(windowValues);
+        id focused = attribute(appElement, kAXFocusedWindowAttribute);
+        NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
+        for (id object in windows) {
+            AXUIElementRef element = (__bridge AXUIElementRef)object;
+            AXUIElementSetMessagingTimeout(element, 0.08);
+            WindowRecord *record = nil;
+            for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier && CFEqual(candidate.element, element)) { record = candidate; break; }
+            NSString *subrole = attribute(element, kAXSubroleAttribute);
+            if (!subrole && record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; continue; }
+            if (![subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole]) continue;
+            WMRect frame;
+            if (!readFrame(element, &frame)) {
+                if (record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+                continue;
+            }
+            if (!record) {
+                if (records.count >= 1024) continue;
+                Boolean positionSettable = false, sizeSettable = false;
+                AXUIElementIsAttributeSettable(element, kAXPositionAttribute, &positionSettable);
+                AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
+                if (!positionSettable || !sizeSettable) continue;
+                record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
+                WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
+                [records addObject:record];
+                AXUIElementSetMessagingTimeout(element, 0.08);
+                AXObserverRef observer = [observers[process] pointerValue];
+                if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, NULL);
+            }
+            WMWindow observation = record.observation;
+            observation.frame = frame; observation.stale = false;
+            observation.onscreen = false;
+            for (NSDictionary *visibleWindow in visibleWindows) {
+                if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
+                CGRect bounds;
+                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && fabs(bounds.origin.x - frame.left) < 4 && fabs(bounds.origin.y - frame.top) < 4 && fabs(bounds.size.width - frame.width) < 4 && fabs(bounds.size.height - frame.height) < 4) { observation.onscreen = true; break; }
+            }
+            observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
+            observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
+            observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
+            copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
+            NSString *title = attribute(element, kAXTitleAttribute);
+            copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
+            record.observation = observation;
+            [seen addObject:@(observation.identity)];
+        }
+        NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return record.observation.pid == application.processIdentifier && ![seen containsObject:@(record.observation.identity)]; }];
+        [records removeObjectsAtIndexes:removed];
+        CFRelease(appElement);
+    }
+    NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
+    [records removeObjectsAtIndexes:dead];
+    for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
+}
+
+size_t platform_windows(WMWindow *output, size_t capacity) {
+    size_t count = MIN(capacity, records.count);
+    for (size_t index = 0; index < count; index++) output[index] = records[index].observation;
+    return count;
+}
+
+size_t platform_displays(WMDisplay *output, size_t capacity) {
+    double primaryHeight = CGDisplayBounds(CGMainDisplayID()).size.height;
+    size_t count = 0;
+    for (NSScreen *screen in NSScreen.screens) {
+        if (count >= capacity) break;
+        NSRect visible = screen.visibleFrame;
+        WMDisplay display = {0}; display.identity = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+        display.frame = (WMRect){visible.origin.x, primaryHeight - NSMaxY(visible), visible.size.width, visible.size.height};
+        copyUTF8(display.name, sizeof(display.name), screen.localizedName);
+        output[count++] = display;
+    }
+    return count;
+}
+
+bool platform_frame(uint64_t identity, WMRect frame, double duration) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity) {
+        if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
+        WMRect priorTarget = record.target;
+        if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.animationDuration > 0) return true;
+        record.target = frame; record.changed = YES;
+        if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame); }
+        WMRect current = record.observation.frame; readFrame(record.element, &current);
+        record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration;
+        return true;
+    }
+    return false;
+}
+
+bool platform_read_frame(uint64_t identity, WMRect *frame) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity) return readFrame(record.element, frame);
+    return false;
+}
+
+void platform_focus(uint64_t identity) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) {
+        NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:record.observation.pid];
+        [application activateWithOptions:0];
+        AXUIElementPerformAction(record.element, kAXRaiseAction);
+        AXUIElementSetAttributeValue(record.element, kAXMainAttribute, kCFBooleanTrue);
+        dirty = YES;
+    }
+}
+
+static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
+void platform_border(uint64_t identity, double width, uint32_t color) {
+    WindowRecord *focused = nil;
+    for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) focused = record;
+    if (!focused || width <= 0) { [borderPanel orderOut:nil]; return; }
+    if (!borderPanel) {
+        borderPanel = [[NSPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+        borderPanel.opaque = NO; borderPanel.backgroundColor = NSColor.clearColor; borderPanel.ignoresMouseEvents = YES; borderPanel.level = NSFloatingWindowLevel;
+        borderPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorFullScreenAuxiliary;
+        borderPanel.contentView.wantsLayer = YES;
+    }
+    WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
+    [borderPanel setFrame:NSInsetRect(cocoaRect(frame), -width, -width) display:YES];
+    borderPanel.contentView.layer.borderWidth = width;
+    borderPanel.contentView.layer.cornerRadius = 11;
+    borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
+    [borderPanel orderFrontRegardless];
+}
+
+void platform_hud(const char *text) {
+    if (!hudPanel) {
+        hudPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 360, 76) styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
+        hudPanel.opaque = NO; hudPanel.backgroundColor = NSColor.clearColor; hudPanel.ignoresMouseEvents = YES; hudPanel.level = NSStatusWindowLevel;
+        hudPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
+        NSVisualEffectView *effect = [[NSVisualEffectView alloc] initWithFrame:hudPanel.contentView.bounds]; effect.material = NSVisualEffectMaterialHUDWindow; effect.blendingMode = NSVisualEffectBlendingModeBehindWindow; effect.state = NSVisualEffectStateActive; effect.wantsLayer = YES; effect.layer.cornerRadius = 18;
+        hudPanel.contentView = effect;
+    }
+    for (NSView *view in hudPanel.contentView.subviews) [view removeFromSuperview];
+    NSTextField *label = [NSTextField labelWithString:[NSString stringWithUTF8String:text]]; label.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold]; label.alignment = NSTextAlignmentCenter; label.frame = NSMakeRect(12, 24, 336, 28); [hudPanel.contentView addSubview:label];
+    NSRect display = NSScreen.mainScreen.visibleFrame; [hudPanel setFrameOrigin:NSMakePoint(NSMidX(display) - 180, NSMidY(display) - 38)];
+    [hudPanel orderFrontRegardless]; hudDeadline = CACurrentMediaTime() + 0.85;
+}
+
+static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
+    (void)next; (void)context;
+    EventHotKeyID identity;
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) wm_command(currentBindings[identity.id].command);
+    return noErr;
+}
+
+bool platform_bindings(const WMBinding *bindings, size_t count) {
+    if (count > 128) return false;
+    EventHotKeyRef staged[256] = {0}; WMBinding stagedBindings[256] = {0}; BOOL newlyRegistered[256] = {0};
+    for (size_t index = 0; index < count; index++) {
+        size_t slot = 256;
+        for (size_t oldIndex = 0; oldIndex < 256; oldIndex++) if (hotkeyRefs[oldIndex] && currentBindings[oldIndex].key == bindings[index].key && currentBindings[oldIndex].modifiers == bindings[index].modifiers) { slot = oldIndex; break; }
+        if (slot < 256) { staged[slot] = hotkeyRefs[slot]; stagedBindings[slot] = bindings[index]; continue; }
+        for (size_t candidate = 0; candidate < 256; candidate++) if (!hotkeyRefs[candidate] && !staged[candidate]) { slot = candidate; break; }
+        EventHotKeyID identity = {'HUEN', (UInt32)slot};
+        if (slot == 256 || RegisterEventHotKey(bindings[index].key, bindings[index].modifiers, identity, GetApplicationEventTarget(), 0, &staged[slot]) != noErr) {
+            for (size_t rollback = 0; rollback < 256; rollback++) if (newlyRegistered[rollback]) UnregisterEventHotKey(staged[rollback]);
+            fprintf(stderr, "hotkey collision at binding %zu; previous bindings retained\n", index + 1); return false;
+        }
+        newlyRegistered[slot] = YES; stagedBindings[slot] = bindings[index];
+    }
+    for (size_t oldIndex = 0; oldIndex < 256; oldIndex++) if (hotkeyRefs[oldIndex] && !staged[oldIndex]) UnregisterEventHotKey(hotkeyRefs[oldIndex]);
+    memcpy(hotkeyRefs, staged, sizeof(staged)); memcpy(currentBindings, stagedBindings, sizeof(stagedBindings));
+    return true;
+}
+
+void platform_restore(void) {
+    for (WindowRecord *record in records) if (record.changed && !record.observation.minimized && !record.observation.fullscreen) { record.animationDuration = 0; writeFrame(record, record.original); record.changed = NO; }
+}
+void platform_quit(void) { stopping = YES; }
+const char *platform_config_path(void) { return configPath.fileSystemRepresentation; }
+const char *platform_filter(void) { return bundleFilter.UTF8String ?: ""; }
+void platform_config_changed(void) { dirty = YES; }
+static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
+
+static int connectSocket(void) {
+    struct stat metadata;
+    if (lstat(socketPath.fileSystemRepresentation, &metadata) != 0 || metadata.st_uid != getuid() || !S_ISSOCK(metadata.st_mode)) return -1;
+    int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (descriptor < 0) return -1;
+    struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
+    strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
+    struct timeval timeout = {2, 0}; setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    if (connect(descriptor, (struct sockaddr *)&address, sizeof(address)) != 0) { close(descriptor); return -1; }
+    return descriptor;
+}
+
+int platform_main(int argc, char **argv) {
+    @autoreleasepool {
+        configPath = [NSHomeDirectory() stringByAppendingPathComponent:@".config/huen-wm/config.lua"];
+        if (![NSFileManager.defaultManager fileExistsAtPath:configPath]) {
+            NSString *bundled = [NSBundle.mainBundle pathForResource:@"config" ofType:@"lua"];
+            if (bundled) configPath = bundled;
+        }
+        socketPath = [NSString stringWithFormat:@"/tmp/huen-wm-%u.sock", getuid()];
+        NSMutableArray<NSString *> *arguments = [NSMutableArray array];
+        for (int index = 1; index < argc; index++) {
+            if (!strcmp(argv[index], "--config") || !strcmp(argv[index], "--app")) {
+                if (index + 1 >= argc) { fprintf(stderr, "missing value for %s\n", argv[index]); return 1; }
+                BOOL isConfig = !strcmp(argv[index], "--config"); NSString *value = [NSString stringWithUTF8String:argv[++index]];
+                if (!value.length) { fputs("option value cannot be empty\n", stderr); return 1; }
+                if (isConfig) configPath = value.stringByExpandingTildeInPath; else bundleFilter = value;
+            } else if (!strncmp(argv[index], "--", 2) && strcmp(argv[index], "--help")) { fprintf(stderr, "unknown option: %s\n", argv[index]); return 1; }
+            else [arguments addObject:[NSString stringWithUTF8String:argv[index]]];
+        }
+        NSString *verb = arguments.firstObject ?: @"--help";
+        if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus|swap left|right|up|down\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
+        if ([verb isEqualToString:@"doctor"]) {
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.0", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-offscreen-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
+            NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
+        }
+        if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }
+        if (![verb isEqualToString:@"start"]) {
+            int descriptor = connectSocket(); if (descriptor < 0) { fprintf(stderr, "huen-wm is not running for this user\n"); return 1; }
+            NSString *command = [[arguments componentsJoinedByString:@" "] stringByAppendingString:@"\n"];
+            if ([command lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 511) { fputs("command too long\n", stderr); close(descriptor); return 1; }
+            write(descriptor, command.UTF8String, strlen(command.UTF8String));
+            NSMutableData *reply = [NSMutableData data]; char buffer[8192]; ssize_t received;
+            while ((received = read(descriptor, buffer, sizeof(buffer))) > 0) [reply appendBytes:buffer length:(NSUInteger)received];
+            close(descriptor); if (!reply.length) { fputs("runtime did not respond\n", stderr); return 1; }
+            fwrite(reply.bytes, 1, reply.length, stdout);
+            id parsed = [NSJSONSerialization JSONObjectWithData:reply options:NSJSONReadingFragmentsAllowed error:nil];
+            return [parsed isKindOfClass:NSDictionary.class] && parsed[@"error"] ? 1 : 0;
+        }
+        NSString *lockPath = [socketPath stringByAppendingString:@".lock"];
+        int lockDescriptor = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+        if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) { fputs("huen-wm already running or lock unavailable\n", stderr); return 1; }
+        if (!AXIsProcessTrusted()) { fputs("Accessibility permission required. Grant it to the signed Huen WM app in System Settings, then start explicitly. No permission was requested.\n", stderr); close(lockDescriptor); return 1; }
+        [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary];
+        if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
+        EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
+        if (strstr(wm_command("reload"), "\"error\"")) { close(lockDescriptor); return 1; }
+        serverSocket = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (serverSocket < 0) { perror("IPC socket"); close(lockDescriptor); return 1; }
+        struct sockaddr_un address = {0}; address.sun_family = AF_UNIX; strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
+        unlink(socketPath.fileSystemRepresentation);
+        mode_t oldMask = umask(0077); int bindResult = bind(serverSocket, (struct sockaddr *)&address, sizeof(address)); umask(oldMask);
+        if (bindResult || listen(serverSocket, 8)) { perror("IPC socket"); close(lockDescriptor); return 1; }
+        fcntl(serverSocket, F_SETFL, O_NONBLOCK);
+        signal(SIGINT, signalHandler); signal(SIGTERM, signalHandler); signal(SIGPIPE, SIG_IGN);
+        __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
+        NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
+            (void)timerValue;
+            if (interrupted) stopping = YES;
+            double now = CACurrentMediaTime();
+            if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
+            if (now - lastConfigCheck > 0.25) {
+                struct stat metadata;
+                if (stat(configPath.fileSystemRepresentation, &metadata) == 0 && (metadata.st_mtimespec.tv_sec != lastModified.tv_sec || metadata.st_mtimespec.tv_nsec != lastModified.tv_nsec)) {
+                    BOOL deferred = NO;
+                    if (lastModified.tv_sec) {
+                        const char *result = wm_command("reload");
+                        deferred = strstr(result, "WorkspaceTransitionPending") != NULL;
+                        if (!deferred && strstr(result, "\"error\"")) fprintf(stderr, "automatic reload rejected: %s", result);
+                    }
+                    if (!deferred) lastModified = metadata.st_mtimespec;
+                }
+                lastConfigCheck = now;
+            }
+            for (WindowRecord *record in records) if (record.animationDuration > 0) {
+                double progress = MIN(1, (now - record.animationTime) / record.animationDuration); double eased = 1 - pow(1 - progress, 3);
+                WMRect start = record.animationStart, target = record.target;
+                writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased});
+                if (progress >= 1) record.animationDuration = 0;
+            }
+            if (hudDeadline && now > hudDeadline) { [hudPanel orderOut:nil]; hudDeadline = 0; }
+            int client = accept(serverSocket, NULL, NULL);
+            if (client >= 0) {
+                struct timeval timeout = {0, 100000}; setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+                char command[512]; size_t used = 0; BOOL complete = NO;
+                while (used < sizeof(command) - 1) { ssize_t amount = read(client, command + used, sizeof(command) - 1 - used); if (amount <= 0) break; used += amount; if (memchr(command, '\n', used)) { complete = YES; break; } }
+                command[used] = 0; char *newline = strchr(command, '\n'); if (newline) *newline = 0;
+                const char *reply = complete ? wm_command(command) : "{\"error\":\"incomplete or oversized command\"}\n";
+                size_t remaining = strlen(reply); while (remaining) { ssize_t amount = write(client, reply, remaining); if (amount <= 0) break; reply += amount; remaining -= amount; } close(client);
+            }
+            if (stopping) { wm_shutdown(); [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
+        }];
+        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; [NSApp run]; [timer invalidate];
+        close(serverSocket); unlink(socketPath.fileSystemRepresentation); close(lockDescriptor); return 0;
+    }
+}
