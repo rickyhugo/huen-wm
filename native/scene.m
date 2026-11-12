@@ -30,7 +30,7 @@ typedef NS_ENUM(NSUInteger, HuenSceneState) {
 @property(nonatomic) void *context;
 @property(nonatomic, strong) HuenScenePanel *panel;
 - (void)settle:(bool)covered;
-- (void)retire;
+- (void)retireAndSettleCallback;
 - (void)announceCover;
 @end
 
@@ -51,7 +51,7 @@ static HuenSceneTransition *currentTransition;
     if (callback) callback(context, covered);
 }
 
-- (void)retire {
+- (void)retireAndSettleCallback {
     self.state = HuenSceneRetired;
     [self.panel orderOut:nil];
     [self.panel.contentView.layer removeAllAnimations];
@@ -62,9 +62,9 @@ static HuenSceneTransition *currentTransition;
 }
 @end
 
-static void retire_transition(HuenSceneTransition *transition) {
+static void retire_and_settle_callback(HuenSceneTransition *transition) {
     if (currentTransition == transition) currentTransition = nil;
-    [transition retire];
+    [transition retireAndSettleCallback];
 }
 
 static NSScreen *screen_for_display(uint32_t displayID) {
@@ -79,7 +79,7 @@ static NSScreen *screen_for_display(uint32_t displayID) {
 static void present_image(HuenSceneTransition *transition, id image, CGFloat scale) {
     NSScreen *screen = screen_for_display(transition.displayID);
     if (!screen) {
-        retire_transition(transition);
+        retire_and_settle_callback(transition);
         return;
     }
 
@@ -135,9 +135,8 @@ static void capture_display(HuenSceneTransition *transition, SCShareableContent 
     for (SCRunningApplication *application in content.applications) {
         if (application.processID == processID) [excludedApplications addObject:application];
     }
-    // Fail closed if ScreenCaptureKit cannot identify our process for exclusion.
     if (!selectedDisplay || excludedApplications.count == 0) {
-        retire_transition(transition);
+        retire_and_settle_callback(transition);
         return;
     }
 
@@ -148,7 +147,7 @@ static void capture_display(HuenSceneTransition *transition, SCShareableContent 
     double pixelHeight = ceil(CGRectGetHeight(filter.contentRect) * scale);
     if (!isfinite(scale) || scale <= 0 || !isfinite(pixelWidth) || !isfinite(pixelHeight) ||
         pixelWidth < 1 || pixelHeight < 1 || pixelWidth > UINT32_MAX || pixelHeight > UINT32_MAX) {
-        retire_transition(transition);
+        retire_and_settle_callback(transition);
         return;
     }
     SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
@@ -161,7 +160,7 @@ static void capture_display(HuenSceneTransition *transition, SCShareableContent 
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (currentTransition != transition || transition.state != HuenSceneCapturing) return;
                 if (error || !ownedImage) {
-                    retire_transition(transition);
+                    retire_and_settle_callback(transition);
                     return;
                 }
                 present_image(transition, ownedImage, scale);
@@ -186,11 +185,10 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
     transition.state = HuenSceneCapturing;
     HuenSceneTransition *previousTransition = currentTransition;
     currentTransition = transition;
-    [previousTransition retire];
-    // A canceled callback may reenter begin or cancel.
+    [previousTransition retireAndSettleCallback];
     if (currentTransition != transition) return;
     if (!huen_scene_capture_allowed() || !screen_for_display(display_id)) {
-        retire_transition(transition);
+        retire_and_settle_callback(transition);
         return;
     }
 
@@ -198,7 +196,7 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         HuenSceneTransition *pendingTransition = weakTransition;
         if (pendingTransition && currentTransition == pendingTransition) {
-            retire_transition(pendingTransition);
+            retire_and_settle_callback(pendingTransition);
         }
     });
     [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:NO
@@ -206,7 +204,7 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (currentTransition != transition || transition.state != HuenSceneCapturing) return;
                 if (error || !content) {
-                    retire_transition(transition);
+                    retire_and_settle_callback(transition);
                     return;
                 }
                 capture_display(transition, content);
@@ -219,7 +217,7 @@ void huen_scene_finish(uint64_t generation) {
     HuenSceneTransition *transition = currentTransition;
     if (!transition || transition.generation != generation || transition.state == HuenSceneFading) return;
     if (transition.state != HuenSceneCovered || transition.duration == 0) {
-        retire_transition(transition);
+        retire_and_settle_callback(transition);
         return;
     }
     transition.state = HuenSceneFading;
@@ -235,7 +233,7 @@ void huen_scene_finish(uint64_t generation) {
     [CATransaction setDisableActions:YES];
     [CATransaction setCompletionBlock:^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (currentTransition == transition) retire_transition(transition);
+            if (currentTransition == transition) retire_and_settle_callback(transition);
         });
     }];
     layer.opaque = NO;
@@ -248,5 +246,5 @@ void huen_scene_cancel(void) {
     NSCAssert(NSThread.isMainThread, @"Scene calls require the main thread");
     HuenSceneTransition *transition = currentTransition;
     currentTransition = nil;
-    [transition retire];
+    [transition retireAndSettleCallback];
 }
