@@ -2,3 +2,7 @@
 zig-out/
 zig-pkg/
 *.o
+*.dSYM/
+mise.local.toml
+hk.local.pkl
+.DS_Store
