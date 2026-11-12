@@ -500,11 +500,15 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         if (!window.observation.onscreen and !window.parked) continue;
         if (window.observation.stale or count == placements.len) {
             displays.items[displaySlot].workspace = previousWorkspace;
+            deriveGoals();
+            transition_error = "Workspace snapshot contains a stale or excess window";
             return false;
         }
         var original: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &original)) {
             displays.items[displaySlot].workspace = previousWorkspace;
+            deriveGoals();
+            transition_error = "Workspace geometry could not be read";
             return false;
         }
         const parked = window.workspace != workspace;

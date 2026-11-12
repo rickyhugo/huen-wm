@@ -29,6 +29,7 @@
 
 static NSMutableArray<WindowRecord *> *records;
 static NSMutableDictionary<NSNumber *, NSValue *> *observers;
+static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 static uint64_t nextIdentity = 1;
 static BOOL dirty = YES;
 static BOOL stopping;
@@ -113,6 +114,14 @@ static void scanWindows(void) {
         if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
         if (bundleFilter.length && ![application.bundleIdentifier isEqualToString:bundleFilter]) continue;
         NSNumber *process = @(application.processIdentifier);
+        NSRunningApplication *previous = applications[process];
+        if (previous && (previous.terminated || (previous.launchDate && application.launchDate && ![previous.launchDate isEqualToDate:application.launchDate]))) {
+            AXObserverRef observer = [observers[process] pointerValue];
+            if (observer) { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
+            NSIndexSet *expired = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return record.observation.pid == application.processIdentifier; }];
+            [records removeObjectsAtIndexes:expired];
+        }
+        applications[process] = application;
         [livePids addObject:process];
         AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
         AXUIElementSetMessagingTimeout(appElement, 0.08);
@@ -184,6 +193,7 @@ static void scanWindows(void) {
     NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
     [records removeObjectsAtIndexes:dead];
     for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
+    for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) [applications removeObjectForKey:process];
 }
 
 size_t platform_windows(WMWindow *output, size_t capacity) {
@@ -359,7 +369,7 @@ int platform_main(int argc, char **argv) {
         if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) { fputs("huen-wm already running or lock unavailable\n", stderr); return 1; }
         if (!AXIsProcessTrusted()) { fputs("Accessibility permission required. Grant it to the signed Huen WM app in System Settings, then start explicitly. No permission was requested.\n", stderr); close(lockDescriptor); return 1; }
         [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary];
+        records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary]; applications = [NSMutableDictionary dictionary];
         if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
         if (strstr(wm_command("reload"), "\"error\"")) { close(lockDescriptor); return 1; }
