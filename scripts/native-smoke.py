@@ -234,9 +234,17 @@ class NativeSmoke:
                 [self.aerospace, "enable", "off", "--fail-if-noop"], required=False
             )
             self.aerospace_changed = paused.returncode == 0
-            enabled = self.run_command([self.aerospace, "is-enabled"])
-            if enabled.stdout.strip().lower() != "false":
-                raise RuntimeError("Cannot confirm AeroSpace is disabled")
+            if not self.aerospace_changed:
+                if paused.returncode != 2 or paused.stdout or paused.stderr:
+                    raise RuntimeError(
+                        f"Cannot pause AeroSpace: {paused.returncode}; "
+                        f"{paused.stderr or paused.stdout}"
+                    )
+                ready = self.run_command(
+                    [self.aerospace, "echo", "--", "huen-smoke-ready"]
+                )
+                if ready.stdout.strip() != "huen-smoke-ready":
+                    raise RuntimeError("Cannot confirm AeroSpace CLI connection")
         self.launch(
             self.arguments.fixture, "fixture", "--report", self.report_path, "--spread"
         )
@@ -466,18 +474,41 @@ class NativeSmoke:
         manager_stopped = not self.manager_started
         if self.manager_started:
             try:
-                self.cli("restore", required=False)
-            except Exception as error:
-                self.result["cleanup_errors"].append(f"Cleanup restore failed: {error}")
-            try:
-                self.cli("stop", required=False)
-                self.wait(
-                    "owned manager stopped",
-                    lambda: process_ids("huen-wm"),
-                    lambda identities: not identities,
-                    healthy=False,
-                )
-                manager_stopped = True
+                identities = process_ids("huen-wm")
+                if not identities:
+                    manager_stopped = True
+                else:
+                    status = self.cli("status")
+                    if (
+                        not status.get("running")
+                        or status.get("filter") != "dev.huen-wm.fixture"
+                    ):
+                        raise RuntimeError(
+                            f"Refusing cleanup of an unowned manager: {status}"
+                        )
+                    if len(identities) != 1:
+                        raise RuntimeError("Cannot identify the owned manager process")
+                    command = self.run_command(
+                        ["ps", "-ww", "-p", identities[0], "-o", "command="]
+                    )
+                    if str(self.config_path) not in command.stdout:
+                        raise RuntimeError(
+                            "Manager does not use this run's config; refusing cleanup"
+                        )
+                    try:
+                        self.cli("restore")
+                    except Exception as error:
+                        self.result["cleanup_errors"].append(
+                            f"Cleanup restore failed: {error}"
+                        )
+                    self.cli("stop")
+                    self.wait(
+                        "owned manager stopped",
+                        lambda: process_ids("huen-wm"),
+                        lambda identities: not identities,
+                        healthy=False,
+                    )
+                    manager_stopped = True
             except Exception as error:
                 self.result["cleanup_errors"].append(
                     f"Owned manager did not stop: {error}. No hard kill attempted."
