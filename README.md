@@ -23,18 +23,18 @@ Lua 5.5.1 is compiled from checked-in, checksum-recorded upstream source. The mi
 ```sh
 mkdir -p ~/.config/huen-wm
 cp config/example.lua ~/.config/huen-wm/config.lua
-"$HOME/Applications/Huen WM.app/Contents/MacOS/huen-wm" doctor
+open -n -g -a "$HOME/Applications/Huen WM.app" --args doctor
 ```
 
-Grant Accessibility to the installed app manually in System Settings. `doctor` never prompts. Screen Recording is optional. Without it, workspace changes are instant and tiling still works.
+Grant Accessibility to the installed app manually in System Settings. Launch through `open` so macOS checks the app's permissions rather than the terminal's permission context. `doctor` never prompts. Use `open --stdout /absolute/path/doctor.json` to save its output. Screen Recording is optional. Without it, workspace changes are instant and tiling still works.
 
 First native check should manage only the disposable fixture. Do not run another tiling manager against the same windows.
 
 ```sh
-"$HOME/Applications/Huen WM.app/Contents/MacOS/huen-wm" start --app dev.huen-wm.fixture
+open -n -g -a "$HOME/Applications/Huen WM.app" --args start --app dev.huen-wm.fixture
 ```
 
-`start` runs in the foreground. Omitting `--app` opts into managing all eligible applications. `--config PATH` selects another Lua file. The installed app falls back to its bundled example when the user configuration does not exist.
+`open` returns after launch. A direct executable invocation runs in the foreground but can have a different permission context. Omitting `--app` opts into managing all eligible applications. `--config PATH` selects another Lua file. The installed app falls back to its bundled example when the user configuration does not exist.
 
 ## Control
 
@@ -66,7 +66,7 @@ The example binds Control+Option+H/J/K/L to directional focus. Names identify ph
 
 Lua must return a table. See `config/example.lua` for the complete schema. Each evaluation runs in a fresh child of the same executable. Invalid fields, types, commands, duplicate bindings, and hotkey collisions reject the reload. Consumed tables cannot have metatables. Collections must be dense arrays without extra keys. The previous configuration and hotkeys stay active on failure. File changes trigger reload automatically. Rules match an exact bundle ID and set `floating` or a numbered `workspace` on first discovery.
 
-`reload` returns `accepted` and a `request_id` before evaluation finishes. `status.config_reload` reports the request ID, `pending`, `ready`, or `failed`, and `err_message`. A second request fails with `ConfigLoadPending` while the first request is in flight. Workspace transitions defer automatic reloads and can reject a completed candidate before publication. Restore and quit cancel pending configuration work.
+`reload` returns `accepted` and a `request_id` before evaluation finishes. `status.config_reload` reports the request ID, `pending`, `ready`, or `failed`, and `err_message`. A second request fails with `ConfigLoadPending` while the first request is in flight. Workspace transitions defer automatic reloads and publication of completed candidates. Restore and quit cancel pending configuration work.
 
 `motion_duration = 0` disables movement animation and workspace snapshot capture. Durations are capped at 0.5 seconds. The supervisor uses a one-second monotonic deadline, including Lua work in native libraries. This is a rejection policy, not a startup performance guarantee. Source files are limited to 256 KiB, normalized responses to 128 KiB, and captured error output to 4 KiB. The one-million-instruction hook and 16 MiB Lua allocation cap remain secondary limits. The available libraries are base, table, string, and math. Filesystem, process, package loading, and dynamic code loading are unavailable. User `print` output is discarded and cannot alter the private response. `validate --config PATH` uses the same isolated evaluator without starting the manager.
 
