@@ -21,7 +21,7 @@ pub extern "c" fn platform_bindings(bindings: [*]const WMBinding, count: usize) 
 pub extern "c" fn platform_border(identity: u64, width: f64, color: u32) void;
 pub extern "c" fn platform_hud(message: [*:0]const u8) void;
 pub extern "c" fn platform_quit() void;
-pub extern "c" fn platform_restore() void;
+pub extern "c" fn platform_restore() usize;
 pub extern "c" fn platform_config_path() [*:0]const u8;
 pub extern "c" fn platform_filter() [*:0]const u8;
 pub extern "c" fn platform_config_changed() void;

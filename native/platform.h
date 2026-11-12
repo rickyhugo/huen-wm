@@ -23,7 +23,7 @@ bool platform_bindings(const WMBinding *bindings, size_t count);
 void platform_border(uint64_t identity, double width, uint32_t color);
 void platform_hud(const char *text);
 void platform_quit(void);
-void platform_restore(void);
+size_t platform_restore(void);
 const char *platform_config_path(void);
 const char *platform_filter(void);
 void platform_config_changed(void);

@@ -58,9 +58,9 @@ huen-wm restore
 huen-wm stop
 ```
 
-Lists and command results are JSON. Workspace indices start at one. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points. `restore`, also named `recover`, restores geometry recorded during this live session and suspends tiling until restart. `stop`, `quit`, SIGINT, and SIGTERM restore geometry before exiting.
+Lists and command results are JSON. Workspace indices start at one. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `restore`, also named `recover`, attempts to restore geometry recorded during this live session and suspends tiling until restart. An incomplete restore returns an error with an `outstanding` count. Unminimize affected windows or leave native fullscreen, then retry `restore`. `stop`, `quit`, SIGINT, and SIGTERM attempt restoration before exiting and log outstanding failures.
 
-The example binds Control+Option+H/J/K/L to directional focus. Add Shift to swap. Control+Option+1 through 5 selects workspaces. Add Shift to send the focused window. Control+Option+Space toggles floating. Plus/minus changes the split ratio. Control+Option+R reloads.
+The example binds Control+Option+H/J/K/L to directional focus. Names identify physical ANSI key positions, independent of the active input layout. Add Shift to swap. Control+Option+1 through 5 selects workspaces. Add Shift to send the focused window. Control+Option+Space toggles floating. Plus/minus changes the split ratio. Control+Option+R reloads.
 
 ## Configuration
 

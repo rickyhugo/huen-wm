@@ -22,6 +22,7 @@
 @property double animationTime;
 @property double animationDuration;
 @property BOOL changed;
+@property BOOL rejectedTarget;
 @end
 @implementation WindowRecord
 - (void)dealloc { if (_element) CFRelease(_element); }
@@ -90,8 +91,14 @@ static BOOL readFrame(AXUIElementRef element, WMRect *frame) {
     return YES;
 }
 
+static BOOL canMove(WindowRecord *record) {
+    id minimized = attribute(record.element, kAXMinimizedAttribute);
+    id fullscreen = attribute(record.element, CFSTR("AXFullScreen"));
+    return minimized && fullscreen && ![minimized boolValue] && ![fullscreen boolValue];
+}
+
 static BOOL writeFrame(WindowRecord *record, WMRect frame) {
-    if ([attribute(record.element, kAXMinimizedAttribute) boolValue] || [attribute(record.element, CFSTR("AXFullScreen")) boolValue]) return NO;
+    if (!canMove(record)) return NO;
     CGPoint origin = CGPointMake(frame.left, frame.top);
     CGSize extent = CGSizeMake(frame.width, frame.height);
     AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
@@ -100,6 +107,10 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     CFRelease(position); CFRelease(size);
     return positionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess;
+}
+
+static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
+    return fabs(first.left - second.left) <= tolerance && fabs(first.top - second.top) <= tolerance && fabs(first.width - second.width) <= tolerance && fabs(first.height - second.height) <= tolerance;
 }
 
 static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
@@ -141,6 +152,13 @@ static void scanWindows(void) {
             CFRelease(appElement); continue;
         }
         NSArray *windows = CFBridgingRelease(windowValues);
+        NSMutableDictionary<NSValue *, NSValue *> *frames = [NSMutableDictionary dictionary];
+        for (id object in windows) {
+            AXUIElementRef element = (__bridge AXUIElementRef)object;
+            AXUIElementSetMessagingTimeout(element, 0.08);
+            WMRect frame;
+            if (readFrame(element, &frame)) frames[[NSValue valueWithPointer:element]] = [NSValue valueWithBytes:&frame objCType:@encode(WMRect)];
+        }
         id focused = attribute(appElement, kAXFocusedWindowAttribute);
         NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
         for (id object in windows) {
@@ -152,10 +170,12 @@ static void scanWindows(void) {
             if (!subrole && record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; continue; }
             if (![subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole]) continue;
             WMRect frame;
-            if (!readFrame(element, &frame)) {
+            NSValue *cachedFrame = frames[[NSValue valueWithPointer:element]];
+            if (!cachedFrame) {
                 if (record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
                 continue;
             }
+            [cachedFrame getValue:&frame];
             if (!record) {
                 if (records.count >= 1024) continue;
                 Boolean positionSettable = false, sizeSettable = false;
@@ -172,11 +192,17 @@ static void scanWindows(void) {
             WMWindow observation = record.observation;
             observation.frame = frame; observation.stale = false;
             observation.onscreen = false;
+            NSUInteger matchingAX = 0, matchingCG = 0;
+            for (NSValue *candidate in frames.allValues) {
+                WMRect candidateFrame; [candidate getValue:&candidateFrame];
+                if (framesNear(frame, candidateFrame, 4)) matchingAX++;
+            }
             for (NSDictionary *visibleWindow in visibleWindows) {
                 if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
                 CGRect bounds;
-                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && fabs(bounds.origin.x - frame.left) < 4 && fabs(bounds.origin.y - frame.top) < 4 && fabs(bounds.size.width - frame.width) < 4 && fabs(bounds.size.height - frame.height) < 4) { observation.onscreen = true; break; }
+                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) matchingCG++;
             }
+            observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
@@ -220,7 +246,9 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
         WMRect priorTarget = record.target;
+        if (duration > 0 && record.rejectedTarget && framesNear(priorTarget, frame, 2)) return false;
         if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.animationDuration > 0) return true;
+        record.rejectedTarget = NO;
         record.target = frame; record.changed = YES;
         if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame); }
         WMRect current = record.observation.frame; readFrame(record.element, &current);
@@ -305,8 +333,23 @@ bool platform_bindings(const WMBinding *bindings, size_t count) {
     return true;
 }
 
-void platform_restore(void) {
-    for (WindowRecord *record in records) if (record.changed && !record.observation.minimized && !record.observation.fullscreen) { record.animationDuration = 0; writeFrame(record, record.original); record.changed = NO; }
+size_t platform_restore(void) {
+    size_t outstanding = 0;
+    for (WindowRecord *record in records) record.animationDuration = 0;
+    for (WindowRecord *record in records) if (record.changed) {
+        WMRect actual;
+        BOOL restored = NO;
+        if (canMove(record)) {
+            writeFrame(record, record.original);
+            restored = readFrame(record.element, &actual) && framesNear(actual, record.original, 2);
+        }
+        if (restored) record.changed = NO;
+        else {
+            outstanding++;
+            fprintf(stderr, "restore incomplete for window %llu\n", (unsigned long long)record.observation.identity);
+        }
+    }
+    return outstanding;
 }
 void platform_quit(void) { stopping = YES; }
 const char *platform_config_path(void) { return configPath.fileSystemRepresentation; }
@@ -401,10 +444,16 @@ int platform_main(int argc, char **argv) {
                 lastConfigCheck = now;
             }
             for (WindowRecord *record in records) if (record.animationDuration > 0) {
+                if (record.observation.stale || !record.observation.onscreen || record.observation.minimized || record.observation.fullscreen) { record.animationDuration = 0; continue; }
                 double progress = MIN(1, (now - record.animationTime) / record.animationDuration); double eased = 1 - pow(1 - progress, 3);
                 WMRect start = record.animationStart, target = record.target;
-                writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased});
-                if (progress >= 1) record.animationDuration = 0;
+                BOOL applied = writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased});
+                if (!applied || progress >= 1) {
+                    WMRect actual;
+                    record.rejectedTarget = !applied || !readFrame(record.element, &actual) || !framesNear(actual, target, 2);
+                    record.animationDuration = 0;
+                    dirty = YES;
+                }
             }
             if (hudDeadline && now > hudDeadline) { [hudPanel orderOut:nil]; hudDeadline = 0; }
             int client = accept(serverSocket, NULL, NULL);
