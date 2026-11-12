@@ -83,6 +83,8 @@ Scene smoothness, capture timing, and parking remain unverified until native exe
 - Foundational Thinking puts compiler pins, native discovery, and shared types before workspace effects.
 - Separate Before Serializing Shared State gives each writer a worktree and assigns runtime interfaces to one owner.
 - Laziness Protocol selects reconciliation over a larger event journal and effect framework.
+- Experience First separates workspace presentation from window storage instead of exposing Dock minimization as the interaction.
+- Boundary Discipline keeps capture resources and permission checks inside the native bridge, with workspace policy in Zig.
 - Build the Lever produces a reusable native fixture and source checks.
 - Sequence Work into Verifiable Units checks tooling and the fixture before native integration.
 - Prove It Works requires actual Accessibility readback before claiming native behavior works.
@@ -96,3 +98,7 @@ Scene smoothness, capture timing, and parking remain unverified until native exe
 - `codesign --verify --strict --verbose=2 zig-out/fixtures/HuenFixture.app` passes.
 - `plutil -lint zig-out/fixtures/HuenFixture.app/Contents/Info.plist` passes.
 - The nonprompting Accessibility trust probe returns false. Native window operations remain unverified.
+- `xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror -mmacosx-version-min=14.0 -fsyntax-only native/scene.m` passes.
+- Independent scene review found no concrete lifetime or cancellation defects. Native presentation remains unverified.
+- Comment review removed two redundant comments and made synchronous callback settlement explicit in internal names. Public lifetime contracts remain.
+- `mise exec -- hk install --mise` installed the repository-local pre-commit hook through Git configuration.

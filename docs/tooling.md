@@ -9,11 +9,11 @@ mise run check
 mise run build
 ```
 
-Install the pre-commit hook from the main checkout, not a linked worktree.
-This changes the repository's shared Git hook configuration.
+Install the repository's pre-commit hook.
+Linked worktrees share this Git hook configuration.
 
 ```sh
-mise exec -- hk install
+mise exec -- hk install --mise
 ```
 
 `mise run check` checks Zig formatting, Lua syntax, and source names without a build.
