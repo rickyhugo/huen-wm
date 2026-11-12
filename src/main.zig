@@ -71,6 +71,8 @@ fn rejectConfig(message: [:0]const u8) void {
 }
 
 export fn wm_config_poll() void {
+    // Cancelled requests must still drain while shutdown waits for the worker.
+    if (transition != null and config_state == .pending) return;
     const completion = config_request.take() orelse return;
     if (completion.generation != config_generation or config_state != .pending) return;
     const candidate = switch (completion.result) {
@@ -80,10 +82,6 @@ export fn wm_config_poll() void {
             return;
         },
     };
-    if (transition != null) {
-        rejectConfig("WorkspaceTransitionPending");
-        return;
-    }
     if (suspended) {
         rejectConfig("RuntimeSuspendedRestartToResume");
         return;
