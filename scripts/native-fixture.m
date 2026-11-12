@@ -13,6 +13,7 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
 @property(nonatomic, copy) NSArray<NSWindow *> *windows;
 @property(nonatomic, copy) NSString *reportPath;
 @property(nonatomic) BOOL ready;
+@property(nonatomic) BOOL spread;
 @end
 
 @implementation HuenFixtureDelegate
@@ -48,6 +49,13 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
         window.title = title;
         window.releasedWhenClosed = NO;
         window.contentMinSize = NSMakeSize(240, 160);
+        if (self.spread) {
+            NSArray<NSScreen *> *screens = [NSScreen screens];
+            NSScreen *screen = screens[(windowIndex == 2 && screens.count > 1) ? 1 : 0];
+            NSRect visibleFrame = screen.visibleFrame;
+            [window setFrameOrigin:NSMakePoint(NSMinX(visibleFrame) + 80 + (windowIndex % 2) * 100,
+                                               NSMinY(visibleFrame) + 100 + (windowIndex % 2) * 60)];
+        }
         [windows addObject:window];
         [window makeKeyAndOrderFront:nil];
         windowIndex += 1;
@@ -72,6 +80,9 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
                                    name:NSApplicationDidChangeScreenParametersNotification object:nil];
     }
     [NSApp activateIgnoringOtherApps:YES];
+    if (self.spread) {
+        [self.windows.firstObject makeKeyAndOrderFront:nil];
+    }
     self.ready = YES;
     [self writeReport:nil];
 }
@@ -133,8 +144,13 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
 int main(void) {
     @autoreleasepool {
         NSString *reportPath = nil;
+        BOOL spread = NO;
         NSArray<NSString *> *arguments = [NSProcessInfo processInfo].arguments;
         for (NSUInteger argumentIndex = 1; argumentIndex < arguments.count; argumentIndex += 1) {
+            if ([arguments[argumentIndex] isEqualToString:@"--spread"]) {
+                spread = YES;
+                continue;
+            }
             if (![arguments[argumentIndex] isEqualToString:@"--report"]) {
                 continue;
             }
@@ -148,6 +164,7 @@ int main(void) {
         NSApplication *application = [NSApplication sharedApplication];
         HuenFixtureDelegate *delegate = [[HuenFixtureDelegate alloc] init];
         delegate.reportPath = reportPath;
+        delegate.spread = spread;
         application.delegate = delegate;
         [application setActivationPolicy:NSApplicationActivationPolicyRegular];
         [application run];
