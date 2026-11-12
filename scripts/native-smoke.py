@@ -124,12 +124,12 @@ class NativeSmoke:
             raise RuntimeError(f"CLI rejected {arguments}: {response}")
         return response
 
-    def launch(self, application, label, *arguments):
+    def launch(self, application, label, *arguments, foreground=False):
         self.run_command(
             [
                 "open",
                 "-n",
-                "-g",
+                *([] if foreground else ["-g"]),
                 "-a",
                 application,
                 "--stdout",
@@ -246,7 +246,12 @@ class NativeSmoke:
                 if ready.stdout.strip() != "huen-smoke-ready":
                     raise RuntimeError("Cannot confirm AeroSpace CLI connection")
         self.launch(
-            self.arguments.fixture, "fixture", "--report", self.report_path, "--spread"
+            self.arguments.fixture,
+            "fixture",
+            "--report",
+            self.report_path,
+            "--spread",
+            foreground=True,
         )
         original = self.wait(
             "fixture ready",
@@ -414,7 +419,15 @@ class NativeSmoke:
             lambda status: not status.get("transition_pending"),
         )
         self.config(32)
-        self.cli("reload")
+        valid_reload = self.cli("reload")
+        self.wait(
+            "valid reload completes",
+            lambda: self.cli("status")["config_reload"],
+            lambda reload: (
+                reload["request_id"] == valid_reload["request_id"]
+                and reload["state"] == "ready"
+            ),
+        )
         reloaded = self.wait(
             "valid reload changes native gap",
             self.fixture,
@@ -427,13 +440,24 @@ class NativeSmoke:
             ),
         )
         self.config_path.write_text("return {gap='invalid'}\n")
-        self.cli("reload", required=False)
+        invalid_reload = self.cli("reload")
         self.wait(
-            "invalid reload completes",
-            lambda: self.cli("status"),
-            lambda status: not status.get("reload_pending", False),
+            "invalid reload fails",
+            lambda: self.cli("status")["config_reload"],
+            lambda reload: (
+                reload["request_id"] == invalid_reload["request_id"]
+                and reload["state"] == "failed"
+                and bool(reload["err_message"])
+            ),
         )
-        before_invalid_move = self.fixture()
+        before_invalid_move = self.wait(
+            "invalid reload preserves native frames",
+            self.fixture,
+            lambda report: all(
+                close_frame(frame, frames(reloaded)[title])
+                for title, frame in frames(report).items()
+            ),
+        )
         focused = key_title(before_invalid_move)
         if not focused:
             raise RuntimeError("Fixture lost native focus after workspace return")
