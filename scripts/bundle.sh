@@ -7,7 +7,7 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp zig-out/bin/huen-wm "$bundle/Contents/MacOS/huen-wm"
 cp native/Info.plist "$bundle/Contents/Info.plist"
 cp config/example.lua "$bundle/Contents/Resources/config.lua"
-codesign --force --sign - --identifier dev.huen-wm "$bundle"
+codesign --force --sign - --identifier dev.huen-wm --requirements '=designated => identifier "dev.huen-wm"' "$bundle"
 codesign --verify --strict "$bundle"
 if [ "${1:-}" = "--install" ]; then
 	mkdir -p "$HOME/Applications"
