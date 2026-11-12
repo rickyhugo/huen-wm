@@ -103,10 +103,12 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     CGSize extent = CGSizeMake(frame.width, frame.height);
     AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
     AXValueRef size = AXValueCreate(kAXValueCGSizeType, &extent);
+    // Move before resizing to avoid clamping at the old origin, then restore the origin after resizing.
+    AXError initialPositionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     AXError sizeResult = AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size);
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     CFRelease(position); CFRelease(size);
-    return positionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess;
+    return initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
 }
 
 static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
