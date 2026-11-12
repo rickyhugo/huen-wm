@@ -22,10 +22,15 @@ Pre-commit applies the same checks to staged files and stages Zig formatting fix
 hk preserves unstaged work with its default pre-commit stash behavior.
 
 The name checker rejects single-letter ASCII identifiers in Zig, Objective-C,
-Objective-C++, C headers, and Lua. This includes references, members, and function
+Objective-C++, C headers, and Lua. This includes bare references and function
 names, not only variable and parameter declarations. `_` remains valid.
+Names after `.` are allowed, including framework members such as `point.origin.x`
+and Zig enum literals such as `callconv(.c)`. C pointer members after `->` and Lua
+methods after `:` are also allowed. Whitespace and comments do not break member access.
+Member declarations still require descriptive names.
 The checker skips comments, string literals, character literals, Lua long strings,
-and Zig multiline strings. Zig quoted single-letter identifiers still fail.
+Zig multiline strings, and angle-bracket headers in `#include`, `#include_next`,
+and `#import` directives. Zig quoted single-letter identifiers follow the same rules.
 It is a lexical policy check, not a language parser or compiler.
 
 Vendor directories named `vendor`, `vendored`, `third_party`, or `third-party`
