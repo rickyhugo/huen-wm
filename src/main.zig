@@ -2,15 +2,17 @@ const std = @import("std");
 const native = @import("native.zig");
 const configuration = @import("config.zig");
 const commands = @import("command.zig");
+const tiling = @import("layout.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, workspace: usize = 0 };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
+var layouts: tiling.Store = .{};
 var windows: std.ArrayList(Window) = .empty;
 var displays: std.ArrayList(Display) = .empty;
 var focused: ?u64 = null;
@@ -139,6 +141,7 @@ export fn wm_initialize(path: [*:0]const u8) bool {
         native.platform_error(@errorName(err));
         return false;
     };
+    applyLayoutDefaults(&candidate);
     config = candidate;
     config_state = .ready;
     initialized = true;
@@ -178,6 +181,7 @@ export fn wm_config_poll() void {
         rejectConfig("HotkeyCollision");
         return;
     }
+    applyLayoutDefaults(&candidate);
     config = candidate;
     config_state = .ready;
     config_error = null;
@@ -193,6 +197,73 @@ fn cancelConfig() void {
     config_request.cancel();
     config_state = .failed;
     config_error = "ConfigLoadCancelled";
+}
+fn applyLayoutDefaults(candidate: *const Config) void {
+    var remap: [10]?usize = @splat(null);
+    var claimed: [10]bool = @splat(false);
+    for (config.workspaces[0..config.workspace_count], 0..) |*previous, old_index| {
+        for (candidate.workspaces[0..candidate.workspace_count], 0..) |*next, new_index| {
+            if (!claimed[new_index] and std.mem.eql(u8, text(&previous.name), text(&next.name))) {
+                remap[old_index] = new_index;
+                claimed[new_index] = true;
+                break;
+            }
+        }
+    }
+    for (&layouts.roots) |*slot| if (slot.*) |*state| {
+        const index = state.workspace;
+        const next_index = remap[index] orelse {
+            layouts.discard(state);
+            slot.* = null;
+            continue;
+        };
+        const previous = config.workspaces[index];
+        const next = candidate.workspaces[next_index];
+        state.workspace = next_index;
+        if (previous.layout != next.layout or previous.ratio != next.ratio) {
+            layouts.discard(state);
+            state.layout = next.layout;
+            state.ratio = next.ratio;
+        }
+    };
+    for (windows.items) |*window| window.workspace = remap[window.workspace] orelse @min(window.workspace, candidate.workspace_count - 1);
+    for (displays.items) |*display| display.workspace = remap[display.workspace] orelse @min(display.workspace, candidate.workspace_count - 1);
+}
+fn workspaceLayout(display: u32, workspace: usize) *tiling.WorkspaceLayout {
+    const defaults = config.workspaces[workspace];
+    return layouts.workspace(display, workspace, defaults.layout, defaults.ratio);
+}
+fn managedFullscreen(window: Window) bool {
+    const state = layouts.lookup(window.display, window.workspace) orelse return false;
+    return state.fullscreen == window.identity;
+}
+fn targetFrame(window: Window) Rect {
+    if (managedFullscreen(window)) {
+        if (displayIndex(window.display)) |index| return displays.items[index].frame;
+    }
+    return if (window.floating) window.floating_frame else window.goal;
+}
+fn resizeMaster(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
+    if (axis != .width) return error.MasterHeightResizeUnsupported;
+    const source = windows.items[source_index];
+    var master: ?u64 = null;
+    var count: usize = 0;
+    for (windows.items) |window| {
+        if (window.display != source.display or window.workspace != source.workspace or !visible(window) or window.floating) continue;
+        if (master == null) master = window.identity;
+        count += 1;
+    }
+    if (count < 2) return 0;
+    const state = workspaceLayout(source.display, source.workspace);
+    const display = displays.items[displayIndex(source.display) orelse return error.NoDisplays];
+    const area = inset(display.frame, config.gap);
+    const available = area.width - @min(config.gap, @max(0, area.width - 2));
+    if (available < 160) return 0;
+    const sign: f64 = if (master == source.identity) 1 else -1;
+    const previous = available * state.ratio;
+    const next = std.math.clamp(previous + sign * delta, 80, available - 80);
+    state.ratio = next / available;
+    return (next - previous) * sign;
 }
 fn displayIndex(identity: u32) ?usize {
     for (displays.items, 0..) |display, index| if (display.identity == identity) return index;
@@ -232,21 +303,6 @@ fn inset(frame: Rect, gap: f64) Rect {
     const padding = @min(gap, @max(0, (@min(frame.width, frame.height) - 1) / 2));
     return .{ .left = frame.left + padding, .top = frame.top + padding, .width = frame.width - 2 * padding, .height = frame.height - 2 * padding };
 }
-fn split(frame: Rect, horizontal: bool, ratio: f64, gap: f64) [2]Rect {
-    var first = frame;
-    var second = frame;
-    const spacing = @min(gap, @max(0, (if (horizontal) frame.width else frame.height) - 2));
-    if (horizontal) {
-        first.width = (frame.width - spacing) * ratio;
-        second.left += first.width + spacing;
-        second.width = frame.width - first.width - spacing;
-    } else {
-        first.height = (frame.height - spacing) * ratio;
-        second.top += first.height + spacing;
-        second.height = frame.height - first.height - spacing;
-    }
-    return .{ first, second };
-}
 fn boundedFloating(frame: Rect, area: Rect) Rect {
     var bounded = frame;
     bounded.width = @min(frame.width, area.width);
@@ -257,6 +313,11 @@ fn boundedFloating(frame: Rect, area: Rect) Rect {
 }
 
 fn floatRejectedTile(window: *Window) void {
+    if (managedFullscreen(window.*)) {
+        workspaceLayout(window.display, window.workspace).fullscreen = null;
+        placementFailure(window, "Application rejected managed fullscreen; underlying layout retained");
+        return;
+    }
     if (window.floating) return;
     const slot = displayIndex(window.display) orelse return;
     window.floating = true;
@@ -264,7 +325,38 @@ fn floatRejectedTile(window: *Window) void {
     placementFailure(window, "Application rejected tile; retrying with floating recovery geometry");
 }
 
-fn deriveGoals() void {
+fn deriveGoals() bool {
+    for (&layouts.roots) |*slot| if (slot.*) |*state| {
+        if (displayIndex(state.display) == null) {
+            layouts.discard(state);
+            slot.* = null;
+        }
+    };
+    for (displays.items) |display| {
+        for (0..config.workspace_count) |workspace| _ = workspaceLayout(display.identity, workspace);
+    }
+    var members: [1024]tiling.Member = undefined;
+    var member_count: usize = 0;
+    for (windows.items) |window| {
+        const display = displays.items[displayIndex(window.display) orelse continue];
+        members[member_count] = .{
+            .identity = window.identity,
+            .display = window.display,
+            .workspace = window.workspace,
+            .tiled = !window.floating,
+            .active = !window.observation.minimized and !window.observation.fullscreen and !window.observation.stale and (window.observation.onscreen or window.parked),
+            .area = inset(display.frame, config.gap),
+        };
+        member_count += 1;
+    }
+    layouts.sync(members[0..member_count], focused, config.gap) catch |err| {
+        transition_error = @errorName(err);
+        return false;
+    };
+    for (&layouts.roots) |*slot| if (slot.*) |*state| {
+        const display = displays.items[displayIndex(state.display) orelse continue];
+        layouts.arrange(state, inset(display.frame, config.gap), config.gap);
+    };
     for (displays.items) |display| {
         if (displayBlocked(display.identity)) continue;
         var indices: [1024]usize = undefined;
@@ -274,14 +366,14 @@ fn deriveGoals() void {
             count += 1;
         };
         if (count == 0) continue;
-        const workspace = config.workspaces[display.workspace];
+        const workspace = workspaceLayout(display.identity, display.workspace);
         const area = inset(display.frame, config.gap);
         if (count == 1) {
             windows.items[indices[0]].goal = area;
             continue;
         }
         if (workspace.layout == .master) {
-            const columns = split(area, true, workspace.ratio, config.gap);
+            const columns = tiling.split(area, .width, workspace.ratio, config.gap);
             windows.items[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
             const spacing = @min(config.gap, columns[1].height / (2 * rows));
@@ -293,26 +385,12 @@ fn deriveGoals() void {
                 windows.items[index].goal = frame;
             }
         } else {
-            var remaining = area;
-            for (indices[0..count], 0..) |index, position| {
-                if (position == count - 1) {
-                    windows.items[index].goal = remaining;
-                    break;
-                }
-                const halves = split(remaining, remaining.width >= remaining.height, if (position == 0) workspace.ratio else 0.5, config.gap);
-                windows.items[index].goal = halves[0];
-                remaining = halves[1];
+            for (indices[0..count]) |index| {
+                if (layouts.goal(windows.items[index].identity)) |frame| windows.items[index].goal = frame;
             }
         }
     }
-    for (windows.items) |*window| {
-        if (visible(window.*) and !window.floating and (window.goal.width < 80 or window.goal.height < 80)) {
-            window.floating = true;
-            window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
-            window.goal = window.floating_frame;
-            placementFailure(window, "Tile too crowded; window left floating");
-        }
-    }
+    return true;
 }
 
 fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
@@ -444,23 +522,37 @@ fn parkWindow(window: *Window) PlacementOutcome {
 
 fn reconcile() void {
     if (suspended or transition != null or displays.items.len == 0) return;
-    deriveGoals();
+    if (!deriveGoals()) return;
+    for (windows.items) |*window| {
+        if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < 80 or window.goal.height < 80)) {
+            window.floating = true;
+            window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
+            window.goal = window.floating_frame;
+            placementFailure(window, "Tile too crowded; window left floating");
+        }
+    }
     for (windows.items) |*window| {
         if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
         if (!visible(window.*)) {
             _ = parkWindow(window);
         } else {
-            const target = if (window.floating) window.floating_frame else window.goal;
+            const target = targetFrame(window.*);
             const actual = window.observation.frame;
             if (window.parked) {
                 const outcome = placeVisibility(window, target, false);
                 if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             } else {
-                const applied = native.platform_frame(window.identity, target, config.duration, .visible_goal);
+                const duration = if (window.floating_restore and !managedFullscreen(window.*)) 0 else config.duration;
+                const applied = native.platform_frame(window.identity, target, duration, .visible_goal);
                 var accepted: Rect = actual;
-                const rejected = !applied or (config.duration == 0 and (!native.platform_read_frame(window.identity, &accepted) or !framesNear(accepted, target, 2)));
+                const rejected = !applied or (duration == 0 and (!native.platform_read_frame(window.identity, &accepted) or !framesNear(accepted, target, 2)));
                 if (rejected) {
+                    if (managedFullscreen(window.*)) {
+                        floatRejectedTile(window);
+                        continue;
+                    }
                     window.floating = true;
+                    window.floating_restore = false;
                     if (!native.platform_read_frame(window.identity, &accepted)) accepted = actual;
                     window.floating_frame = accepted;
                     placementFailure(window, "Application rejected layout geometry; window left floating");
@@ -503,8 +595,13 @@ export fn wm_tick() void {
                 window.floating_frame = boundedFloating(window.floating_frame, area);
                 window.parking_frame = boundedFloating(window.parking_frame, area);
                 if (!suspended and transition == null and window.floating and !window.parked and observation.onscreen) _ = placeVisibility(window, window.floating_frame, false);
-            } else if (transition == null and window.floating and !window.parked and !observation.stale) window.floating_frame = observation.frame;
+            } else if (transition == null and window.floating and !managedFullscreen(window.*) and !window.parked and !observation.stale) {
+                if (window.floating_restore) {
+                    if (framesNear(observation.frame, window.floating_frame, 2)) window.floating_restore = false;
+                } else window.floating_frame = observation.frame;
+            }
         } else {
+            if (windows.items.len == 1024) continue;
             const display = nearestDisplay(observation.frame);
             const displaySlot = displayIndex(display).?;
             var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = displays.items[displaySlot].workspace, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
@@ -572,25 +669,29 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
     var placements: [1024]Placement = undefined;
     var count: usize = 0;
     displays.items[displaySlot].workspace = workspace;
-    deriveGoals();
+    if (!deriveGoals()) {
+        displays.items[displaySlot].workspace = previousWorkspace;
+        _ = deriveGoals();
+        return false;
+    }
     for (windows.items, 0..) |window, index| {
         if (window.display != displayIdentity or window.observation.minimized or window.observation.fullscreen) continue;
         if (!window.observation.onscreen and !window.parked) continue;
         if (window.observation.stale or count == placements.len) {
             displays.items[displaySlot].workspace = previousWorkspace;
-            deriveGoals();
+            _ = deriveGoals();
             placementFailure(&windows.items[index], "Workspace snapshot contains a stale or excess window");
             return false;
         }
         var original: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &original)) {
             displays.items[displaySlot].workspace = previousWorkspace;
-            deriveGoals();
+            _ = deriveGoals();
             placementFailure(&windows.items[index], "Workspace geometry could not be read");
             return false;
         }
         const parked = window.workspace != workspace;
-        const target = if (window.floating) window.floating_frame else window.goal;
+        const target = targetFrame(window);
         placements[count] = .{ .index = index, .original = original, .target = target, .parked = parked, .previously_parked = window.parked, .parking_frame = window.parking_frame };
         count += 1;
     }
@@ -607,15 +708,17 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
             }
             if (!placement.parked and outcome != .unreadable) floatRejectedTile(&windows.items[placement.index]);
             displays.items[displaySlot].workspace = previousWorkspace;
-            deriveGoals();
+            _ = deriveGoals();
             transition_error = "Workspace placement rejected. Rollback attempted; inspect per-window errors and retry restore if needed.";
             return false;
         }
     }
+    const winner = workspaceLayout(displayIdentity, workspace).fullscreen;
+    var focus_target: ?u64 = null;
     for (windows.items) |window| if (window.display == displayIdentity and visible(window)) {
-        native.platform_focus(window.identity);
-        break;
+        if (focus_target == null or winner == window.identity) focus_target = window.identity;
     };
+    if (focus_target) |identity| native.platform_focus(identity);
     transition_error = null;
     native.platform_config_changed();
     return true;
@@ -640,10 +743,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     switch (command) {
         .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
-            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error }) catch return failure("OutOfMemory");
+            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error }) catch return failure("OutOfMemory");
             return json(items.items);
         },
         .monitors => {
@@ -658,7 +761,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
             for (displays.items) |display| for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
-                items.append(allocator, .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .layout = workspace.layout }) catch return failure("OutOfMemory");
+                const layout = if (layouts.lookup(display.identity, index)) |state| state.layout else workspace.layout;
+                items.append(allocator, .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .layout = layout }) catch return failure("OutOfMemory");
             };
             return json(items.items);
         },
@@ -708,21 +812,52 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             native.huen_scene_begin(display.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
             return json(.{ .ok = true, .accepted = true, .generation = generation });
         },
-        .layout => |layout| config.workspaces[display.workspace].layout = layout,
-        .resize => |delta| config.workspaces[display.workspace].ratio = std.math.clamp(config.workspaces[display.workspace].ratio + delta, 0.1, 0.9),
+        .layout => |layout| workspaceLayout(display.identity, display.workspace).layout = layout,
+        .resize => |delta| layouts.adjustRatio(workspaceLayout(display.identity, display.workspace), delta),
         else => {
             const sourceIndex = windowIndex(focused orelse return failure("NoFocusedWindow")) orelse return failure("NoFocusedWindow");
+            const source = &windows.items[sourceIndex];
+            if (!visible(source.*)) return failure("FocusedWindowNotManaged");
             switch (command) {
+                .split => |orientation| {
+                    const state = workspaceLayout(source.display, source.workspace);
+                    if (state.layout != .dwindle) return failure("SplitRequiresDwindle");
+                    if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
+                    layouts.orient(source.identity, orientation) catch |err| return failure(@errorName(err));
+                },
+                .resize_points => |resize| {
+                    if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
+                    if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                    const state = workspaceLayout(source.display, source.workspace);
+                    const applied = if (state.layout == .dwindle)
+                        layouts.resizePoints(source.identity, resize.axis, resize.delta, config.gap) catch |err| return failure(@errorName(err))
+                    else
+                        resizeMaster(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
+                    reconcile();
+                    native.platform_config_changed();
+                    return json(.{ .ok = true, .applied_delta = applied });
+                },
+                .fullscreen => {
+                    const state = workspaceLayout(source.display, source.workspace);
+                    if (source.floating) source.floating_restore = true;
+                    state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
+                    native.platform_focus(source.identity);
+                },
                 .toggle_floating => {
+                    if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
                     var window = &windows.items[sourceIndex];
                     window.floating = !window.floating;
                     window.floating_frame = window.observation.frame;
                 },
                 .send_to_workspace => |workspace| {
+                    const previous_layouts = layouts;
                     const previous = windows.items[sourceIndex].workspace;
+                    if (workspace == previous) return json(.{ .ok = true });
                     windows.items[sourceIndex].workspace = workspace;
                     if (!commitWorkspace(displaySlot, display.workspace)) {
                         windows.items[sourceIndex].workspace = previous;
+                        layouts = previous_layouts;
+                        _ = deriveGoals();
                         return failure(transition_error orelse "WorkspacePlacementFailed");
                     }
                 },
@@ -732,6 +867,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 },
                 .swap => |direction| {
                     const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
+                    layouts.swap(windows.items[sourceIndex].identity, windows.items[target].identity);
+                    if (managedFullscreen(windows.items[sourceIndex])) workspaceLayout(windows.items[sourceIndex].display, windows.items[sourceIndex].workspace).fullscreen = null;
+                    if (managedFullscreen(windows.items[target])) workspaceLayout(windows.items[target].display, windows.items[target].workspace).fullscreen = null;
                     const sourceDisplay = windows.items[sourceIndex].display;
                     const sourceWorkspace = windows.items[sourceIndex].workspace;
                     windows.items[sourceIndex].display = windows.items[target].display;
@@ -741,6 +879,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     std.mem.swap(Window, &windows.items[sourceIndex], &windows.items[target]);
                 },
                 .move => |direction| {
+                    if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
                     var window = &windows.items[sourceIndex];
                     if (!window.floating) {
                         if (!native.platform_read_frame(window.identity, &window.floating_frame)) return failure("WindowGeometryUnavailable");
