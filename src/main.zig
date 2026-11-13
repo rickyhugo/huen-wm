@@ -242,7 +242,16 @@ fn pollPointer() void {
             interaction.huen_groups_preview(null);
             continue;
         } orelse continue;
-        const transaction = PlacementTransaction.begin() catch |err| {
+        const reference_value = switch (edit) {
+            .group => |selection| selection.group,
+            .drop => |preview| preview.source,
+            .resize => |preview| preview.boundary.node,
+        };
+        const edit_state = stateForNode(reference_value) catch |err| {
+            pointer_controls.error_message = @errorName(err);
+            continue;
+        };
+        const transaction = PlacementTransaction.begin(.{ .display = edit_state.display }) catch |err| {
             pointer_controls.error_message = @errorName(err);
             continue;
         };
@@ -586,13 +595,27 @@ fn ownerActivation(owner: ?u32) ?Routing.Activation {
 }
 
 const PlacementTransaction = struct {
+    const Scope = union(enum) {
+        all,
+        display: u32,
+        pair: [2]u32,
+
+        fn contains(self: Scope, display: u32) bool {
+            return switch (self) {
+                .all => true,
+                .display => |identity| identity == display,
+                .pair => |identities| identities[0] == display or identities[1] == display,
+            };
+        }
+    };
+
     store: *tiling.Store,
     intent: []Window,
     screens: []Display,
     originals: []?Rect,
     selected: ?u32,
 
-    fn begin() !PlacementTransaction {
+    fn begin(scope: Scope) !PlacementTransaction {
         const store = try allocator.create(tiling.Store);
         errdefer allocator.destroy(store);
         store.* = layouts;
@@ -604,8 +627,10 @@ const PlacementTransaction = struct {
         errdefer allocator.free(originals);
         for (windows.items, 0..) |window, index| {
             originals[index] = null;
-            if (!externallyEligible(window)) continue;
+            if (!scope.contains(window.display)) continue;
             if (displayBlocked(window.display)) return error.NativeFullscreenBlocksPlacement;
+            if (window.observation.stale and (window.observation.onscreen or window.parked)) return error.StaleWindowBlocksPlacement;
+            if (!externallyEligible(window)) continue;
             var frame: Rect = undefined;
             if (!native.platform_read_frame(window.identity, &frame)) return error.PlacementSnapshotUnreadable;
             originals[index] = frame;
@@ -664,7 +689,7 @@ const PlacementTransaction = struct {
 };
 
 fn commitRouting(request: Routing) bool {
-    const transaction = PlacementTransaction.begin() catch |err| {
+    const transaction = PlacementTransaction.begin(.all) catch |err| {
         transition_error = @errorName(err);
         return false;
     };
@@ -1256,7 +1281,7 @@ fn focusWorkspace(displayIdentity: u32) void {
     if (target) |identity| {
         const window = windows.items[windowIndex(identity) orelse return];
         if (!visible(window) or window.parked) {
-            const transaction = PlacementTransaction.begin() catch |err| {
+            const transaction = PlacementTransaction.begin(.{ .display = displayIdentity }) catch |err| {
                 transition_error = @errorName(err);
                 return;
             };
@@ -1279,7 +1304,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         transition_error = "Native fullscreen window blocks this display";
         return false;
     }
-    const transaction = PlacementTransaction.begin() catch |err| {
+    const transaction = PlacementTransaction.begin(.{ .display = displayIdentity }) catch |err| {
         transition_error = @errorName(err);
         return false;
     };
@@ -1485,7 +1510,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true, .generation = generation });
         },
         .layout => |layout| {
-            const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+            const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));
             defer transaction.deinit();
             workspaceLayout(display.identity, display.workspace).layout = layout;
             if (!transaction.commit()) return failure(transition_error orelse "LayoutPlacementFailed");
@@ -1506,7 +1531,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 },
                 .tilemove, .group => {
                     if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
-                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    const transaction = PlacementTransaction.begin(.{ .display = source.display }) catch |err| return failure(@errorName(err));
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
                     var target: ?u64 = null;
@@ -1545,10 +1570,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     return json(.{ .ok = true, .applied_delta = applied });
                 },
                 .fullscreen => {
-                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    const transaction = PlacementTransaction.begin(.{ .display = source.display }) catch |err| return failure(@errorName(err));
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
-                    if (!source.floating) layouts.reveal(state, source.identity) catch |err| return failure(@errorName(err));
+                    if (!source.floating) layouts.reveal(state, source.identity) catch |err| {
+                        transaction.rollback(0);
+                        return failure(@errorName(err));
+                    };
                     if (source.floating) source.floating_restore = true;
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
                     if (!transaction.commit()) return failure(transition_error orelse "FullscreenPlacementFailed");
@@ -1593,7 +1621,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .swap => |direction| {
                     const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
                     const identity = source.identity;
-                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    const transaction = PlacementTransaction.begin(.{ .pair = .{ source.display, windows.items[target].display } }) catch |err| return failure(@errorName(err));
                     defer transaction.deinit();
                     layouts.swap(windows.items[sourceIndex].identity, windows.items[target].identity);
                     if (managedFullscreen(windows.items[sourceIndex])) workspaceLayout(windows.items[sourceIndex].display, windows.items[sourceIndex].workspace).fullscreen = null;
