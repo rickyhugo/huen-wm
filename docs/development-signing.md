@@ -23,8 +23,8 @@ Do not edit the TCC database or attempt to reuse the old hash-based grant.
 Local verification confirmed that two temporary bundles with different executable bytes had identical designated requirements.
 Both passed strict signature verification against `identifier "dev.huen-wm"`.
 A check against a different identifier failed.
-These checks prove code identity stability, not TCC permission persistence.
-Accessibility and Screen Recording grants still require native verification across an installed rebuild after manual approval.
+These checks prove code identity stability. Subsequent native runs on November 12 and 13, 2026 also confirmed that Accessibility and Screen Recording grants survived installed rebuilds after manual approval.
+An obsolete hash-based Accessibility entry required removal and re-addition before the grant worked.
 
 ## Security limits
 

@@ -27,9 +27,9 @@ Use a broad integration smoke check where needed. Do not add unit tests.
 - [x] Compare two independent architecture proposals against the macOS API constraints.
 - [x] Establish pinned development tools and quick hooks.
 - [x] Implement the native window manager against the selected model.
-- [ ] Exercise the executable and inspect the resulting window state.
-- [ ] Independently review the implementation and resolve demonstrated defects.
-- [ ] Commit the verified work and document remaining platform limits.
+- [x] Exercise the executable and inspect the resulting window state.
+- [x] Independently review the implementation and resolve demonstrated defects.
+- [x] Commit the verified work and document remaining platform limits.
 
 ## Throughput checkpoint
 
@@ -106,6 +106,8 @@ Scene smoothness, capture timing, and parking remain unverified until native exe
 - `mise exec -- hk install --mise` installed the repository-local pre-commit hook through Git configuration.
 - Headless smoke covers isolated Lua evaluation, malformed configuration, and invalid or truncated IPC replies.
 - Native fixture checks passed tiling, focus, 40-point movement, floating return, and layout changes on both one-display and two-display setups.
-- Native readback confirmed that far-offscreen parking is clamped even when AX setters return success. Corner parking is under implementation.
-- Full restoration, native reload, and scene assertions remain blocked behind workspace verification.
+- Native readback confirmed that far-offscreen parking is clamped even when AX setters return success. Corner parking now verifies a narrow strip and full physical display isolation.
+- Full native fixture flows passed on one display with instant switching and with scenes enabled. Both completed 22 checks, including workspace return, automatic reload failure retention, and original-frame restoration.
+- The final scene run also required `captured` outcomes from the native callback for both workspace transitions. Both passed. This does not prove visual quality.
 - Native cleanup stopped the owned manager and fixture and restored AeroSpace without reported errors.
+- Final independent source review found no further defects in corner fallback, recovery ownership, IPC handling, or scene generation checks. Final multi-display behavior and visual appearance remain unverified.

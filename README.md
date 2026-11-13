@@ -2,7 +2,7 @@
 
 A native macOS tiling window manager with Hyprland-inspired dwindle, master layout, Lua configuration, keyboard control, focused-window borders, and workspace snapshots. Requires macOS 14 or later and Zig **exactly 0.17.0**. SIP stays enabled.
 
-Headless smoke checks cover configuration and CLI boundaries. Disposable native windows verified tiling, focus, movement, and layout changes. Workspace parking currently fails native readback. Global hotkeys, borders, and workspace scenes remain unverified.
+Headless smoke checks cover configuration and CLI boundaries. Native fixture checks pass tiling, focus, movement, workspace parking and return, automatic reload, and original-frame restoration. Global hotkeys, border appearance, and scene appearance remain unverified.
 
 ## Build
 
