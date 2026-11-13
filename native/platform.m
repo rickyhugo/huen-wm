@@ -254,10 +254,17 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration) {
         WMRect priorTarget = record.target;
         if (duration > 0 && record.rejectedTarget && framesNear(priorTarget, frame, 2)) return false;
         if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.animationDuration > 0) return true;
+        WMRect current;
+        if (!readFrame(record.element, &current)) return false;
+        if (framesNear(current, frame, duration > 0 ? 2 : 0)) {
+            record.animationDuration = 0;
+            record.rejectedTarget = NO;
+            record.target = frame;
+            return canMove(record);
+        }
         record.rejectedTarget = NO;
         record.target = frame; record.changed = YES;
         if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame); }
-        WMRect current = record.observation.frame; readFrame(record.element, &current);
         record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration;
         return true;
     }

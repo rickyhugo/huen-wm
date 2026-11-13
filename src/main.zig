@@ -455,7 +455,7 @@ fn reconcile() void {
             if (window.parked) {
                 const outcome = placeVisibility(window, target, false);
                 if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
-            } else if (!framesNear(actual, target, 2)) {
+            } else {
                 const applied = native.platform_frame(window.identity, target, config.duration);
                 var accepted: Rect = actual;
                 const rejected = !applied or (config.duration == 0 and (!native.platform_read_frame(window.identity, &accepted) or !framesNear(accepted, target, 2)));
