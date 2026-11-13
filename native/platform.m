@@ -99,8 +99,9 @@ static BOOL canMove(WindowRecord *record) {
 
 static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     if (!canMove(record)) return NO;
-    WMRect current;
-    BOOL resizeNeeded = !readFrame(record.element, &current) || current.width != frame.width || current.height != frame.height;
+    WMRect current = {0};
+    BOOL priorReadable = readFrame(record.element, &current);
+    BOOL resizeNeeded = !priorReadable || current.width != frame.width || current.height != frame.height;
     CGPoint origin = CGPointMake(frame.left, frame.top);
     CGSize extent = CGSizeMake(frame.width, frame.height);
     AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
@@ -111,6 +112,23 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     CFRelease(position); CFRelease(size);
+    if (record.animationDuration <= 0) {
+        static unsigned debugFailures;
+        if (debugFailures < 32) {
+            WMRect actual = {0};
+            BOOL actualReadable = readFrame(record.element, &actual);
+            BOOL nearTarget = actualReadable && fabs(actual.left - frame.left) <= 2 && fabs(actual.top - frame.top) <= 2 && fabs(actual.width - frame.width) <= 2 && fabs(actual.height - frame.height) <= 2;
+            if (!nearTarget || initialPositionResult != kAXErrorSuccess || sizeResult != kAXErrorSuccess || positionResult != kAXErrorSuccess) {
+                debugFailures++;
+                fprintf(stderr, "[DEBUG-parking] native-write identity=%llu pid=%d prior_readable=%d prior=[%.3f,%.3f,%.3f,%.3f] desired=[%.3f,%.3f,%.3f,%.3f] actual_readable=%d actual=[%.3f,%.3f,%.3f,%.3f] resize_needed=%d ax_position_first=%d ax_size=%d ax_position_last=%d failure=%u/32\n",
+                        (unsigned long long)record.observation.identity, record.observation.pid,
+                        priorReadable, current.left, current.top, current.width, current.height,
+                        frame.left, frame.top, frame.width, frame.height,
+                        actualReadable, actual.left, actual.top, actual.width, actual.height,
+                        resizeNeeded, initialPositionResult, sizeResult, positionResult, debugFailures);
+            }
+        }
+    }
     return initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
 }
 

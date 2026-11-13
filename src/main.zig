@@ -241,10 +241,21 @@ fn placementFailure(window: *Window, message: []const u8) void {
     native.platform_error(&buffer);
 }
 
+var debug_verification_failures: u32 = 0;
+
 fn verifiedFrame(identity: u64, target: Rect) bool {
-    _ = native.platform_frame(identity, target, 0);
-    var actual: Rect = undefined;
-    return native.platform_read_frame(identity, &actual) and framesNear(actual, target, 2);
+    const write_result = native.platform_frame(identity, target, 0);
+    var actual: Rect = std.mem.zeroes(Rect);
+    const readable = native.platform_read_frame(identity, &actual);
+    const verified = readable and framesNear(actual, target, 2);
+    if (!verified and debug_verification_failures < 32) {
+        debug_verification_failures += 1;
+        std.debug.print("[DEBUG-parking] verified-frame identity={d} write_result={} desired=[{d:.3},{d:.3},{d:.3},{d:.3}] actual_readable={} actual=[{d:.3},{d:.3},{d:.3},{d:.3}] failure={d}/32\n", .{
+            identity, write_result, target.left, target.top,   target.width,  target.height,
+            readable, actual.left,  actual.top,  actual.width, actual.height, debug_verification_failures,
+        });
+    }
+    return verified;
 }
 
 const PlacementOutcome = enum { applied, rolled_back, recovery_required, unreadable };
