@@ -341,19 +341,86 @@ fn ownerActivation(owner: ?u32) ?Routing.Activation {
     return .{ .display = destination, .workspace = workspace };
 }
 
+const PlacementTransaction = struct {
+    store: *tiling.Store,
+    intent: []Window,
+    screens: []Display,
+    originals: []?Rect,
+    selected: ?u32,
+
+    fn begin() !PlacementTransaction {
+        const store = try allocator.create(tiling.Store);
+        errdefer allocator.destroy(store);
+        store.* = layouts;
+        const intent = try allocator.dupe(Window, windows.items);
+        errdefer allocator.free(intent);
+        const screens = try allocator.dupe(Display, displays.items);
+        errdefer allocator.free(screens);
+        const originals = try allocator.alloc(?Rect, windows.items.len);
+        errdefer allocator.free(originals);
+        for (windows.items, 0..) |window, index| {
+            originals[index] = null;
+            if (!externallyEligible(window)) continue;
+            if (displayBlocked(window.display)) return error.NativeFullscreenBlocksPlacement;
+            var frame: Rect = undefined;
+            if (!native.platform_read_frame(window.identity, &frame)) return error.PlacementSnapshotUnreadable;
+            originals[index] = frame;
+        }
+        return .{ .store = store, .intent = intent, .screens = screens, .originals = originals, .selected = selected_display };
+    }
+
+    fn deinit(self: PlacementTransaction) void {
+        allocator.destroy(self.store);
+        allocator.free(self.intent);
+        allocator.free(self.screens);
+        allocator.free(self.originals);
+    }
+
+    fn rollback(self: PlacementTransaction, attempted: usize) void {
+        var remaining = attempted;
+        while (remaining > 0) {
+            remaining -= 1;
+            const original = self.originals[remaining] orelse continue;
+            const restored = verifiedFrame(windows.items[remaining].identity, original, null);
+            if (!restored) {
+                if (!self.intent[remaining].parked) self.intent[remaining].parking_frame = original;
+                self.intent[remaining].parked = true;
+                self.intent[remaining].placement_error = "Placement rollback rejected; recovery ownership retained";
+            }
+        }
+        layouts = self.store.*;
+        @memcpy(windows.items, self.intent);
+        @memcpy(displays.items, self.screens);
+        selected_display = self.selected;
+    }
+
+    fn commit(self: PlacementTransaction) bool {
+        if (!deriveGoals()) {
+            self.rollback(0);
+            return false;
+        }
+        for (windows.items, 0..) |*window, index| {
+            if (self.originals[index] == null) continue;
+            const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
+            if (outcome == .applied) continue;
+            self.rollback(index + 1);
+            transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
+            return false;
+        }
+        transition_error = null;
+        return true;
+    }
+};
+
 fn commitRouting(request: Routing) bool {
-    transition_error = "Routing snapshot allocation failed";
-    const previous_layouts = allocator.create(tiling.Store) catch return false;
-    defer allocator.destroy(previous_layouts);
-    previous_layouts.* = layouts;
-    const previous_windows = allocator.dupe(Window, windows.items) catch return false;
-    defer allocator.free(previous_windows);
-    const previous_displays = allocator.dupe(Display, displays.items) catch return false;
-    defer allocator.free(previous_displays);
+    const transaction = PlacementTransaction.begin() catch |err| {
+        transition_error = @errorName(err);
+        return false;
+    };
+    defer transaction.deinit();
     const Placement = struct { original: ?Rect = null, destination: u32 };
     const placements = allocator.alloc(Placement, windows.items.len) catch return false;
     defer allocator.free(placements);
-    const previous_selected = selected_display;
     if (request.activate) |activation| if (displayBlocked(activation.display)) {
         transition_error = "Native fullscreen window blocks routing destination";
         return false;
@@ -408,44 +475,8 @@ fn commitRouting(request: Routing) bool {
             window.parking_frame = boundedFloating(window.parking_frame, area);
         }
     }
-    if (!deriveGoals()) {
-        layouts = previous_layouts.*;
-        @memcpy(windows.items, previous_windows);
-        @memcpy(displays.items, previous_displays);
-        selected_display = previous_selected;
-        return false;
-    }
-    for (windows.items, 0..) |*window, index| {
-        if (placements[index].original == null) continue;
-        const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
-        if (outcome == .applied) continue;
-        const placement_error = window.placement_error;
-        var recovered = true;
-        for (windows.items[0 .. index + 1], 0..) |*rollback, rollback_index| {
-            const original = placements[rollback_index].original orelse {
-                rollback.* = previous_windows[rollback_index];
-                continue;
-            };
-            const restored = verifiedFrame(rollback.identity, original, null);
-            rollback.* = previous_windows[rollback_index];
-            if (!restored) {
-                rollback.parked = true;
-                if (!previous_windows[rollback_index].parked) rollback.parking_frame = original;
-                placementFailure(rollback, "Routing rollback rejected; recovery ownership retained");
-                recovered = false;
-            } else if (rollback_index == index) {
-                rollback.placement_error = placement_error;
-            }
-        }
-        @memcpy(windows.items[index + 1 ..], previous_windows[index + 1 ..]);
-        @memcpy(displays.items, previous_displays);
-        selected_display = previous_selected;
-        layouts = previous_layouts.*;
-        transition_error = if (recovered) "Routing placement rejected; prior geometry restored" else "Routing placement and rollback rejected; recovery ownership retained";
-        return false;
-    }
-    transition_error = null;
-    return true;
+    if (request.send) |send| layouts.forgetIdentity(windows.items[send.index].identity);
+    return transaction.commit();
 }
 
 fn routeMembership() bool {
@@ -481,8 +512,38 @@ fn nearestDisplay(frame: Rect) u32 {
     return identity;
 }
 fn visible(window: Window) bool {
+    if (!externallyEligible(window)) return false;
+    if (!window.floating and layouts.visibility(window.identity) == .hidden_by_group) return false;
     const index = displayIndex(window.display) orelse return false;
-    return window.workspace == displays.items[index].workspace and !window.observation.minimized and !window.observation.fullscreen and !window.observation.stale and (window.observation.onscreen or window.parked);
+    return window.workspace == displays.items[index].workspace;
+}
+fn externallyEligible(window: Window) bool {
+    return !window.observation.minimized and !window.observation.fullscreen and !window.observation.stale and (window.observation.onscreen or window.parked);
+}
+fn layoutMembers(output: []tiling.Member) []tiling.Member {
+    var count: usize = 0;
+    for (windows.items) |window| {
+        const display = displays.items[displayIndex(window.display) orelse continue];
+        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap) };
+        count += 1;
+    }
+    return output[0..count];
+}
+fn rememberFocus(identity: u64) void {
+    const index = windowIndex(identity) orelse return;
+    const window = windows.items[index];
+    var members: [1024]tiling.Member = undefined;
+    layouts.rememberFocus(workspaceLayout(window.display, window.workspace), identity, layoutMembers(&members)) catch |err| {
+        transition_error = @errorName(err);
+    };
+}
+fn focusVerified(identity: u64) bool {
+    if (!native.platform_focus(identity) or native.platform_focused_window() != identity) return false;
+    focused = identity;
+    last_observed_focus = identity;
+    rememberFocus(identity);
+    if (windowIndex(identity)) |index| selectDisplay(windows.items[index].display);
+    return true;
 }
 fn displayBlocked(identity: u32) bool {
     for (windows.items) |window| if (window.display == identity and window.observation.fullscreen) return true;
@@ -525,20 +586,7 @@ fn deriveGoals() bool {
         for (0..config.workspace_count) |workspace| _ = workspaceLayout(display.identity, workspace);
     }
     var members: [1024]tiling.Member = undefined;
-    var member_count: usize = 0;
-    for (windows.items) |window| {
-        const display = displays.items[displayIndex(window.display) orelse continue];
-        members[member_count] = .{
-            .identity = window.identity,
-            .display = window.display,
-            .workspace = window.workspace,
-            .tiled = !window.floating,
-            .active = !window.observation.minimized and !window.observation.fullscreen and !window.observation.stale and (window.observation.onscreen or window.parked),
-            .area = inset(display.frame, config.gap),
-        };
-        member_count += 1;
-    }
-    layouts.sync(members[0..member_count], focused, config.gap) catch |err| {
+    layouts.sync(layoutMembers(&members), focused, config.gap) catch |err| {
         transition_error = @errorName(err);
         return false;
     };
@@ -837,12 +885,16 @@ export fn wm_tick() void {
             found = true;
             break;
         };
-        if (!found) _ = windows.orderedRemove(index) else index += 1;
+        if (!found) {
+            layouts.forgetIdentity(windows.items[index].identity);
+            _ = windows.orderedRemove(index);
+        } else index += 1;
     }
     routing_blocked = if (!suspended and transition == null) !routeMembership() else routing_blocked;
     focused = observed_focus;
     if (observed_focus != last_observed_focus) {
         if (observed_focus) |identity| if (windowIndex(identity)) |slot| {
+            rememberFocus(identity);
             if (displayIndex(windows.items[slot].display) != null) selectDisplay(windows.items[slot].display);
         };
         last_observed_focus = observed_focus;
@@ -940,75 +992,48 @@ fn refreshObservations() void {
 fn focusWorkspace(displayIdentity: u32) void {
     refreshObservations();
     const index = displayIndex(displayIdentity) orelse return;
-    const winner = workspaceLayout(displayIdentity, displays.items[index].workspace).fullscreen;
-    var target: ?u64 = null;
-    for (windows.items) |window| if (window.display == displayIdentity and visible(window) and !window.parked) {
-        if (target == null or winner == window.identity) target = window.identity;
-    };
+    const state = workspaceLayout(displayIdentity, displays.items[index].workspace);
+    var members: [1024]tiling.Member = undefined;
+    const target = layouts.focusCandidate(state, layoutMembers(&members));
     if (target) |identity| {
-        if (!native.platform_focus(identity)) return;
-        if (native.platform_focused_window() != identity) return;
-        focused = identity;
-        last_observed_focus = identity;
+        const transaction = PlacementTransaction.begin() catch |err| {
+            transition_error = @errorName(err);
+            return;
+        };
+        defer transaction.deinit();
+        if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
+            transaction.rollback(0);
+            transition_error = @errorName(err);
+            return;
+        };
+        if (!transaction.commit()) return;
+        if (!focusVerified(identity)) return;
     }
     selectDisplay(displayIdentity);
 }
 
 fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
-    const previousWorkspace = displays.items[displaySlot].workspace;
     const displayIdentity = displays.items[displaySlot].identity;
     if (displayBlocked(displayIdentity)) {
         transition_error = "Native fullscreen window blocks this display";
         return false;
     }
-    const Placement = struct { index: usize, original: Rect, target: Rect, parked: bool, previously_parked: bool, parking_frame: Rect };
-    var placements: [1024]Placement = undefined;
-    var count: usize = 0;
-    displays.items[displaySlot].workspace = workspace;
-    if (!deriveGoals()) {
-        displays.items[displaySlot].workspace = previousWorkspace;
-        _ = deriveGoals();
+    const transaction = PlacementTransaction.begin() catch |err| {
+        transition_error = @errorName(err);
         return false;
-    }
-    for (windows.items, 0..) |window, index| {
-        if (window.display != displayIdentity or window.observation.minimized or window.observation.fullscreen) continue;
-        if (!window.observation.onscreen and !window.parked) continue;
-        if (window.observation.stale or count == placements.len) {
-            displays.items[displaySlot].workspace = previousWorkspace;
-            _ = deriveGoals();
-            placementFailure(&windows.items[index], "Workspace snapshot contains a stale or excess window");
+    };
+    defer transaction.deinit();
+    displays.items[displaySlot].workspace = workspace;
+    var members: [1024]tiling.Member = undefined;
+    const state = workspaceLayout(displayIdentity, workspace);
+    if (layouts.focusCandidate(state, layoutMembers(&members))) |identity| {
+        if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
+            transaction.rollback(0);
+            transition_error = @errorName(err);
             return false;
-        }
-        var original: Rect = undefined;
-        if (!native.platform_read_frame(window.identity, &original)) {
-            displays.items[displaySlot].workspace = previousWorkspace;
-            _ = deriveGoals();
-            placementFailure(&windows.items[index], "Workspace geometry could not be read");
-            return false;
-        }
-        const parked = window.workspace != workspace;
-        const target = targetFrame(window);
-        placements[count] = .{ .index = index, .original = original, .target = target, .parked = parked, .previously_parked = window.parked, .parking_frame = window.parking_frame };
-        count += 1;
+        };
     }
-    for (placements[0..count], 0..) |placement, position| {
-        const outcome = if (placement.parked)
-            parkWindow(&windows.items[placement.index])
-        else
-            placeVisibility(&windows.items[placement.index], placement.target, false);
-        if (outcome != .applied) {
-            for (placements[0..position]) |rollback| {
-                var window = &windows.items[rollback.index];
-                _ = placeVisibility(window, rollback.original, rollback.previously_parked);
-                if (rollback.previously_parked) window.parking_frame = rollback.parking_frame;
-            }
-            if (!placement.parked and outcome != .unreadable) floatRejectedTile(&windows.items[placement.index]);
-            displays.items[displaySlot].workspace = previousWorkspace;
-            _ = deriveGoals();
-            transition_error = "Workspace placement rejected. Rollback attempted; inspect per-window errors and retry restore if needed.";
-            return false;
-        }
-    }
+    if (!transaction.commit()) return false;
     if (workspace_owner == displayIdentity) owner_workspace = workspace;
     focusWorkspace(displayIdentity);
     transition_error = null;
@@ -1125,6 +1150,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     if (focused != last_observed_focus) {
         last_observed_focus = focused;
         if (focused) |identity| if (windowIndex(identity)) |index| {
+            rememberFocus(identity);
             if (displayIndex(windows.items[index].display) != null) selectDisplay(windows.items[index].display);
         };
     }
@@ -1180,6 +1206,34 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const source = &windows.items[sourceIndex];
             if (!visible(source.*)) return failure("FocusedWindowNotManaged");
             switch (command) {
+                .select => |direction| {
+                    const state = workspaceLayout(source.display, source.workspace);
+                    const selection = layouts.select(state, source.identity, direction) catch |err| return failure(@errorName(err));
+                    const representative = layouts.representative(selection) catch |err| return failure(@errorName(err));
+                    return json(.{ .ok = true, .selection = selection, .representative = representative });
+                },
+                .tilemove, .group => {
+                    if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
+                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    defer transaction.deinit();
+                    const state = workspaceLayout(source.display, source.workspace);
+                    var target: ?u64 = null;
+                    switch (command) {
+                        .tilemove => |direction| layouts.tilemove(state, source.identity, direction) catch |err| {
+                            transaction.rollback(0);
+                            return failure(@errorName(err));
+                        },
+                        .group => |action| target = layouts.editGroup(state, source.identity, action) catch |err| {
+                            transaction.rollback(0);
+                            return failure(@errorName(err));
+                        },
+                        else => unreachable,
+                    }
+                    if (!transaction.commit()) return failure(transition_error orelse "GroupPlacementFailed");
+                    const verified = if (target) |identity| focusVerified(identity) else true;
+                    native.platform_config_changed();
+                    return json(.{ .ok = true, .target = target, .verified = verified });
+                },
                 .split => |orientation| {
                     const state = workspaceLayout(source.display, source.workspace);
                     if (state.layout != .dwindle) return failure("SplitRequiresDwindle");
@@ -1199,10 +1253,15 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     return json(.{ .ok = true, .applied_delta = applied });
                 },
                 .fullscreen => {
+                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
+                    if (!source.floating) layouts.reveal(state, source.identity) catch |err| return failure(@errorName(err));
                     if (source.floating) source.floating_restore = true;
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
-                    _ = native.platform_focus(source.identity);
+                    if (!transaction.commit()) return failure(transition_error orelse "FullscreenPlacementFailed");
+                    const verified = focusVerified(source.identity);
+                    return json(.{ .ok = true, .verified = verified });
                 },
                 .close => |quit_if_last| {
                     if (pending_close != null) return failure("ClosePending");
@@ -1236,17 +1295,14 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .focus => |request| {
                     const target = if (request.wrap) wrappedNeighbor(sourceIndex, request.direction) else neighbor(sourceIndex, request.direction) orelse return failure("NoWindowInDirection");
                     const identity = windows.items[target].identity;
-                    if (!native.platform_focus(identity)) return failure("FocusRejected");
-                    const verified = native.platform_focused_window() == identity;
-                    if (verified) {
-                        focused = identity;
-                        last_observed_focus = identity;
-                        selectDisplay(windows.items[target].display);
-                    }
+                    const verified = focusVerified(identity);
                     return json(.{ .ok = true, .accepted = true, .verified = verified, .target = identity });
                 },
                 .swap => |direction| {
                     const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
+                    const identity = source.identity;
+                    const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+                    defer transaction.deinit();
                     layouts.swap(windows.items[sourceIndex].identity, windows.items[target].identity);
                     if (managedFullscreen(windows.items[sourceIndex])) workspaceLayout(windows.items[sourceIndex].display, windows.items[sourceIndex].workspace).fullscreen = null;
                     if (managedFullscreen(windows.items[target])) workspaceLayout(windows.items[target].display, windows.items[target].workspace).fullscreen = null;
@@ -1257,6 +1313,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     windows.items[target].display = sourceDisplay;
                     windows.items[target].workspace = sourceWorkspace;
                     std.mem.swap(Window, &windows.items[sourceIndex], &windows.items[target]);
+                    if (!transaction.commit()) return failure(transition_error orelse "SwapPlacementFailed");
+                    const verified = focusVerified(identity);
+                    return json(.{ .ok = true, .verified = verified });
                 },
                 .move => |direction| {
                     if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
