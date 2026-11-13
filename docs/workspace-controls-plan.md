@@ -10,8 +10,8 @@ Keep SIP enabled, Lua configuration, and the existing verified native placement 
 - [x] Read the Principles section of the poteto-mode skill.
 - [x] Phase A: Frame.
 - [x] Phase B: Design the workflow.
-- [ ] Phase C: Run the loop.
-- [ ] Phase D: Keep the audit trail.
+- [x] Phase C: Run the loop.
+- [x] Phase D: Keep the audit trail.
 - [ ] Phase E: Verify and hand back.
 
 ### Architecture
@@ -19,8 +19,8 @@ Keep SIP enabled, Lua configuration, and the existing verified native placement 
 - [x] Ground.
 - [x] Sketch.
 - [x] Agree. Proceed after comparison without an approval pause.
-- [ ] Implement.
-- [ ] Scrap. Revisit the model if implementation repeatedly violates its boundaries.
+- [x] Implement.
+- [x] Scrap. Skipped because focused corrections preserved the selected ownership model.
 
 ### Design comparison
 
@@ -29,7 +29,7 @@ Keep SIP enabled, Lua configuration, and the existing verified native placement 
 - [x] Cross-judge. Skipped because no distinct-family judge is configured. Both candidates used Sol.
 - [x] Pick.
 - [x] Graft.
-- [ ] Verify.
+- [x] Verify.
 
 ## Scope and acceptance
 
@@ -107,7 +107,7 @@ It does not promise restoring arbitrary windows after application relaunch or re
 - [x] Define persistence checkpoints and native stable attributes.
 - [x] Integrate focus memory, container/group transactions, rules, and native controls.
 - [x] Integrate clean restart save/restore.
-- [ ] Independently review and exercise native acceptance.
+- [x] Independently review and exercise native acceptance.
 - [ ] Publish the feature PR with verified outcomes and explicit limits.
 
 ## Unit evidence
@@ -150,12 +150,20 @@ These checks establish baseline behavior, not acceptance of the new workflows.
 A four-window startup independently confirmed native tiling and four unique public AXIdentifiers.
 The subsequent valid `restore` command restored every original frame, then crashed during session save.
 The observed panic is integer overflow at `session_status.errors += 1` in `src/main.zig`.
-The root cause remains under investigation in isolated branch `fix/session-save-crash`.
+The root cause was reversed deferred cleanup.
+The runtime cleared the optional frozen checkpoint before its arena destructor used that owner.
+Fix `5a1c08d` releases the arena before clearing the optional.
+An independent Sol review confirmed cleanup on success, error, and skip paths, with no P1 or P2 findings.
 The full reproduction, harness corrections, native logs, and cleanup evidence are in `../huen-workspace-native/report.md`.
+The crash-fix evidence is in `../huen-session-crash/report.md`.
 
-Combined acceptance resumes after the crash fix and independent review.
-Use one exact signed candidate and one desktop owner.
-The remaining sequence is:
+The isolated fixed ReleaseSafe artifact passed seven restore observations and 18 restart observations.
+These include four positive identity matches, workspace assignments, native master ratio restoration, and checkpoint mode 0600.
+That artifact predates the five integration-review fixes, so it does not establish combined acceptance.
+
+Combined acceptance passed against source `5a1c08d`.
+The signed executable SHA256 is `a80c834caa55e0558bb3058e27eb16e276a6a8abafce51947c68a596f3a2398e`.
+One desktop owner completed the following sequence without rebuilding the candidate:
 
 1. Verify session-enabled restore and clean quit without a crash.
 2. Verify remembered native focus, parent and child selection, tilemove, four-child groups, cycling, workspace roundtrips, and splitting.
@@ -167,5 +175,9 @@ The remaining sequence is:
 5. Run the required combined baseline and rule regression checks.
    Record unsupported multi-display and native failure-injection cases separately.
 
-The installed application and personal configuration have not changed during this iteration.
-No feature PR has been opened.
+The accepted runs recorded 210 observation checks and 28 separate cleanup checks.
+The existing baseline passed all 22 checks.
+See [workspace controls verification](workspace-controls-verification.md) for outcomes, corrections, screenshots, and limits.
+Group child selection survives restart. An internal parent editing selection is not promised after verified focus selects a leaf.
+
+Installation of the exact verified artifact and PR publication are the remaining handback steps.

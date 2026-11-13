@@ -95,5 +95,6 @@ A fresh independent Sol reviewer subsequently checked `da15c07..cd0edf4`, includ
 That review confirmed all five fixes and found no P1 or P2 defects.
 
 Native verification remains open for stale AX failures, rollback rejection, and fullscreen isolation across physical displays.
-Master-layout event passthrough, extreme-ratio restart restoration, and floating restoration across Dock or menu-bar changes also need native acceptance.
-The parent owns combined native verification after integration.
+Combined native acceptance confirms modified master-left passthrough.
+Master-right passthrough, extreme-ratio restart restoration, and floating restoration across Dock or menu-bar changes remain unverified.
+See [workspace controls verification](workspace-controls-verification.md) for final-artifact evidence.

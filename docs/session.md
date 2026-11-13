@@ -149,6 +149,9 @@ Import never creates parking or original-frame recovery authority.
 Fresh rules apply to unmatched live windows after the restore decision.
 Geometry and focus still require the existing verified native transaction.
 Focus memory changes only after observed focus success.
+Verified native focus selects its leaf as the editing target.
+An internal parent editing selection is therefore not promised across restart activation.
+This does not change the restored selected children within groups.
 
 ## File safety
 
@@ -195,4 +198,6 @@ ambiguous matches, unavailable live metadata, error count, and the last error.
 The native unit uses public AppKit, Foundation, and ApplicationServices APIs.
 Strict Objective-C compilation and a linked Zig 0.17 module probe compile the public paths.
 The headless probe exercises bounded JSON conversion and strict duplicate matching without AX calls or session-file access.
-Actual application identity reads, file durability, manager restart restoration, display routing, native geometry, and native focus remain pending integration verification.
+Combined native acceptance verifies public AXIdentifier reads, mode-0600 clean checkpoints, manager restart matching, native geometry and focus, group child selection, duplicate rejection, and missing-metadata skips on one display.
+Power-loss durability, document-URL fallback, and multi-display routing remain unverified.
+See [workspace controls verification](workspace-controls-verification.md).

@@ -234,10 +234,12 @@ This can suppress gestures on an otherwise usable exposed part of a partially ob
 Motion changes only the preview. Release commits through the runtime's verified placement transaction.
 Group header clicks use that same transaction before requesting and verifying application focus.
 `status.mouse` reports availability, publication generation, the last interaction error, and forced shutdown draining.
-Physical input and panel outcomes remain unverified until desktop acceptance.
+Combined native acceptance verifies synthetic reorder and resize events, release-only commits, cancellation, master-left passthrough, public AX header activation, and header appearance.
+Physical input hardware remains unverified.
+See [workspace controls verification](workspace-controls-verification.md).
 
 Native ARC compilation and isolated Zig ABI compilation do not verify physical input, panel appearance, accessibility behavior, focus preservation, multi-display coordinates, or OS permission transitions.
-Those checks belong to the parent-owned native desktop acceptance.
+The verification report distinguishes completed native checks from remaining coverage.
 This module does not install a manager, change permissions, or inject physical input.
 
 The isolated compile checks for this change passed with these commands:
