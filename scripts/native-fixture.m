@@ -79,6 +79,13 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
         }
         [notificationCenter addObserver:self selector:@selector(writeReport:)
                                    name:NSApplicationDidChangeScreenParametersNotification object:nil];
+        [notificationCenter addObserver:self selector:@selector(writeReport:)
+                                   name:NSApplicationDidBecomeActiveNotification object:NSApp];
+        [notificationCenter addObserver:self selector:@selector(writeReport:)
+                                   name:NSApplicationDidResignActiveNotification object:NSApp];
+        [[[NSWorkspace sharedWorkspace] notificationCenter]
+            addObserver:self selector:@selector(writeReport:)
+                   name:NSWorkspaceDidActivateApplicationNotification object:nil];
     }
     [NSApp activateIgnoringOtherApps:YES];
     if (self.spread) {
@@ -122,9 +129,13 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
         [screenReports addObject:@{@"visible_frame": AXFrame(screen.visibleFrame, referenceHeight),
                                   @"full_bounds": AXFrame(screen.frame, referenceHeight)}];
     }
+    NSRunningApplication *frontmostApplication = [NSWorkspace sharedWorkspace].frontmostApplication;
     NSDictionary *report = @{
         @"ready": @(self.ready),
         @"process_id": @([NSProcessInfo processInfo].processIdentifier),
+        @"application_active": @(NSApp.active),
+        @"frontmost_bundle": frontmostApplication.bundleIdentifier ?: [NSNull null],
+        @"frontmost_pid": frontmostApplication ? @(frontmostApplication.processIdentifier) : [NSNull null],
         @"windows": windowReports,
         @"screens": screenReports
     };
