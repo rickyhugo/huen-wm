@@ -1036,7 +1036,6 @@ pub const Store = struct {
         }
     }
 
-    /// Identities must already have been matched to current live windows by the caller.
     pub fn importSnapshot(self: *Store, snapshot: *const Snapshot) !void {
         var seen: [2047]bool = @splat(false);
         for (snapshot.roots, 0..) |slot, index| if (slot) |state| {

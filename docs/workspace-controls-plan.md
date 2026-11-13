@@ -135,6 +135,12 @@ Commits `cd8c607`, `2756e7b`, `0080f04`, and `8ac817a` fix affected-display tran
 A fresh independent Sol review confirmed all five fixes with no remaining P1 or P2 findings in that diff.
 See [runtime review fixes](workspace-runtime-review-fixes.md) for source deductions and verification limits.
 
+Independent comment review checked four added blocks.
+It identified a false import precondition and a commented-out rule example already covered by `docs/window-rules.md`.
+Both blocks were removed, six lines total.
+The first review attempt lacked Git access and reviewed nothing. A fresh Sol reviewer completed the frozen-diff review.
+Two public API contracts remain. No constraint encodings or application refactors were needed.
+
 ## Native acceptance checkpoint
 
 The signed `da15c07` candidate passed all 22 existing native scene checks.

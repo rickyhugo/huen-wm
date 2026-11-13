@@ -30,10 +30,5 @@ return {
     bindings = bindings,
     rules = {
         { bundle = "com.apple.systempreferences", floating = true },
-        -- {
-        --     bundle = "com.apple.TextEdit",
-        --     title = { glob = "Notes *" },
-        --     geometry = { left = 40, top = 60, width = 800, height = 600 },
-        -- },
     },
 }
