@@ -64,7 +64,7 @@ pub const Controls = struct {
         var headers: std.ArrayList(bridge.HeaderItem) = .empty;
         defer headers.deinit(allocator);
         if (ready) for (active) |state| {
-            if (state.fullscreen != null) continue;
+            if (state.fullscreen != null or state.layout != .dwindle) continue;
             for (windows) |window| {
                 if (!window.eligible) continue;
                 const node = store.nodeForIdentity(window.identity) orelse continue;
@@ -78,7 +78,6 @@ pub const Controls = struct {
                 hit.window_id = window.public_id;
                 try hits.append(allocator, hit);
             }
-            if (state.layout != .dwindle) continue;
             var projected_headers: [2047]layout.Header = undefined;
             const header_count = try store.headers(state, &projected_headers);
             var group_safety: [2047]?bool = @splat(null);
