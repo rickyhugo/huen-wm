@@ -221,7 +221,23 @@ static BOOL scanWindowSnapshot(void) {
             record.observation = observation;
             [seen addObject:@(observation.identity)];
         }
-        NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return record.observation.pid == application.processIdentifier && ![seen containsObject:@(record.observation.identity)]; }];
+        NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) {
+            (void)index; (void)stop;
+            if (record.observation.pid != application.processIdentifier || [seen containsObject:@(record.observation.identity)]) return NO;
+            CFTypeRef role = NULL, minimized = NULL;
+            AXError roleResult = AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute, &role);
+            AXError minimizedResult = AXUIElementCopyAttributeValue(record.element, kAXMinimizedAttribute, &minimized);
+            BOOL destroyed = roleResult == kAXErrorInvalidUIElement || minimizedResult == kAXErrorInvalidUIElement;
+            if (roleResult == kAXErrorSuccess && role && !CFEqual(role, kAXWindowRole)) destroyed = YES;
+            WMWindow observation = record.observation;
+            observation.stale = true; observation.onscreen = false; observation.focused = false;
+            if (minimizedResult == kAXErrorSuccess && minimized && CFGetTypeID(minimized) == CFBooleanGetTypeID()) observation.minimized = CFBooleanGetValue(minimized);
+            record.observation = observation;
+            record.animationDuration = 0; record.motion = WMMotionIdle;
+            if (role) CFRelease(role);
+            if (minimized) CFRelease(minimized);
+            return destroyed;
+        }];
         [records removeObjectsAtIndexes:removed];
         CFRelease(appElement);
     }
