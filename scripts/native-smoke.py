@@ -479,6 +479,8 @@ class NativeSmoke:
         ]
         other_titles = set(before_workspace) - set(active_titles)
         self.result["multi_display_covered"] = bool(other_titles)
+        expected_presentation = "captured" if self.arguments.scenes else "instant"
+        before_workspace_generation = self.cli("status")["snapshot_generation"]
         self.cli("workspace", "2")
         self.wait(
             "workspace preserves size at one-point vertical strip on active display only",
@@ -490,8 +492,13 @@ class NativeSmoke:
         self.wait(
             "workspace transition settles",
             lambda: self.cli("status"),
-            lambda status: not status.get("transition_pending"),
+            lambda status: (
+                not status.get("transition_pending")
+                and status.get("snapshot_presentation") == expected_presentation
+                and status["snapshot_generation"] > before_workspace_generation
+            ),
         )
+        before_return_generation = self.cli("status")["snapshot_generation"]
         self.cli("workspace", "1")
         self.wait(
             "workspace returns native frames",
@@ -504,7 +511,11 @@ class NativeSmoke:
         self.wait(
             "return transition settles",
             lambda: self.cli("status"),
-            lambda status: not status.get("transition_pending"),
+            lambda status: (
+                not status.get("transition_pending")
+                and status.get("snapshot_presentation") == expected_presentation
+                and status["snapshot_generation"] > before_return_generation
+            ),
         )
         before_valid_reload = self.cli("status")["config_reload"]["request_id"]
         self.config(32)
@@ -675,7 +686,7 @@ def main():
     parser.add_argument(
         "--scenes",
         action="store_true",
-        help="Check convergence with 0.12-second scenes; not visual proof",
+        help="Require captured snapshots with 0.12-second scenes; not visual proof",
     )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:

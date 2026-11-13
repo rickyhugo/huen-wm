@@ -112,23 +112,6 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     CFRelease(position); CFRelease(size);
-    if (record.animationDuration <= 0) {
-        static unsigned debugFailures;
-        if (debugFailures < 32) {
-            WMRect actual = {0};
-            BOOL actualReadable = readFrame(record.element, &actual);
-            BOOL nearTarget = actualReadable && fabs(actual.left - frame.left) <= 2 && fabs(actual.top - frame.top) <= 2 && fabs(actual.width - frame.width) <= 2 && fabs(actual.height - frame.height) <= 2;
-            if (!nearTarget || initialPositionResult != kAXErrorSuccess || sizeResult != kAXErrorSuccess || positionResult != kAXErrorSuccess) {
-                debugFailures++;
-                fprintf(stderr, "[DEBUG-parking] native-write identity=%llu pid=%d prior_readable=%d prior=[%.3f,%.3f,%.3f,%.3f] desired=[%.3f,%.3f,%.3f,%.3f] actual_readable=%d actual=[%.3f,%.3f,%.3f,%.3f] resize_needed=%d ax_position_first=%d ax_size=%d ax_position_last=%d failure=%u/32\n",
-                        (unsigned long long)record.observation.identity, record.observation.pid,
-                        priorReadable, current.left, current.top, current.width, current.height,
-                        frame.left, frame.top, frame.width, frame.height,
-                        actualReadable, actual.left, actual.top, actual.width, actual.height,
-                        resizeNeeded, initialPositionResult, sizeResult, positionResult, debugFailures);
-            }
-        }
-    }
     return initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
 }
 
@@ -416,7 +399,7 @@ int platform_main(int argc, char **argv) {
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
         if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus|swap left|right|up|down\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.0", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-offscreen-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.0", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }

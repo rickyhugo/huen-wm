@@ -18,8 +18,10 @@ var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
 var suspended = false;
 const Transition = struct { display: u32, workspace: usize, generation: u64 };
+const SnapshotPresentation = enum { idle, pending, instant, captured, fallback };
 var transition: ?Transition = null;
 var generation: u64 = 0;
+var snapshot_presentation: SnapshotPresentation = .idle;
 var transition_error: ?[]const u8 = null;
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
@@ -241,8 +243,6 @@ fn placementFailure(window: *Window, message: []const u8) void {
     native.platform_error(&buffer);
 }
 
-var debug_verification_failures: u32 = 0;
-
 fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     for (displays.items) |display| {
         if (display.identity == displayIdentity) continue;
@@ -278,7 +278,7 @@ fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
 }
 
 fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
-    const write_result = native.platform_frame(identity, target, 0);
+    _ = native.platform_frame(identity, target, 0);
     var actual: Rect = std.mem.zeroes(Rect);
     const readable = native.platform_read_frame(identity, &actual);
     const verified = readable and
@@ -286,13 +286,6 @@ fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
             parkedFrameAccepted(actual, target, displayIdentity)
         else
             framesNear(actual, target, 2));
-    if (!verified and debug_verification_failures < 32) {
-        debug_verification_failures += 1;
-        std.debug.print("[DEBUG-parking] verified-frame identity={d} write_result={} desired=[{d:.3},{d:.3},{d:.3},{d:.3}] actual_readable={} actual=[{d:.3},{d:.3},{d:.3},{d:.3}] failure={d}/32\n", .{
-            identity, write_result, target.left, target.top,   target.width,  target.height,
-            readable, actual.left,  actual.top,  actual.width, actual.height, debug_verification_failures,
-        });
-    }
     return verified;
 }
 
@@ -448,6 +441,7 @@ fn announce(displayIndexValue: usize) void {
 }
 
 fn cancelTransition() void {
+    if (transition != null) snapshot_presentation = .idle;
     transition = null;
     native.huen_scene_cancel();
 }
@@ -519,8 +513,10 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
 }
 
 fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
-    _ = context;
+    const callbackGeneration = @intFromPtr(context orelse return);
     const pending = transition orelse return;
+    if (callbackGeneration != pending.generation) return;
+    snapshot_presentation = if (covered) .captured else .fallback;
     const slot = displayIndex(pending.display);
     if (slot) |displaySlot| {
         _ = commitWorkspace(displaySlot, pending.workspace);
@@ -531,7 +527,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
-        .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "offscreen-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
+        .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
         .windows => {
             const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
             var items: std.ArrayList(Item) = .empty;
@@ -590,13 +586,15 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     switch (command) {
         .workspace => |workspace| {
             if (workspace == display.workspace) return json(.{ .ok = true });
+            generation += 1;
             if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
+                snapshot_presentation = .instant;
                 if (!commitWorkspace(displaySlot, workspace)) return failure(transition_error orelse "WorkspacePlacementFailed");
                 return json(.{ .ok = true });
             }
-            generation += 1;
+            snapshot_presentation = .pending;
             transition = .{ .display = display.identity, .workspace = workspace, .generation = generation };
-            native.huen_scene_begin(display.identity, generation, config.duration, sceneReady, null);
+            native.huen_scene_begin(display.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
             return json(.{ .ok = true, .accepted = true, .generation = generation });
         },
         .layout => |layout| config.workspaces[display.workspace].layout = layout,
