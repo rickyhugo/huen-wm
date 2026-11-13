@@ -779,11 +779,16 @@ pub const Store = struct {
 
     fn ungroup(self: *Store, state: *WorkspaceLayout, handle: Handle) !void {
         const container = self.nodes[handle].content.group;
+        var available: [1022]Handle = undefined;
+        const needed = container.count - 2;
         var free_count: usize = 0;
-        for (self.nodes) |node| if (node.content == .free) {
+        for (self.nodes, 0..) |node, index| {
+            if (free_count == needed) break;
+            if (node.content != .free) continue;
+            available[free_count] = @intCast(index);
             free_count += 1;
-        };
-        if (free_count < container.count - 2) return error.LayoutCapacityExceeded;
+        }
+        if (free_count < needed) return error.LayoutCapacityExceeded;
         const remembered = self.nodes[handle].last_child orelse container.selected;
         var remembered_passed = false;
         var current = handle;
@@ -791,7 +796,11 @@ pub const Store = struct {
         var remaining = container.count;
         while (remaining >= 2) : (remaining -= 1) {
             const next = self.nodes[child].next.?;
-            const tail = if (remaining == 2) next else self.allocate() catch unreachable;
+            const tail = if (remaining == 2) next else available[container.count - remaining];
+            if (remaining > 2) {
+                self.serial +%= 1;
+                self.nodes[tail] = .{ .generation = self.serial };
+            }
             self.nodes[current].content = .{ .branch = .{ .axis = .width, .ratio = if (current == handle and self.nodes[handle].parent == null) state.ratio else 0.5, .children = .{ child, tail } } };
             self.nodes[current].last_child = if (!remembered_passed and child != remembered) tail else child;
             if (child == remembered) remembered_passed = true;
