@@ -501,12 +501,39 @@ int platform_main(int argc, char **argv) {
             if (hudDeadline && now > hudDeadline) { [hudPanel orderOut:nil]; hudDeadline = 0; }
             int client = accept(serverSocket, NULL, NULL);
             if (client >= 0) {
-                struct timeval timeout = {0, 100000}; setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-                char command[512]; size_t used = 0; BOOL complete = NO;
-                while (used < sizeof(command) - 1) { ssize_t amount = read(client, command + used, sizeof(command) - 1 - used); if (amount <= 0) break; used += amount; if (memchr(command, '\n', used)) { complete = YES; break; } }
-                command[used] = 0; char *newline = strchr(command, '\n'); if (newline) *newline = 0;
-                const char *reply = complete ? wm_command(command) : "{\"error\":\"incomplete or oversized command\"}\n";
-                size_t remaining = strlen(reply); while (remaining) { ssize_t amount = write(client, reply, remaining); if (amount <= 0) break; reply += amount; remaining -= amount; } close(client);
+                double deadline = CACurrentMediaTime() + 0.1;
+                int clientFlags = fcntl(client, F_GETFL);
+                // macOS inherits O_NONBLOCK from the listening socket.
+                if (clientFlags >= 0 && fcntl(client, F_SETFL, clientFlags & ~O_NONBLOCK) == 0) {
+                    char command[512]; size_t used = 0; BOOL complete = NO;
+                    while (used < sizeof(command) - 1) {
+                        double remainingTime = deadline - CACurrentMediaTime();
+                        if (remainingTime <= 0) break;
+                        struct timeval timeout = {0, MAX(1, (int)(remainingTime * 1000000))};
+                        if (setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) break;
+                        ssize_t amount = read(client, command + used, sizeof(command) - 1 - used);
+                        if (amount < 0 && errno == EINTR) continue;
+                        if (amount <= 0) break;
+                        used += amount;
+                        if (memchr(command, '\n', used)) { complete = YES; break; }
+                    }
+                    command[used] = 0; char *newline = strchr(command, '\n'); if (newline) *newline = 0;
+                    double commandStarted = CACurrentMediaTime();
+                    const char *reply = complete ? wm_command(command) : "{\"error\":\"incomplete or oversized command\"}\n";
+                    deadline += CACurrentMediaTime() - commandStarted;
+                    size_t remaining = strlen(reply);
+                    while (remaining) {
+                        double remainingTime = deadline - CACurrentMediaTime();
+                        if (remainingTime <= 0) break;
+                        struct timeval timeout = {0, MAX(1, (int)(remainingTime * 1000000))};
+                        if (setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) != 0) break;
+                        ssize_t amount = write(client, reply, remaining);
+                        if (amount < 0 && errno == EINTR) continue;
+                        if (amount <= 0) break;
+                        reply += amount; remaining -= amount;
+                    }
+                }
+                close(client);
             }
             if (stopping && wm_shutdown()) { [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
         }];
