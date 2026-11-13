@@ -5,7 +5,6 @@ local function bind(mods, key, command)
     bindings[#bindings + 1] = { mods = mods, key = key, command = command }
 end
 
--- Swap approximates AeroSpace's tiling movement without forcing floating.
 for key, direction in pairs({ ["h"] = "left", ["j"] = "down", ["k"] = "up", ["l"] = "right" }) do
     bind("alt", key, "focus --wrap " .. direction)
     bind("alt+shift", key, "swap " .. direction)

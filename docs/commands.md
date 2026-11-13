@@ -116,7 +116,7 @@ Restore and shutdown cancel a pending request.
 Directions are `left`, `right`, `up`, and `down`.
 The search prefers windows ahead of the source.
 At an edge, the wrapped search selects the opposite edge.
-Geometry ties use window identity.
+Wrapped-focus geometry ties use window identity.
 With one eligible window, wrapped focus keeps that window.
 
 Focus-dependent actions read the frontmost application's focused AX window immediately.
