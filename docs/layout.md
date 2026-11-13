@@ -123,7 +123,7 @@ Application placement failures remain visible in the per-window error fields.
 
 The APIs below are implemented in `src/layout.zig`.
 They do not perform native placement, parking, focus, or persistence I/O.
-The existing `main.zig` command dispatch still requires handlers for the new command variants.
+The runtime dispatches selection, tile movement, and group commands through these APIs.
 
 The 2047-node pool contains leaves, binary branches, and explicit ordered groups.
 Groups have at least two direct children.
@@ -273,6 +273,13 @@ Pure edits do not commit native side effects.
 A caller can retain a bounded `Store` copy, apply an edit, project, and commit verified placement.
 On failure, the caller restores that copy while retaining any actual native recovery obligations.
 Native focus runs only after placement succeeds.
+
+The runtime shares one heap-snapshotted placement transaction across workspace activation,
+monitor routing, container edits, header selection, and committed pointer edits.
+It snapshots logical layout, window intent, display intent, and readable native frames.
+Failure reverses every attempted placement, including the failed write, before restoring logical intent.
+A failed rollback retains recovery ownership and a per-window placement error.
+`windows.group_hidden` distinguishes inactive group children from other unavailable windows.
 
 ```zig
 const source = try layouts.selected(state, focused);

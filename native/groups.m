@@ -133,13 +133,13 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
         !isfinite(presentation->border_width) || presentation->border_width < 0 ||
         presentation->border_width > 32) return false;
     NSMutableArray<HuenHeaderRow *> *rows = [NSMutableArray array];
-    NSMutableDictionary<NSNumber *, HuenHeaderRow *> *rowsByGroup = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, HuenHeaderRow *> *rowsByGroup = [NSMutableDictionary dictionary];
     for (size_t index = 0; index < presentation->item_count; index++) {
         const HuenHeaderItem *item = &presentation->items[index];
         if (item->generation != presentation->generation || !valid_rect(item->rect) ||
             item->group.generation == 0 || item->child.generation == 0 ||
             !memchr(item->title, '\0', sizeof(item->title))) return false;
-        NSNumber *key = @(((uint64_t)item->group.slot << 32) | item->group.generation);
+        NSString *key = [NSString stringWithFormat:@"%u:%llu", item->group.slot, (unsigned long long)item->group.generation];
         HuenHeaderRow *row = rowsByGroup[key];
         NSRect itemFrame = cocoa_rect(item->rect);
         if (!row) {
@@ -193,7 +193,8 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
             [row.items[itemIndex] getValue:&item size:sizeof(item)];
             HuenHeaderButton *button = (HuenHeaderButton *)content.subviews[itemIndex];
             button.item = item;
-            button.available = YES;
+            button.available = item.eligible;
+            button.enabled = item.eligible;
             button.title = [[NSString alloc] initWithBytes:item.title length:strlen(item.title)
                 encoding:NSUTF8StringEncoding] ?: @"Untitled";
             button.contentTintColor = item.selected ? NSColor.whiteColor :

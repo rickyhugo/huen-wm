@@ -202,7 +202,10 @@ static BOOL scanWindowSnapshot(void) {
             WMWindow observation = record.observation;
             observation.frame = frame; observation.stale = false;
             observation.onscreen = false;
+            observation.public_window_id = 0;
+            observation.hit_eligible = false;
             NSUInteger matchingAX = 0, matchingCG = 0;
+            NSUInteger matchedOrder = NSNotFound;
             for (NSValue *candidate in frames.allValues) {
                 WMRect candidateFrame; [candidate getValue:&candidateFrame];
                 if (framesNear(frame, candidateFrame, 4)) matchingAX++;
@@ -210,9 +213,23 @@ static BOOL scanWindowSnapshot(void) {
             for (NSDictionary *visibleWindow in visibleWindows) {
                 if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
                 CGRect bounds;
-                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) matchingCG++;
+                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) {
+                    matchingCG++;
+                    matchedOrder = [visibleWindows indexOfObjectIdenticalTo:visibleWindow];
+                    observation.public_window_id = [visibleWindow[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+                }
             }
             observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
+            if (!observation.onscreen) observation.public_window_id = 0;
+            observation.hit_eligible = observation.public_window_id != 0;
+            for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
+                NSDictionary *front = visibleWindows[frontIndex];
+                if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+                CGRect bounds;
+                if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) { observation.hit_eligible = false; break; }
+                CGRect tile = CGRectMake(frame.left, frame.top, frame.width, frame.height);
+                if (CGRectIntersectsRect(tile, bounds)) observation.hit_eligible = false;
+            }
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
             if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
@@ -666,6 +683,7 @@ int platform_main(int argc, char **argv) {
             (void)timerValue;
             wm_config_poll();
             if (interrupted) platform_quit();
+            wm_input_poll();
             double now = CACurrentMediaTime();
             if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
             if (now - lastConfigCheck > 0.25) {

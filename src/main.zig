@@ -4,6 +4,8 @@ const configuration = @import("config.zig");
 const rules = @import("rules.zig");
 const commands = @import("command.zig");
 const tiling = @import("layout.zig");
+const pointer = @import("pointer.zig");
+const interaction = @import("interaction.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -45,6 +47,88 @@ const StatusPresentation = union(enum) {
 };
 var published_status: StatusPresentation = .disabled;
 var status_active = false;
+var pointer_controls: pointer.Controls = .{};
+fn pointerWindows(output: []pointer.Window) []pointer.Window {
+    for (windows.items, 0..) |window, index| output[index] = .{
+        .identity = window.identity,
+        .public_id = window.observation.public_window_id,
+        .eligible = visible(window) and !window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle and framesNear(window.observation.frame, targetFrame(window), 2),
+        .title = text(&windows.items[index].observation.title),
+    };
+    return output[0..windows.items.len];
+}
+
+fn publishPointer() void {
+    if (!initialized or pointer_controls.stop_deadline != null) return;
+    var observed: [1024]pointer.Window = undefined;
+    var active: [32]*tiling.WorkspaceLayout = undefined;
+    for (displays.items, 0..) |display, index| active[index] = workspaceLayout(display.identity, display.workspace);
+    pointer_controls.publish(&layouts, pointerWindows(&observed), active[0..displays.items.len], !suspended and transition == null and !routing_blocked, config.border_color, config.border_width) catch |err| {
+        pointer_controls.error_message = @errorName(err);
+        interaction.huen_groups_clear();
+    };
+}
+
+fn stateForNode(reference_value: tiling.NodeRef) !*tiling.WorkspaceLayout {
+    var handle = try layouts.resolve(reference_value);
+    while (layouts.nodes[handle].parent) |parent| handle = parent;
+    for (&layouts.roots) |*slot| if (slot.*) |*state| {
+        if (state.root == handle) return state;
+    };
+    return error.StaleNode;
+}
+
+fn pollPointer() void {
+    var sample: interaction.Event = undefined;
+    var count: usize = 0;
+    while (count < 64 and interaction.huen_input_poll(&sample)) : (count += 1) {
+        if (sample.kind == .start or sample.kind == .end or sample.kind == .group_select) {
+            refreshObservations();
+            if (!deriveGoals()) continue;
+        }
+        var observed: [1024]pointer.Window = undefined;
+        const edit = pointer_controls.event(&layouts, pointerWindows(&observed), sample, config.gap, config.border_color, config.border_width) catch |err| {
+            pointer_controls.error_message = @errorName(err);
+            interaction.huen_groups_preview(null);
+            continue;
+        } orelse continue;
+        const transaction = PlacementTransaction.begin() catch |err| {
+            pointer_controls.error_message = @errorName(err);
+            continue;
+        };
+        defer transaction.deinit();
+        var target: ?u64 = null;
+        const result: anyerror!void = switch (edit) {
+            .group => |selection| selection: {
+                const state = stateForNode(selection.group) catch |err| break :selection err;
+                target = layouts.selectGroupChild(state, selection.group, selection.child) catch |err| break :selection err;
+                break :selection {};
+            },
+            .drop => |preview| drop: {
+                const state = stateForNode(preview.source) catch |err| break :drop err;
+                target = layouts.representative(preview.source) catch |err| break :drop err;
+                break :drop layouts.commitDrop(state, preview);
+            },
+            .resize => |preview| layouts.commitResize(preview, config.gap),
+        };
+        result catch |err| {
+            transaction.rollback(0);
+            pointer_controls.error_message = @errorName(err);
+            continue;
+        };
+        if (!transaction.commit()) continue;
+        if (target) |identity| {
+            if (!focusVerified(identity)) pointer_controls.error_message = "HeaderFocusRejected";
+        }
+        native.platform_config_changed();
+    }
+}
+
+export fn wm_input_poll() void {
+    if (!initialized or suspended or pointer_controls.stop_deadline != null) return;
+    pollPointer();
+    if (pointer_controls.revision != layouts.revision) publishPointer();
+}
 
 fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
     @memset(destination, 0);
@@ -163,6 +247,7 @@ export fn wm_activate_config() bool {
     if (!native.platform_bindings(&config.modes[0].bindings, config.modes[0].binding_count)) return false;
     active_mode = 0;
     status_active = true;
+    pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
     publishStatus();
     return true;
 }
@@ -195,6 +280,7 @@ export fn wm_config_poll() void {
     }
     applyLayoutDefaults(&candidate);
     config = candidate;
+    pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
     active_mode = 0;
     config_state = .ready;
     config_error = null;
@@ -380,12 +466,14 @@ const PlacementTransaction = struct {
         var remaining = attempted;
         while (remaining > 0) {
             remaining -= 1;
-            const original = self.originals[remaining] orelse continue;
-            const restored = verifiedFrame(windows.items[remaining].identity, original, null);
+            const identity = windows.items[remaining].identity;
+            const original_index = self.identityIndex(identity);
+            const original = self.originals[original_index] orelse continue;
+            const restored = verifiedFrame(identity, original, null);
             if (!restored) {
-                if (!self.intent[remaining].parked) self.intent[remaining].parking_frame = original;
-                self.intent[remaining].parked = true;
-                self.intent[remaining].placement_error = "Placement rollback rejected; recovery ownership retained";
+                if (!self.intent[original_index].parked) self.intent[original_index].parking_frame = original;
+                self.intent[original_index].parked = true;
+                self.intent[original_index].placement_error = "Placement rollback rejected; recovery ownership retained";
             }
         }
         layouts = self.store.*;
@@ -394,13 +482,18 @@ const PlacementTransaction = struct {
         selected_display = self.selected;
     }
 
+    fn identityIndex(self: PlacementTransaction, identity: u64) usize {
+        for (self.intent, 0..) |window, index| if (window.identity == identity) return index;
+        unreachable;
+    }
+
     fn commit(self: PlacementTransaction) bool {
         if (!deriveGoals()) {
             self.rollback(0);
             return false;
         }
         for (windows.items, 0..) |*window, index| {
-            if (self.originals[index] == null) continue;
+            if (self.originals[self.identityIndex(window.identity)] == null) continue;
             const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
             if (outcome == .applied) continue;
             self.rollback(index + 1);
@@ -822,6 +915,7 @@ export fn wm_tick() void {
     pollClose();
     if (!initialized) return;
     defer publishStatus();
+    defer publishPointer();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
     var updated: std.ArrayList(Display) = .empty;
@@ -991,22 +1085,26 @@ fn refreshObservations() void {
 
 fn focusWorkspace(displayIdentity: u32) void {
     refreshObservations();
+    if (!deriveGoals()) return;
     const index = displayIndex(displayIdentity) orelse return;
     const state = workspaceLayout(displayIdentity, displays.items[index].workspace);
     var members: [1024]tiling.Member = undefined;
     const target = layouts.focusCandidate(state, layoutMembers(&members));
     if (target) |identity| {
-        const transaction = PlacementTransaction.begin() catch |err| {
-            transition_error = @errorName(err);
-            return;
-        };
-        defer transaction.deinit();
-        if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
-            transaction.rollback(0);
-            transition_error = @errorName(err);
-            return;
-        };
-        if (!transaction.commit()) return;
+        const window = windows.items[windowIndex(identity) orelse return];
+        if (!visible(window) or window.parked) {
+            const transaction = PlacementTransaction.begin() catch |err| {
+                transition_error = @errorName(err);
+                return;
+            };
+            defer transaction.deinit();
+            if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
+                transaction.rollback(0);
+                transition_error = @errorName(err);
+                return;
+            };
+            if (!transaction.commit()) return;
+        }
         if (!focusVerified(identity)) return;
     }
     selectDisplay(displayIdentity);
@@ -1056,11 +1154,32 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
+    defer publishPointer();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
         .status => {
             const launch = native.platform_launch_status();
-            return json(.{ .running = true, .suspended = suspended, .active_mode = text(&config.modes[active_mode].name), .close_state = close_state, .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) }, .window_count = windows.items.len, .display_count = displays.items.len, .selected_monitor = selected_display, .workspace_owner = workspace_owner, .routing_blocked = routing_blocked, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } });
+            return json(.{
+                .running = true,
+                .suspended = suspended,
+                .active_mode = text(&config.modes[active_mode].name),
+                .close_state = close_state,
+                .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) },
+                .window_count = windows.items.len,
+                .display_count = displays.items.len,
+                .selected_monitor = selected_display,
+                .workspace_owner = workspace_owner,
+                .routing_blocked = routing_blocked,
+                .workspace_backend = "corner-parking",
+                .filter = std.mem.span(native.platform_filter()),
+                .scene_capture_allowed = native.huen_scene_capture_allowed(),
+                .snapshot_presentation = snapshot_presentation,
+                .snapshot_generation = generation,
+                .transition_pending = transition != null,
+                .transition_error = transition_error,
+                .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
+                .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
+            });
         },
         .mode => |name| {
             const index = config.modeIndex(name.text()) orelse return failure("UnknownMode");
@@ -1083,10 +1202,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
-            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error }) catch return failure("OutOfMemory");
+            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group }) catch return failure("OutOfMemory");
             return json(items.items);
         },
         .monitors => {
@@ -1199,7 +1318,14 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             native.huen_scene_begin(destination.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
             return json(.{ .ok = true, .accepted = true, .generation = generation });
         },
-        .layout => |layout| workspaceLayout(display.identity, display.workspace).layout = layout,
+        .layout => |layout| {
+            const transaction = PlacementTransaction.begin() catch |err| return failure(@errorName(err));
+            defer transaction.deinit();
+            workspaceLayout(display.identity, display.workspace).layout = layout;
+            if (!transaction.commit()) return failure(transition_error orelse "LayoutPlacementFailed");
+            native.platform_config_changed();
+            return json(.{ .ok = true });
+        },
         .resize => |delta| layouts.adjustRatio(workspaceLayout(display.identity, display.workspace), delta),
         else => {
             const sourceIndex = windowIndex(focused orelse return failure("NoFocusedWindow")) orelse return failure("NoFocusedWindow");
@@ -1342,12 +1468,14 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     return json(.{ .ok = true });
 }
 export fn wm_shutdown() bool {
+    suspended = true;
     pending_close = null;
     native.platform_close_cancel();
     status_active = false;
     native.platform_status_present(null);
     cancelConfig();
     if (config_request.inFlight()) return false;
+    if (!pointer_controls.stop(native.platform_monotonic())) return false;
     cancelTransition();
     const outstanding = native.platform_restore();
     if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");

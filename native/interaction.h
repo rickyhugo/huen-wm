@@ -12,7 +12,7 @@
 
 typedef struct { double left, top, width, height; } HuenInteractionRect;
 typedef struct { double left, top; } HuenInteractionPoint;
-typedef struct { uint32_t slot, generation; } HuenNodeRef;
+typedef struct { uint32_t slot; uint64_t generation; } HuenNodeRef;
 
 typedef enum {
     HuenHitTile = 1,
@@ -93,6 +93,7 @@ typedef struct {
     HuenInteractionRect rect;
     char title[HUEN_GROUP_TITLE_BYTES];
     bool selected;
+    bool eligible;
 } HuenHeaderItem;
 
 typedef struct {

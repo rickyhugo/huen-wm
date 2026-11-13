@@ -11,7 +11,7 @@
 typedef struct { double left, top, width, height; } WMRect;
 typedef enum { WMFrameIntentVisibleGoal = 0, WMFrameIntentVerifiedPlacement = 1 } WMFrameIntent;
 typedef enum { WMMotionIdle, WMMotionAnimating, WMMotionRejected } WMMotionState;
-typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete; char bundle[256], title[512]; } WMWindow;
+typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete, hit_eligible; uint32_t public_window_id; char bundle[256], title[512]; } WMWindow;
 typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; bool built_in; } WMDisplay;
 typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);
@@ -50,5 +50,6 @@ extern bool wm_initialize(const char *path);
 extern bool wm_activate_config(void);
 extern void wm_config_poll(void);
 extern void wm_tick(void);
+extern void wm_input_poll(void);
 extern const char *wm_command(const char *command);
 extern bool wm_shutdown(void);

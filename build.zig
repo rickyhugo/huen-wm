@@ -24,6 +24,12 @@ pub fn build(builder: *std.Build) void {
     scene.addFileArg(builder.path("native/scene.m"));
     scene.addArg("-o");
     module.addObjectFile(scene.addOutputFileArg("scene.o"));
+    for ([_][]const u8{ "input", "groups", "session" }) |unit| {
+        const compilation = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
+        compilation.addFileArg(builder.path(builder.fmt("native/{s}.m", .{unit})));
+        compilation.addArg("-o");
+        module.addObjectFile(compilation.addOutputFileArg(builder.fmt("{s}.o", .{unit})));
+    }
     for ([_][]const u8{ "Cocoa", "ApplicationServices", "Carbon", "QuartzCore", "ScreenCaptureKit", "CoreGraphics" }) |framework| module.linkFramework(framework, .{});
     const executable = builder.addExecutable(.{ .name = "huen-wm", .root_module = module });
     builder.installArtifact(executable);

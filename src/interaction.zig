@@ -5,7 +5,7 @@ pub const title_bytes = 256;
 
 pub const Rect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const Point = extern struct { left: f64, top: f64 };
-pub const NodeRef = extern struct { slot: u32, generation: u32 };
+pub const NodeRef = extern struct { slot: u32, generation: u64 };
 pub const HitKind = enum(c_uint) { tile = 1, boundary = 2, header = 3 };
 pub const HitRegion = extern struct {
     kind: HitKind,
@@ -63,6 +63,7 @@ pub const HeaderItem = extern struct {
     rect: Rect,
     title: [title_bytes]u8,
     selected: bool,
+    eligible: bool,
 };
 pub const HeaderPresentation = extern struct {
     generation: u64,

@@ -17,6 +17,7 @@ AppKit conversion uses the primary display's full height minus the rectangle's t
 Negative coordinates on secondary displays remain negative.
 
 `HuenNodeRef` contains a pool slot and a nonzero slot generation.
+The generation is 64 bits, matching the layout allocator.
 The snapshot generation identifies the whole immutable projection.
 `window_identity` is the caller's live native identity.
 `window_id` is the public CG window ID, not an AX object or a persisted identity.
@@ -29,6 +30,7 @@ Unused references can be zero.
 The native bridge copies all hit regions and header items.
 It retains no caller buffers or title pointers.
 Header titles contain at most 255 UTF-8 bytes plus a null terminator.
+Each header carries an eligibility flag. Unavailable children remain labelled but disabled.
 Invalid UTF-8 displays as `Untitled`.
 
 ## Publication
@@ -221,6 +223,18 @@ Permission revocation, invalidation, process exit, and the shutdown deadline the
 There is no synthetic click replay or indefinite shutdown wait.
 
 ## Verification limits
+
+The runtime links both native units and polls input on its normal 60 Hz main-loop timer.
+It publishes only idle, visible tiled windows with a unique public CG-to-AX match.
+Any positive-area overlap by an earlier public CG window conservatively blocks the whole tile.
+The manager's own presentation windows are excluded from that occlusion check.
+This can suppress gestures on an otherwise usable exposed part of a partially obscured tile.
+
+`src/pointer.zig` owns the publication generation, immutable gesture baseline, and reusable heap projection scratch.
+Motion changes only the preview. Release commits through the runtime's verified placement transaction.
+Group header clicks use that same transaction before requesting and verifying application focus.
+`status.mouse` reports availability, publication generation, the last interaction error, and forced shutdown draining.
+Physical input and panel outcomes remain unverified until desktop acceptance.
 
 Native ARC compilation and isolated Zig ABI compilation do not verify physical input, panel appearance, accessibility behavior, focus preservation, multi-display coordinates, or OS permission transitions.
 Those checks belong to the parent-owned native desktop acceptance.
