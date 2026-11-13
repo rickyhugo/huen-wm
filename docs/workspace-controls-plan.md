@@ -101,11 +101,65 @@ It does not promise restoring arbitrary windows after application relaunch or re
 
 ### Implementation units
 
-- [ ] Extend pure layout and command grammar.
-- [ ] Extend isolated configuration and rule decisions.
-- [ ] Add native group headers and bounded pointer capture.
-- [ ] Define persistence checkpoints and native stable attributes.
-- [ ] Integrate focus memory, container/group transactions, rules, and native controls.
-- [ ] Integrate clean restart save/restore.
+- [x] Extend pure layout and command grammar.
+- [x] Extend isolated configuration and rule decisions.
+- [x] Add native group headers and bounded pointer capture.
+- [x] Define persistence checkpoints and native stable attributes.
+- [x] Integrate focus memory, container/group transactions, rules, and native controls.
+- [x] Integrate clean restart save/restore.
 - [ ] Independently review and exercise native acceptance.
 - [ ] Publish the feature PR with verified outcomes and explicit limits.
+
+## Unit evidence
+
+Rules are integrated at `6497590`. Three native lifecycles passed 38 observations covering literal/glob matching, floating geometry and clamping, workspace assignment, precedence, invalid reload retention, and original-frame recovery.
+Raw evidence is in `../huen-rule-verification/`. The installed app and personal configuration remained unchanged.
+
+The layout unit adds group topology, selection, focus memory, hidden-group projection, edits, and pointer previews.
+Independent review found three defects before native use.
+Corrections `1d32ed0`, `666b1f7`, and `da733b0` prevent four-child ungroup corruption, repair identity-following ancestor memory, and derive previews from the actual proposed projection.
+A fresh independent review confirmed all three fixes. Native container behavior remains pending integration.
+
+The native interaction unit is `d7a94c2`. Strict Objective-C compilation and C/Zig ABI checks passed, followed by independent static review.
+The session unit is `5bd4a83`. Bounded conversion and matching checks passed, followed by independent static review.
+Neither result establishes actual pointer delivery, header appearance, or restart restoration.
+
+Runtime integration is fast-forwarded through `cd0edf4`.
+`96f2878` adds group transactions and verified focus memory.
+`c34aea4` adds header publication, pointer previews, and verified gesture commits.
+`d97c939` and `da15c07` add clean restart conversion and populated-root preservation.
+Debug and ReleaseSafe builds, repository checks, and existing headless smoke pass.
+
+Integration review identified five defects.
+Commits `cd8c607`, `2756e7b`, `0080f04`, and `8ac817a` fix affected-display transaction scope, stale-window rejection, runtime ratio import, master-layout pointer capture, and floating-coordinate origins.
+A fresh independent Sol review confirmed all five fixes with no remaining P1 or P2 findings in that diff.
+See [runtime review fixes](workspace-runtime-review-fixes.md) for source deductions and verification limits.
+
+## Native acceptance checkpoint
+
+The signed `da15c07` candidate passed all 22 existing native scene checks.
+Its executable SHA256 is `8ad4bc5386799229a03cbbe507a89e10d2b8e3f0e6a0b399e017a9878bdaed05`.
+These checks establish baseline behavior, not acceptance of the new workflows.
+
+A four-window startup independently confirmed native tiling and four unique public AXIdentifiers.
+The subsequent valid `restore` command restored every original frame, then crashed during session save.
+The observed panic is integer overflow at `session_status.errors += 1` in `src/main.zig`.
+The root cause remains under investigation in isolated branch `fix/session-save-crash`.
+The full reproduction, harness corrections, native logs, and cleanup evidence are in `../huen-workspace-native/report.md`.
+
+Combined acceptance resumes after the crash fix and independent review.
+Use one exact signed candidate and one desktop owner.
+The remaining sequence is:
+
+1. Verify session-enabled restore and clean quit without a crash.
+2. Verify remembered native focus, parent and child selection, tilemove, four-child groups, cycling, workspace roundtrips, and splitting.
+3. Verify native header activation and modified drag and resize through the input path.
+   Check unmodified delivery, master-layout passthrough, and cancellation without unintended edits.
+4. Restart the manager with the same live fixture.
+   Observe restored assignments, topology, ratios, active workspace, focus, and floating geometry.
+   Confirm private checkpoint permissions and rejection of duplicate or unavailable identities.
+5. Run the required combined baseline and rule regression checks.
+   Record unsupported multi-display and native failure-injection cases separately.
+
+The installed application and personal configuration have not changed during this iteration.
+No feature PR has been opened.

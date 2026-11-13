@@ -2,7 +2,7 @@
 
 These fixes preserve the native placement contract while adding workspace controls.
 The source base is `da15c07`.
-The primary native verifier remains on that frozen base.
+The earlier native run used that frozen base.
 
 ## Placement scope and stale windows
 
@@ -90,7 +90,9 @@ git diff --check
 Each source commit also passed the installed formatting, naming, and Conventional Commit hooks.
 The diff received a local deslop review.
 No tests, fake IPC, headless CLI, GUI, fixture, installed application, or personal configuration were run or changed.
-No agents were spawned, so independent review of these fixes remains open.
+The fix worker spawned no agents.
+A fresh independent Sol reviewer subsequently checked `da15c07..cd0edf4`, including all eight transaction callers and downstream placement paths.
+That review confirmed all five fixes and found no P1 or P2 defects.
 
 Native verification remains open for stale AX failures, rollback rejection, and fullscreen isolation across physical displays.
 Master-layout event passthrough, extreme-ratio restart restoration, and floating restoration across Dock or menu-bar changes also need native acceptance.
