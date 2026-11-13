@@ -4,6 +4,8 @@ A native macOS tiling window manager with persistent dwindle splits, master layo
 
 Headless smoke checks cover configuration and CLI boundaries. Native fixture checks pass tiling, focus, movement, workspace parking and return, automatic reload, and original-frame restoration. Global hotkeys, border appearance, and scene appearance remain unverified.
 
+The [feature-completion report](docs/verification-feature-completion.md) records final workflow checks, minimized-window recovery, measured responsiveness, and remaining limits.
+
 ## Build
 
 ```sh

@@ -1,9 +1,34 @@
 # Work checkpoint
 
-Paused November 13, 2026 at the user's request for a meeting.
-Do not resume implementation, verification, or installation until explicitly asked.
+## Current completion
 
-## Current state
+Resumed November 13, 2026 after explicit user authorization.
+Runtime integration is complete through `1eb6eb8000b1d9255bf0c288b6c7af946c6e1067`.
+The exact verified signed build is installed at `~/Applications/Huen WM.app`.
+Its executable SHA256 is `c7b3853dc237bc9162e0ea0efe0631b372d16f06d9add889d9dc84976127005f`.
+The personal `~/.config/huen-wm/config.lua` now matches `config/aerospace.lua`, with 37 main bindings and six resize-mode bindings.
+Installed validation passes. The installed doctor reports Accessibility and Screen Recording available, with no permission prompt.
+Installed-preset startup, native tiling, and main-to-resize-to-main activation passed on disposable fixture windows.
+The manager and fixture stopped after restoring original frames. AeroSpace PID 35197 was restored enabled in main mode.
+Login startup remains opt-in. AeroSpace remains the active manager outside controlled fixture verification.
+
+[Feature-completion evidence](verification-feature-completion.md) records final native checks, remaining limits, and the matched performance comparison.
+Completed resize measured 160.980 ms baseline and 33.692 ms final candidate across five alternating pairs.
+Each side completed 100 geometry changes and 200 status requests with zero errors.
+Earlier ninefold results do not describe the final artifact.
+
+The prior installed app and configuration are backed up under
+`~/.local/state/huen-wm/backups/2026-11-13-feature-completion/`.
+All eight remaining worker branches were archived in the main repository's
+`.git/huen-wm-iteration-workers-2026-11-13.bundle` and removed after clean-worktree checks.
+Only `main` and `feat/huen-wm` remain.
+PR #1 remains open and unmerged.
+
+## Historical meeting pause
+
+The following sections preserve the earlier pause state. Their pending work and installed versions are superseded by the completion above.
+
+### State at pause
 
 PR #1 is open at https://github.com/rickyhugo/huen-wm/pull/1.
 The latest pushed commit is `940945e`. Current implementation commits are local.
@@ -22,7 +47,7 @@ Launch through macOS `open`. Direct shell invocation has a different permission 
 All workers stopped. No manager, fixture, or measurement helper remains.
 AeroSpace PID 35197 is running and enabled, matching the recorded pre-verification state.
 
-## Placement correction
+### Placement correction at pause
 
 Five alternating A/B pairs measured completed zero-duration fixture resize at 155.55 ms baseline versus 16.62 ms candidate.
 Each side completed 100 geometry operations and 200 status requests without timed errors.
@@ -41,7 +66,7 @@ Its batch-median median was 22.659 ms, with a 15.796–26.527 ms range.
 This was not a fresh alternating comparison.
 Parent integration, independent review, explicit repository checks, and combined native verification remain pending.
 
-## Evidence
+### Evidence at pause
 
 - `docs/verification-2026-11-13.json` records the final outcomes and representative measured geometry.
 - `docs/native-smoke.md` gives the repeatable native command.
@@ -54,7 +79,7 @@ Parent integration, independent review, explicit repository checks, and combined
 - `../huen-response-measure/floating-trace-before`, `floating-scenes-after`, `floating-roundtrip-after`, and `floating-perf-after` contain the correction evidence.
 - `../huen-iteration-review-findings.md` records accepted findings.
 
-## Remaining work
+### Remaining work at pause
 
 1. Review and integrate the worker's animated-placement checkpoint.
 2. Review the combined monitor integration and its layout snapshots, root migration, and same-owner captured transitions.

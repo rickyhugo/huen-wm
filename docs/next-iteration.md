@@ -15,9 +15,9 @@ Native checks and independent review must pass before the updated app replaces t
 - [x] Read the Poteto mode principles.
 - [x] Phase A. Frame the scope and acceptance gates.
 - [x] Phase B. Ground the runtime and compare two interface designs.
-- [ ] Phase C. Implement and verify each bounded unit.
-- [ ] Phase D. Record decisions and verification in `decisions.tsv` throughout the work.
-- [ ] Phase E. Verify the whole, commit, push, and update the PR.
+- [x] Phase C. Implement and verify each bounded unit.
+- [x] Phase D. Record decisions and verification in `decisions.tsv` throughout the work.
+- [x] Phase E. Verify the whole, commit, push, and update the PR.
 
 ## Throughput checkpoint
 
@@ -31,13 +31,17 @@ Native checks and independent review must pass before the updated app replaces t
 - [x] Conventional Commits commit-msg hook with positive and negative command checks.
 - [x] Archive and remove completed agent branches and clean worktrees. Preserve the active feature branch and user work.
 - [x] Optional configurable menu-bar item. Remove workspace HUD announcements.
-- [ ] App launch, close, managed fullscreen, focus wrapping, and split-orientation commands.
-- [ ] Binding modes and directional pixel resize behavior.
+- [x] App launch, close, managed fullscreen, focus wrapping, and split-orientation commands.
+- [x] Binding modes and directional point resize behavior.
 - [x] Opt-in login startup helper.
-- [ ] External-display preference with built-in fallback and mouse-follow preference.
-- [ ] Update the personal Lua config to express the supported AeroSpace behavior.
-- [ ] Profile the actual latency limiter and compare release builds on an unchanged workload.
-- [ ] Independent correctness and comment review, native verification, and pushed Conventional Commits.
+- [x] External-display preference with built-in fallback and mouse-follow preference.
+- [x] Update the personal Lua config to express the supported AeroSpace behavior.
+- [x] Profile the actual latency limiter and compare release builds on an unchanged workload.
+- [x] Independent correctness and comment review, native verification, and pushed Conventional Commits.
+
+Implementation is complete. The [final evidence](verification-feature-completion.md) distinguishes verified single-display behavior from hardware and UI gaps.
+The exact verified build and personal preset are installed. Login startup remains disabled.
+The existing AeroSpace manager remains active outside fixture verification.
 
 ## Operating constraints
 
@@ -46,7 +50,7 @@ One fixture owner controls native verification and restores the prior AeroSpace 
 No unit tests. Keep the existing broad smoke checks and targeted executable probes.
 Keep SIP enabled. Hard-kill recovery and macOS compositor replacement are separate architectural limits, not claims of this iteration.
 
-## Grounding
+## Initial grounding
 
 Zig owns validated configuration, command policy, window intent, workspace membership, and derived layout goals.
 The native bridge owns AX handles, original geometry, hotkeys, IPC, AppKit panels, and the event loop.
@@ -96,3 +100,15 @@ Valid label selections and disable/re-enable configurations reloaded. An invalid
 Public AX inspection of the menu bar was unavailable because the observer lacks permission. No permission settings changed.
 Menu appearance, click dispatch, and visible item removal remain unverified. Source deletion confirms the HUD path is absent, but no visual inspection confirms its absence.
 The fixture and manager stopped after verification. AeroSpace was enabled before and after both controlled runs.
+
+## Final integration
+
+Persistent layouts, modes, application commands, and monitor routing are integrated.
+Native evidence drove fixes for animated floating intent, fresh eligibility at placement boundaries, startup animation timing, and minimized-window recovery.
+Independent Sol reviews found no remaining P1 or P2 findings in the final focused fixes.
+Final artifact checks passed 12 minimized recovery observations, 22 scenes, 40 extended workflow observations, and 42 conditional-close workflow observations.
+Counts include setup and cleanup. No new repository test suite was added.
+
+Five fresh alternating performance pairs measured completed resize at 160.980 ms baseline and 33.692 ms final candidate.
+Fresh observation scans and synchronous AX placement remain measurable costs.
+Final menu appearance, physical hotkeys, multiple displays, native Spaces, and broad application compatibility remain unverified.
