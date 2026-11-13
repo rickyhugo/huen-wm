@@ -2,6 +2,9 @@ pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 
 pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, bundle: [256]u8, title: [512]u8 };
 pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8 };
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
+pub const WMStatusRow = extern struct { title: [80]u8, command: [128]u8, checked: bool, enabled: bool };
+pub const WMStatusPresentation = extern struct { title: [160]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
+pub extern "c" fn platform_status_present(presentation: ?*const WMStatusPresentation) void;
 pub const lua_State = opaque {};
 pub const LUA_OK = 0;
 pub const LUA_TNIL = 0;
@@ -19,7 +22,6 @@ pub extern "c" fn platform_read_frame(identity: u64, frame: *WMRect) bool;
 pub extern "c" fn platform_focus(identity: u64) void;
 pub extern "c" fn platform_bindings(bindings: [*]const WMBinding, count: usize) bool;
 pub extern "c" fn platform_border(identity: u64, width: f64, color: u32) void;
-pub extern "c" fn platform_hud(message: [*:0]const u8) void;
 pub extern "c" fn platform_quit() void;
 pub extern "c" fn platform_restore() usize;
 pub extern "c" fn platform_config_path() [*:0]const u8;

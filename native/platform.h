@@ -12,6 +12,10 @@ typedef struct { double left, top, width, height; } WMRect;
 typedef struct { uint64_t identity; int pid; WMRect frame; bool minimized, fullscreen, focused, stale, onscreen; char bundle[256], title[512]; } WMWindow;
 typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; } WMDisplay;
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
+typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
+typedef struct { char title[160], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;
+/* Synchronous main-thread copy. NULL disables. Strings are terminated UTF-8; row_count <= 12. */
+void platform_status_present(const WMStatusPresentation *presentation);
 int platform_main(int argc, char **argv);
 lua_State *platform_lua_open(void);
 size_t platform_windows(WMWindow *output, size_t capacity);
@@ -21,7 +25,6 @@ bool platform_read_frame(uint64_t identity, WMRect *frame);
 void platform_focus(uint64_t identity);
 bool platform_bindings(const WMBinding *bindings, size_t count);
 void platform_border(uint64_t identity, double width, uint32_t color);
-void platform_hud(const char *text);
 void platform_quit(void);
 size_t platform_restore(void);
 const char *platform_config_path(void);

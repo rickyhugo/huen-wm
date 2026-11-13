@@ -10,6 +10,12 @@ Frames use global top-left points in Zig. The Cocoa adapter converts using the p
 
 Binding names refer to physical keys, not characters produced by the active input layout. Letter, digit, and punctuation names use the ANSI positions from the macOS SDK `Events.h` virtual-key constants. `section` names the ISO key at code `0x0a`. For example, `j`, `k`, and `l` use codes `0x26`, `0x28`, and `0x25`. Numbered workspaces use the physical number row, not the keypad.
 
+## Menu-bar presentation
+
+Zig derives a bounded status presentation from committed configuration and the active monitor. The bridge copies terminated UTF-8 strings and at most twelve rows synchronously on the main thread. `NULL` removes the item. AppKit renders the supplied title, tooltip, checkmarks, availability, and commands without querying workspace JSON. There is no workspace popup.
+
+Publication follows successful startup hotkey activation, observation, commands, successful reload, and generation-checked scene completion. Equal presentations do not call AppKit. A monitor identity change invalidates the menu even when its text is unchanged. Menu replacement cancels tracking and detaches old targets. Dispatch rejects stale items, copies the command before calling Zig, and parses the response before another command can replace it. Shutdown removes the item before worker draining and rejects later presentation calls. Validation does not activate a status item.
+
 ## Transactions
 
 Startup and validation wait for one isolated evaluation before the application loop starts. Startup installs bindings from that candidate without evaluating Lua again. The executable handles `--config-worker` before Cocoa or window-manager setup. `native/config_worker.c` uses `posix_spawn` with the same executable, a private response descriptor, nonblocking pipes, and a monotonic deadline. It bounds responses, drains error output, and accepts only a complete validated JSON response with a successful exit status. Lua never runs in the live manager. Metatables on consumed tables, sparse arrays, extra collection keys, and NUL field names are rejected.

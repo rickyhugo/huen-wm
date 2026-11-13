@@ -8,7 +8,10 @@ const max_response = 128 * 1024;
 
 pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55 };
 pub const Rule = struct { bundle: [256:0]u8 = @splat(0), floating: bool = false, workspace: ?usize = null };
+pub const StatusLabel = enum { name, index, index_and_name };
+pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
 pub const ConfigCandidate = struct {
+    status_bar: StatusBar = .{},
     gap: f64 = 12,
     border_width: f64 = 2,
     border_color: u32 = 0x9bafff,
@@ -104,6 +107,7 @@ const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64 };
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireRule = struct { bundle: []const u8, floating: bool, workspace: ?usize };
 const WireConfig = struct {
+    status_bar: StatusBar,
     gap: f64,
     border_width: f64,
     border_color: u32,
@@ -124,6 +128,7 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
     defer allocator.free(buffer);
     var writer: std.Io.Writer = .fixed(buffer);
     std.json.Stringify.value(WireConfig{
+        .status_bar = candidate.status_bar,
         .gap = candidate.gap,
         .border_width = candidate.border_width,
         .border_color = candidate.border_color,
@@ -141,6 +146,7 @@ fn decode(response: []const u8) !ConfigCandidate {
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.bindings.len > 128 or wire.rules.len > 64) return error.InvalidCollectionSize;
     var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .binding_count = wire.bindings.len, .rule_count = wire.rules.len };
+    candidate.status_bar = wire.status_bar;
     for (wire.workspaces, 0..) |workspace, index| {
         try copyText(&candidate.workspaces[index].name, workspace.name);
         candidate.workspaces[index].layout = workspace.layout;
@@ -361,7 +367,13 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "rules" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "rules", "status_bar" });
+    if (rawField(state, "status_bar") != native.LUA_TNIL) {
+        try checkKeys(state, &.{ "enabled", "label" });
+        result.status_bar.enabled = try fieldBool(state, "enabled", true);
+        if (try fieldString(state, "label")) |label| result.status_bar.label = std.meta.stringToEnum(StatusLabel, label) orelse return error.InvalidStatusLabel;
+    }
+    pop(state);
     result.gap = try fieldNumber(state, "gap", 12, 0, 100);
     result.border_width = try fieldNumber(state, "border_width", 2, 0, 12);
     result.duration = try fieldNumber(state, "motion_duration", 0.12, 0, 0.5);

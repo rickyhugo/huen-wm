@@ -17,6 +17,7 @@ bind("ctrl+alt", "-", "resize -0.05")
 bind("ctrl+alt", "r", "reload")
 
 return {
+    status_bar = { enabled = true, label = "name" },
     gap = 12,
     layout = "dwindle",
     master_ratio = 0.55,

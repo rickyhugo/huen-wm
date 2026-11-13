@@ -37,8 +37,6 @@ static BOOL stopping;
 static NSString *configPath;
 static NSString *bundleFilter;
 static NSPanel *borderPanel;
-static NSPanel *hudPanel;
-static double hudDeadline;
 static int serverSocket = -1;
 static NSString *socketPath;
 static EventHotKeyRef hotkeyRefs[256];
@@ -300,18 +298,62 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     [borderPanel orderFrontRegardless];
 }
 
-void platform_hud(const char *text) {
-    if (!hudPanel) {
-        hudPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 360, 76) styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
-        hudPanel.opaque = NO; hudPanel.backgroundColor = NSColor.clearColor; hudPanel.ignoresMouseEvents = YES; hudPanel.level = NSStatusWindowLevel;
-        hudPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary;
-        NSVisualEffectView *effect = [[NSVisualEffectView alloc] initWithFrame:hudPanel.contentView.bounds]; effect.material = NSVisualEffectMaterialHUDWindow; effect.blendingMode = NSVisualEffectBlendingModeBehindWindow; effect.state = NSVisualEffectStateActive; effect.wantsLayer = YES; effect.layer.cornerRadius = 18;
-        hudPanel.contentView = effect;
+@interface StatusItemOwner : NSObject
+@property(nonatomic, strong) NSStatusItem *item;
+- (void)dispatchCommand:(NSMenuItem *)sender;
+@end
+
+@implementation StatusItemOwner
+- (void)dispatchCommand:(NSMenuItem *)sender {
+    if (stopping || !self.item.menu || sender.target != self || !sender.enabled || sender.menu != self.item.menu ||
+        [self.item.menu indexOfItem:sender] < 0) return;
+    NSString *command = [sender.representedObject copy];
+    const char *reply = wm_command(command.UTF8String);
+    NSData *data = [NSData dataWithBytes:reply length:strlen(reply)];
+    NSError *parseError = nil;
+    id response = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
+    if (parseError || ![response isKindOfClass:NSDictionary.class]) {
+        platform_error("Status menu command returned invalid JSON");
+    } else if (response[@"error"]) {
+        NSString *message = response[@"err_message"];
+        platform_error([message isKindOfClass:NSString.class] ? message.UTF8String : "Status menu command failed");
     }
-    for (NSView *view in hudPanel.contentView.subviews) [view removeFromSuperview];
-    NSTextField *label = [NSTextField labelWithString:[NSString stringWithUTF8String:text]]; label.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold]; label.alignment = NSTextAlignmentCenter; label.frame = NSMakeRect(12, 24, 336, 28); [hudPanel.contentView addSubview:label];
-    NSRect display = NSScreen.mainScreen.visibleFrame; [hudPanel setFrameOrigin:NSMakePoint(NSMidX(display) - 180, NSMidY(display) - 38)];
-    [hudPanel orderFrontRegardless]; hudDeadline = CACurrentMediaTime() + 0.85;
+}
+@end
+
+static StatusItemOwner *statusOwner;
+
+void platform_status_present(const WMStatusPresentation *presentation) {
+    if (!presentation || stopping) {
+        if (!statusOwner) return;
+        [statusOwner.item.menu cancelTracking];
+        for (NSMenuItem *entry in statusOwner.item.menu.itemArray) entry.target = nil;
+        statusOwner.item.menu = nil;
+        [NSStatusBar.systemStatusBar removeStatusItem:statusOwner.item];
+        statusOwner = nil;
+        return;
+    }
+    if (presentation->row_count > 12) { platform_error("Status menu exceeds row limit"); return; }
+    if (!statusOwner) {
+        statusOwner = [StatusItemOwner new];
+        statusOwner.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
+    }
+    [statusOwner.item.menu cancelTracking];
+    for (NSMenuItem *entry in statusOwner.item.menu.itemArray) entry.target = nil;
+    NSMenu *menu = [NSMenu new];
+    menu.autoenablesItems = NO;
+    for (size_t index = 0; index < presentation->row_count; index++) {
+        const WMStatusRow *row = &presentation->rows[index];
+        NSMenuItem *entry = [[NSMenuItem alloc] initWithTitle:[NSString stringWithUTF8String:row->title] action:@selector(dispatchCommand:) keyEquivalent:@""];
+        entry.target = statusOwner;
+        entry.representedObject = [NSString stringWithUTF8String:row->command];
+        entry.enabled = row->enabled;
+        entry.state = row->checked ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:entry];
+    }
+    statusOwner.item.button.title = [NSString stringWithUTF8String:presentation->title];
+    statusOwner.item.button.toolTip = [NSString stringWithUTF8String:presentation->tooltip];
+    statusOwner.item.menu = menu;
 }
 
 static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
@@ -359,7 +401,7 @@ size_t platform_restore(void) {
     }
     return outstanding;
 }
-void platform_quit(void) { stopping = YES; }
+void platform_quit(void) { stopping = YES; platform_status_present(NULL); }
 const char *platform_config_path(void) { return configPath.fileSystemRepresentation; }
 const char *platform_filter(void) { return bundleFilter.UTF8String ?: ""; }
 void platform_config_changed(void) { dirty = YES; }
@@ -444,18 +486,18 @@ int platform_main(int argc, char **argv) {
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
         if (!wm_activate_config()) { close(lockDescriptor); return 1; }
         serverSocket = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (serverSocket < 0) { perror("IPC socket"); close(lockDescriptor); return 1; }
+        if (serverSocket < 0) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         struct sockaddr_un address = {0}; address.sun_family = AF_UNIX; strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
         unlink(socketPath.fileSystemRepresentation);
         mode_t oldMask = umask(0077); int bindResult = bind(serverSocket, (struct sockaddr *)&address, sizeof(address)); umask(oldMask);
-        if (bindResult || listen(serverSocket, 8)) { perror("IPC socket"); close(lockDescriptor); return 1; }
+        if (bindResult || listen(serverSocket, 8)) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         fcntl(serverSocket, F_SETFL, O_NONBLOCK);
         signal(SIGINT, signalHandler); signal(SIGTERM, signalHandler); signal(SIGPIPE, SIG_IGN);
         __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             wm_config_poll();
-            if (interrupted) stopping = YES;
+            if (interrupted) platform_quit();
             double now = CACurrentMediaTime();
             if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
             if (now - lastConfigCheck > 0.25) {
@@ -483,7 +525,6 @@ int platform_main(int argc, char **argv) {
                     dirty = YES;
                 }
             }
-            if (hudDeadline && now > hudDeadline) { [hudPanel orderOut:nil]; hudDeadline = 0; }
             int client = accept(serverSocket, NULL, NULL);
             if (client >= 0) {
                 double deadline = CACurrentMediaTime() + 0.1;

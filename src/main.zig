@@ -27,6 +27,89 @@ var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
 var config_error: ?[]const u8 = null;
+const StatusPresentation = union(enum) {
+    disabled,
+    visible: struct { display_identity: ?u32, content: native.WMStatusPresentation },
+};
+var published_status: StatusPresentation = .disabled;
+var status_active = false;
+
+fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
+    @memset(destination, 0);
+    var length: usize = 0;
+    var scalars: usize = 0;
+    while (length < source.len and scalars < scalar_limit) : (scalars += 1) {
+        const width = std.unicode.utf8ByteSequenceLength(source[length]) catch break;
+        if (length + width > source.len or length + width >= destination.len) break;
+        length += width;
+    }
+    @memcpy(destination[0..length], source[0..length]);
+}
+
+fn deriveStatus() StatusPresentation {
+    if (!config.status_bar.enabled) return .disabled;
+    var presentation = std.mem.zeroes(native.WMStatusPresentation);
+    const display: ?Display = if (displays.items.len > 0) displays.items[activeDisplay()] else null;
+    const workspace_index = if (display) |current| current.workspace else 0;
+    const name = text(&config.workspaces[workspace_index].name);
+    var index_buffer: [8]u8 = undefined;
+    const index_text = std.fmt.bufPrint(&index_buffer, "{d}", .{workspace_index + 1}) catch unreachable;
+    var label_buffer: [80]u8 = undefined;
+    const label = if (suspended) "Paused" else if (display == null) "Huen WM" else switch (config.status_bar.label) {
+        .name => name,
+        .index => index_text,
+        .index_and_name => if (std.mem.eql(u8, name, index_text)) name else std.fmt.bufPrint(&label_buffer, "{s}  {s}", .{ index_text, name }) catch unreachable,
+    };
+    statusText(&presentation.title, label, 24);
+    var tooltip_buffer: [512]u8 = undefined;
+    const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s}{s}", .{
+        if (display) |current| text(&current.name) else "No display",
+        name,
+        if (transition_error != null) " · Workspace switch failed" else "",
+    }) catch unreachable;
+    statusText(&presentation.tooltip, tooltip, 255);
+    for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
+        const row = &presentation.rows[index];
+        var row_buffer: [80]u8 = undefined;
+        var number_buffer: [8]u8 = undefined;
+        const number = std.fmt.bufPrint(&number_buffer, "{d}", .{index + 1}) catch unreachable;
+        const workspace_name = text(&workspace.name);
+        const title = if (std.mem.eql(u8, number, workspace_name)) workspace_name else std.fmt.bufPrint(&row_buffer, "{s}  {s}", .{ number, workspace_name }) catch unreachable;
+        statusText(&row.title, title, 79);
+        const command = std.fmt.bufPrint(&row.command, "workspace {d}", .{index + 1}) catch unreachable;
+        row.command[command.len] = 0;
+        row.checked = display != null and workspace_index == index;
+        row.enabled = display != null and !suspended and transition == null;
+    }
+    const reload = &presentation.rows[config.workspace_count];
+    statusText(&reload.title, "Reload configuration", 79);
+    statusText(&reload.command, "reload", 127);
+    reload.enabled = !suspended and transition == null and !config_request.inFlight();
+    const quit = &presentation.rows[config.workspace_count + 1];
+    statusText(&quit.title, "Quit", 79);
+    statusText(&quit.command, "quit", 127);
+    quit.enabled = true;
+    presentation.row_count = config.workspace_count + 2;
+    return .{ .visible = .{ .display_identity = if (display) |current| current.identity else null, .content = presentation } };
+}
+
+fn publishStatus() void {
+    if (!status_active) return;
+    const next = deriveStatus();
+    const unchanged = switch (next) {
+        .disabled => published_status == .disabled,
+        .visible => |visible_status| switch (published_status) {
+            .disabled => false,
+            .visible => |previous| std.meta.eql(visible_status, previous),
+        },
+    };
+    if (unchanged) return;
+    published_status = next;
+    switch (next) {
+        .disabled => native.platform_status_present(null),
+        .visible => |*presentation| native.platform_status_present(&presentation.content),
+    }
+}
 
 pub fn main(initial: std.process.Init.Minimal) u8 {
     const arguments = initial.args.vector;
@@ -63,7 +146,10 @@ export fn wm_initialize(path: [*:0]const u8) bool {
 }
 
 export fn wm_activate_config() bool {
-    return native.platform_bindings(&config.bindings, config.binding_count);
+    if (!native.platform_bindings(&config.bindings, config.binding_count)) return false;
+    status_active = true;
+    publishStatus();
+    return true;
 }
 
 fn rejectConfig(message: [:0]const u8) void {
@@ -99,6 +185,7 @@ export fn wm_config_poll() void {
     for (windows.items) |*window| window.workspace = @min(window.workspace, config.workspace_count - 1);
     native.platform_config_changed();
     reconcile();
+    publishStatus();
 }
 
 fn cancelConfig() void {
@@ -390,6 +477,7 @@ fn reconcile() void {
 }
 export fn wm_tick() void {
     if (!initialized) return;
+    defer publishStatus();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
     var updated: std.ArrayList(Display) = .empty;
@@ -467,15 +555,6 @@ fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     }
     return result;
 }
-fn announce(displayIndexValue: usize) void {
-    const display = displays.items[displayIndexValue];
-    var buffer: [256:0]u8 = @splat(0);
-    const name = text(&config.workspaces[display.workspace].name);
-    const message = std.fmt.bufPrint(&buffer, "{d}  {s}  ·  {s}", .{ display.workspace + 1, name, text(&display.name) }) catch return;
-    buffer[message.len] = 0;
-    native.platform_hud(&buffer);
-}
-
 fn cancelTransition() void {
     if (transition != null) snapshot_presentation = .idle;
     transition = null;
@@ -538,7 +617,6 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         break;
     };
     transition_error = null;
-    announce(displaySlot);
     native.platform_config_changed();
     return true;
 }
@@ -547,6 +625,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const callbackGeneration = @intFromPtr(context orelse return);
     const pending = transition orelse return;
     if (callbackGeneration != pending.generation) return;
+    defer publishStatus();
     snapshot_presentation = if (covered) .captured else .fallback;
     const slot = displayIndex(pending.display);
     if (slot) |displaySlot| {
@@ -556,6 +635,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     if (covered) native.huen_scene_finish(pending.generation);
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
+    defer publishStatus();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
         .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
@@ -684,6 +764,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     return json(.{ .ok = true });
 }
 export fn wm_shutdown() bool {
+    status_active = false;
+    native.platform_status_present(null);
     cancelConfig();
     if (config_request.inFlight()) return false;
     cancelTransition();
