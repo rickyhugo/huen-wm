@@ -204,8 +204,13 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         if (workspace) |workspace_index| {
             const defaults = config.workspaces[workspace_index];
             if (@backingInt(defaults.layout) != @backingInt(root.default_layout) or defaults.ratio != root.default_ratio) valid = false;
-            for (destinations[0..index]) |destination| if (destination) |previous| {
-                if (previous.display == display and previous.workspace == workspace_index) valid = false;
+            for (destinations[0..index], 0..) |destination, previous_index| if (destination) |previous| {
+                if (previous.display != display or previous.workspace != workspace_index) continue;
+                if (!rootHasIntent(snapshot, &mapping, previous_index) and rootHasIntent(snapshot, &mapping, index)) {
+                    if (store.roots[previous_index]) |*previous_state| store.discard(previous_state);
+                    store.roots[previous_index] = null;
+                    destinations[previous_index] = null;
+                } else valid = false;
             };
         }
         if (!valid) {
@@ -241,4 +246,13 @@ fn mappedIdentity(windows: []const LiveWindow, mapping: []const ?usize, index: ?
     const saved = index orelse return null;
     const current = mapping[saved] orelse return null;
     return windows[current].identity;
+}
+
+fn rootHasIntent(snapshot: *const session.Snapshot, mapping: []const ?usize, index: usize) bool {
+    const root = snapshot.roots[index];
+    if (root.layout != root.default_layout or root.ratio != root.default_ratio) return true;
+    for (snapshot.windows, 0..) |window, window_index| {
+        if (window.root == index and mapping[window_index] != null) return true;
+    }
+    return false;
 }
