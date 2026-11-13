@@ -21,6 +21,7 @@ pub extern "c" fn platform_main(argc: c_int, argv: [*]const [*:0]const u8) c_int
 pub extern "c" fn platform_lua_open() ?*lua_State;
 pub extern "c" fn platform_error(message: [*:0]const u8) void;
 pub extern "c" fn platform_windows(output: [*]WMWindow, capacity: usize) usize;
+pub extern "c" fn platform_refresh_windows(output: [*]WMWindow, capacity: usize) usize;
 pub extern "c" fn platform_displays(output: [*]WMDisplay, capacity: usize) usize;
 pub extern "c" fn platform_frame(identity: u64, frame: WMRect, duration: f64, intent: WMFrameIntent) bool;
 pub extern "c" fn platform_read_frame(identity: u64, frame: *WMRect) bool;

@@ -917,7 +917,20 @@ fn cancelTransition() void {
     native.huen_scene_cancel();
 }
 
+fn refreshObservations() void {
+    var observed: [1024]native.WMWindow = undefined;
+    const count = native.platform_refresh_windows(&observed, observed.len);
+    for (windows.items) |*window| {
+        window.observation.stale = true;
+        for (observed[0..count]) |observation| if (observation.identity == window.identity) {
+            window.observation = observation;
+            break;
+        };
+    }
+}
+
 fn focusWorkspace(displayIdentity: u32) void {
+    refreshObservations();
     const index = displayIndex(displayIdentity) orelse return;
     const winner = workspaceLayout(displayIdentity, displays.items[index].workspace).fullscreen;
     var target: ?u64 = null;
@@ -1098,6 +1111,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     if (suspended) return failure("RuntimeSuspendedRestartToResume");
     if (transition != null) return failure("WorkspaceTransitionPending");
     if (displays.items.len == 0) return failure("NoDisplays");
+    refreshObservations();
     const observed_focus = native.platform_focused_window();
     focused = if (observed_focus != 0) observed_focus else null;
     if (focused != last_observed_focus) {

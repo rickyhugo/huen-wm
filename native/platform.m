@@ -122,7 +122,8 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
     dirty = YES;
 }
 
-static void scanWindows(void) {
+static BOOL scanWindowSnapshot(void) {
+    BOOL unmatched = NO;
     NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
     NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
     for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
@@ -207,6 +208,7 @@ static void scanWindows(void) {
                 if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) matchingCG++;
             }
             observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
+            if (frames.count == windows.count && matchingAX == 1 && matchingCG == 0) unmatched = YES;
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
@@ -224,6 +226,15 @@ static void scanWindows(void) {
     [records removeObjectsAtIndexes:dead];
     for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
     for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) [applications removeObjectForKey:process];
+    return !unmatched;
+}
+
+static void scanWindows(void) {
+    // AX can reflect our placement before WindowServer publishes the matching CG bounds.
+    for (NSUInteger attempt = 0; attempt < 3; attempt++) {
+        if (attempt) usleep(10000);
+        if (scanWindowSnapshot()) break;
+    }
 }
 
 size_t platform_windows(WMWindow *output, size_t capacity) {
@@ -234,6 +245,11 @@ size_t platform_windows(WMWindow *output, size_t capacity) {
         output[index].motion = record.motion;
     }
     return count;
+}
+
+size_t platform_refresh_windows(WMWindow *output, size_t capacity) {
+    scanWindows();
+    return platform_windows(output, capacity);
 }
 
 size_t platform_displays(WMDisplay *output, size_t capacity) {

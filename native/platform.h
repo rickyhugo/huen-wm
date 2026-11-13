@@ -24,6 +24,7 @@ void platform_status_present(const WMStatusPresentation *presentation);
 int platform_main(int argc, char **argv);
 lua_State *platform_lua_open(void);
 size_t platform_windows(WMWindow *output, size_t capacity);
+size_t platform_refresh_windows(WMWindow *output, size_t capacity);
 size_t platform_displays(WMDisplay *output, size_t capacity);
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent);
 bool platform_read_frame(uint64_t identity, WMRect *frame);
