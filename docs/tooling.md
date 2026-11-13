@@ -9,7 +9,7 @@ mise run check
 mise run build
 ```
 
-Install the repository's pre-commit hook.
+Install the repository's pre-commit and commit-msg hooks.
 Linked worktrees share this Git hook configuration.
 
 ```sh
@@ -20,6 +20,26 @@ mise exec -- hk install --mise
 `mise run fmt` formats Zig files and runs the other checks.
 Pre-commit applies the same checks to staged files and stages Zig formatting fixes.
 hk preserves unstaged work with its default pre-commit stash behavior.
+
+Use a Conventional Commit title for each new commit.
+The format is `type(scope)!: subject`. The scope and `!` are optional.
+For example, use `fix: handle empty input` or `feat(layout)!: change tile order`.
+Accepted types are `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`,
+`refactor`, `revert`, `style`, and `test`.
+Types are case-insensitive. Use lowercase for consistency.
+The subject must start with a non-whitespace character.
+The commit-msg hook checks the title, not the body or footers.
+Merge, revert, and fixup commits also need a Conventional Commit title.
+Existing commits do not need changes.
+
+The Lua checker rejects whitespace-only subjects and repeated `!` markers
+that hk 2.9.0's built-in checker accepts.
+
+To check a message file without creating a commit, run:
+
+```sh
+mise exec -- hk run commit-msg "/path/to/commit message.txt"
+```
 
 The name checker rejects single-letter ASCII identifiers in Zig, Objective-C,
 Objective-C++, C headers, and Lua. This includes bare references and function
@@ -39,5 +59,6 @@ and Zig output directories are excluded. Keep external source in those directori
 Tool versions and task definitions live in `mise.toml`.
 Hook commands and file selection live in `hk.pkl`.
 
-References are the [mise configuration](https://mise.jdx.dev/configuration.html)
-and [hk configuration](https://hk.jdx.dev/configuration.html) documentation.
+References are the [mise configuration](https://mise.jdx.dev/configuration.html),
+[hk configuration](https://hk.jdx.dev/configuration.html), and
+[Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/).

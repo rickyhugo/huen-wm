@@ -2,6 +2,18 @@ amends "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Config.pk
 
 min_hk_version = "2.9.0"
 
+hooks {
+  ["commit-msg"] {
+    steps {
+      ["conventional-commit"] {
+        check = new Command {
+          argv = List("mise", "exec", "--", "lua", "scripts/check-commit-message.lua", "{{commit_msg_file}}")
+        }
+      }
+    }
+  }
+}
+
 exclude = List("vendor", "vendored", "third_party", "third-party", ".zig-cache", "zig-out", "zig-pkg")
 
 steps {
