@@ -324,10 +324,21 @@ fn preferredOwner() ?u32 {
 }
 
 const Routing = struct {
+    const Activation = struct { display: u32, workspace: usize };
     owner: ?u32 = null,
-    activate: ?struct { display: u32, workspace: usize } = null,
+    activate: ?Activation = null,
     send: ?struct { index: usize, display: u32, workspace: usize } = null,
 };
+
+fn ownerActivation(owner: ?u32) ?Routing.Activation {
+    const destination = owner orelse return null;
+    if (owner == workspace_owner) return null;
+    const workspace = if (workspace_owner) |previous|
+        if (displayIndex(previous)) |index| displays.items[index].workspace else @min(owner_workspace, config.workspace_count - 1)
+    else
+        displays.items[displayIndex(destination).?].workspace;
+    return .{ .display = destination, .workspace = workspace };
+}
 
 fn commitRouting(request: Routing) bool {
     transition_error = "Routing snapshot allocation failed";
@@ -448,9 +459,10 @@ fn routeMembership() bool {
         if (has_state and (displayIndex(state.display) == null or (owner != null and state.display != owner.?))) needed = true;
     };
     if (!needed) return true;
-    const active_workspace = if (workspace_owner == null and owner != null) displays.items[displayIndex(owner.?).?].workspace else @min(owner_workspace, config.workspace_count - 1);
-    if (!commitRouting(.{ .owner = owner, .activate = if (owner != null and owner != workspace_owner) .{ .display = owner.?, .workspace = active_workspace } else null })) return false;
+    const activation = ownerActivation(owner);
+    if (!commitRouting(.{ .owner = owner, .activate = activation })) return false;
     workspace_owner = owner;
+    if (activation) |active| owner_workspace = active.workspace;
     return true;
 }
 fn nearestDisplay(frame: Rect) u32 {
@@ -820,8 +832,8 @@ export fn wm_tick() void {
         if (!found) _ = windows.orderedRemove(index) else index += 1;
     }
     routing_blocked = if (!suspended and transition == null) !routeMembership() else routing_blocked;
+    focused = observed_focus;
     if (observed_focus != last_observed_focus) {
-        focused = observed_focus;
         if (observed_focus) |identity| if (windowIndex(identity)) |slot| {
             if (displayIndex(windows.items[slot].display) != null) selectDisplay(windows.items[slot].display);
         };
@@ -917,7 +929,7 @@ fn focusWorkspace(displayIdentity: u32) void {
         if (native.platform_focused_window() != identity) return;
         focused = identity;
         last_observed_focus = identity;
-    } else focused = null;
+    }
     selectDisplay(displayIdentity);
 }
 
@@ -1190,8 +1202,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .send_to_workspace => |workspace| {
                     const owner = preferredOwner();
                     const destination = owner orelse windows.items[sourceIndex].display;
-                    if (!commitRouting(.{ .owner = owner, .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    const activation = ownerActivation(owner);
+                    if (!commitRouting(.{ .owner = owner, .activate = activation, .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     workspace_owner = owner;
+                    if (activation) |active| owner_workspace = active.workspace;
                     routing_blocked = false;
                     if (!visible(windows.items[sourceIndex])) focused = null;
                     native.platform_config_changed();

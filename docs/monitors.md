@@ -20,11 +20,11 @@ The first monitor class with an available display wins. Within that class, the c
 
 ## Commands and focus
 
-With global routing enabled, `workspace N` activates workspace N on its owner, even if keyboard focus is on another monitor. The command selects the destination monitor after placement succeeds. Selecting an already visible workspace also selects its monitor. An empty workspace retains that selection independently of the last focused window.
+With global routing enabled, `workspace N` activates workspace N on its owner, even if keyboard focus is on another monitor. After placement succeeds, the command selects the destination monitor when it is empty or AX confirms focus on its target window. Selecting an already visible workspace uses the same focus confirmation. An empty workspace retains that selection independently of the last focused window and does not invent a focus change.
 
-`send-to-workspace N` moves the window's display and workspace membership together. It does not activate an inactive destination workspace or change the selected monitor. Window rules with a workspace use the same owner.
+`send-to-workspace N` moves the window's display and workspace membership together. It does not activate an inactive destination workspace or change the selected monitor. If the send changes the owner monitor, the new owner retains the old owner's active workspace, not the send destination workspace. Window rules with a workspace use the same owner.
 
-A genuine observed focus change updates the selected monitor. Repeated observations of the old focused window do not undo an explicit empty-workspace selection. Directional focus selects the focused window's monitor immediately.
+A genuine observed focus change updates the selected monitor. Repeated observations of the old focused window do not undo an explicit empty-workspace selection. Directional focus selects the target's monitor only after AX confirms focus on that target. An accepted but unverified focus request leaves monitor selection and pointer position unchanged until a genuine observed focus change.
 
 When mouse follow is enabled, selecting a different monitor moves the pointer to its full-bounds center only if the pointer is outside those bounds. Coordinates use the top-left global display space. Same-monitor workspace changes and background routing do not warp the pointer.
 
