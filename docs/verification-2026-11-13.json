@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-13",
+  "source_revision": "9b44757",
+  "platform": "macOS",
+  "zig": "0.17.0",
+  "headless_smoke": "passed",
+  "repository_checks": "passed",
+  "native_scene_run": {
+    "artifact_directory": "huen-native-scenes3",
+    "passed": true,
+    "checks_passed": 22,
+    "physical_displays": 1,
+    "multi_display_covered": false,
+    "snapshot_presentations": ["captured", "captured"],
+    "focus_after_reload": "dev.huen-wm.fixture",
+    "original_frames_restored": true,
+    "cleanup_errors": []
+  },
+  "fixture_alpha_parking_points": {
+    "before": {"left": 12, "top": 46, "width": 959, "height": 924},
+    "requested": {"left": 1511, "top": 981, "width": 959, "height": 924},
+    "observed": {"left": 1511, "top": 950, "width": 959, "height": 924},
+    "visible_strip": {"width": 1, "height": 32}
+  },
+  "earlier_instant_run": {
+    "artifact_directory": "huen-native-run10",
+    "source_revision": "22ba2a8",
+    "passed": true,
+    "checks_passed": 22
+  },
+  "unverified": [
+    "final multi-display parking and fallback",
+    "physical global hotkey delivery",
+    "scene and border appearance",
+    "native Space changes and display removal",
+    "external minimization during restoration",
+    "broad third-party application compatibility"
+  ],
+  "known_limits": [
+    "hard-kill recovery is unsupported",
+    "synchronous AX calls can block the main loop"
+  ]
+}

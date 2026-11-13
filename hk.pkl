@@ -1,0 +1,33 @@
+amends "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Config.pkl"
+
+min_hk_version = "2.9.0"
+
+hooks {
+  ["commit-msg"] {
+    steps {
+      ["conventional-commit"] {
+        check = new Command {
+          argv = List("mise", "exec", "--", "lua", "scripts/check-commit-message.lua", "{{commit_msg_file}}")
+        }
+      }
+    }
+  }
+}
+
+exclude = List("vendor", "vendored", "third_party", "third-party", ".zig-cache", "zig-out", "zig-pkg")
+
+steps {
+  ["zig-fmt"] {
+    glob = "*.zig"
+    check = "mise exec -- zig fmt --check {{files}}"
+    fix = "mise exec -- zig fmt {{files}}"
+  }
+  ["names"] {
+    glob = List("*.zig", "*.c", "*.m", "*.mm", "*.h", "*.lua")
+    check = "mise exec -- lua scripts/check-names.lua {{files}}"
+  }
+  ["lua-syntax"] {
+    glob = "*.lua"
+    check = "mise exec -- luac -p {{files}}"
+  }
+}
