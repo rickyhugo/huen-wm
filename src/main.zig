@@ -183,8 +183,10 @@ fn saveSession(clean: bool) void {
     if (session_save_attempted or !config.session.enabled) return;
     session_save_attempted = true;
     if (session_frozen) |*checkpoint| {
-        defer checkpoint.deinit();
-        defer session_frozen = null;
+        defer {
+            checkpoint.deinit();
+            session_frozen = null;
+        }
         if (!clean or checkpoint.snapshot.windows.len == 0) {
             session_status.save = .skipped;
             return;
