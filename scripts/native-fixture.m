@@ -53,8 +53,9 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
             NSArray<NSScreen *> *screens = [NSScreen screens];
             NSScreen *screen = screens[(windowIndex == 2 && screens.count > 1) ? 1 : 0];
             NSRect visibleFrame = screen.visibleFrame;
-            [window setFrameOrigin:NSMakePoint(NSMinX(visibleFrame) + 80 + (windowIndex % 2) * 100,
-                                               NSMinY(visibleFrame) + 100 + (windowIndex % 2) * 60)];
+            NSUInteger offsetIndex = screens.count > 1 ? windowIndex % 2 : windowIndex;
+            [window setFrameOrigin:NSMakePoint(NSMinX(visibleFrame) + 80 + offsetIndex * 100,
+                                               NSMinY(visibleFrame) + 100 + offsetIndex * 60)];
         }
         [windows addObject:window];
         [window makeKeyAndOrderFront:nil];
