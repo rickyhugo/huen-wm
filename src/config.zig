@@ -10,6 +10,11 @@ pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwi
 pub const Rule = struct { bundle: [256:0]u8 = @splat(0), floating: bool = false, workspace: ?usize = null };
 pub const StatusLabel = enum { name, index, index_and_name };
 pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
+pub const Mode = struct {
+    name: [64:0]u8 = @splat(0),
+    bindings: [128]native.WMBinding = @splat(std.mem.zeroes(native.WMBinding)),
+    binding_count: usize = 0,
+};
 pub const ConfigCandidate = struct {
     status_bar: StatusBar = .{},
     gap: f64 = 12,
@@ -18,10 +23,15 @@ pub const ConfigCandidate = struct {
     duration: f64 = 0.12,
     workspaces: [10]Workspace = @splat(.{}),
     workspace_count: usize = 5,
-    bindings: [128]native.WMBinding = @splat(std.mem.zeroes(native.WMBinding)),
-    binding_count: usize = 0,
+    modes: [8]Mode = @splat(.{}),
+    mode_count: usize = 1,
     rules: [64]Rule = @splat(.{}),
     rule_count: usize = 0,
+
+    pub fn modeIndex(self: *const ConfigCandidate, name: []const u8) ?usize {
+        for (self.modes[0..self.mode_count], 0..) |*mode, index| if (std.mem.eql(u8, text(&mode.name), name)) return index;
+        return null;
+    }
 };
 pub const LoadResult = union(enum) { ready: ConfigCandidate, failed: anyerror };
 pub const Completion = struct { generation: u64, result: LoadResult };
@@ -105,6 +115,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
 
 const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64 };
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
+const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireRule = struct { bundle: []const u8, floating: bool, workspace: ?usize };
 const WireConfig = struct {
     status_bar: StatusBar,
@@ -113,16 +124,20 @@ const WireConfig = struct {
     border_color: u32,
     duration: f64,
     workspaces: []const WireWorkspace,
-    bindings: []const WireBinding,
+    modes: []const WireMode,
     rules: []const WireRule,
 };
 
 fn encode(candidate: *const ConfigCandidate) ![]u8 {
     var workspaces: [10]WireWorkspace = undefined;
-    var bindings: [128]WireBinding = undefined;
+    var bindings: [8][128]WireBinding = undefined;
+    var modes: [8]WireMode = undefined;
     var rules: [64]WireRule = undefined;
     for (candidate.workspaces[0..candidate.workspace_count], 0..) |*workspace, index| workspaces[index] = .{ .name = text(&workspace.name), .layout = workspace.layout, .ratio = workspace.ratio };
-    for (candidate.bindings[0..candidate.binding_count], 0..) |*binding, index| bindings[index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
+    for (candidate.modes[0..candidate.mode_count], 0..) |*mode, mode_index| {
+        for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| bindings[mode_index][index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
+        modes[mode_index] = .{ .name = text(&mode.name), .bindings = bindings[mode_index][0..mode.binding_count] };
+    }
     for (candidate.rules[0..candidate.rule_count], 0..) |*rule, index| rules[index] = .{ .bundle = text(&rule.bundle), .floating = rule.floating, .workspace = rule.workspace };
     const buffer = try allocator.alloc(u8, max_response);
     defer allocator.free(buffer);
@@ -134,7 +149,7 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
         .border_color = candidate.border_color,
         .duration = candidate.duration,
         .workspaces = workspaces[0..candidate.workspace_count],
-        .bindings = bindings[0..candidate.binding_count],
+        .modes = modes[0..candidate.mode_count],
         .rules = rules[0..candidate.rule_count],
     }, .{}, &writer) catch return error.ConfigResponseTooLarge;
     return allocator.dupe(u8, writer.buffered());
@@ -144,18 +159,24 @@ fn decode(response: []const u8) !ConfigCandidate {
     const parsed = try std.json.parseFromSlice(WireConfig, allocator, response, .{ .allocate = .alloc_always, .max_value_len = max_response });
     defer parsed.deinit();
     const wire = parsed.value;
-    if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.bindings.len > 128 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .binding_count = wire.bindings.len, .rule_count = wire.rules.len };
+    if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len };
     candidate.status_bar = wire.status_bar;
     for (wire.workspaces, 0..) |workspace, index| {
         try copyText(&candidate.workspaces[index].name, workspace.name);
         candidate.workspaces[index].layout = workspace.layout;
         candidate.workspaces[index].ratio = workspace.ratio;
     }
-    for (wire.bindings, 0..) |binding, index| {
-        candidate.bindings[index].key = binding.key;
-        candidate.bindings[index].modifiers = binding.modifiers;
-        try copyText(&candidate.bindings[index].command, binding.command);
+    for (wire.modes, 0..) |mode, mode_index| {
+        if (mode.bindings.len > 128) return error.InvalidCollectionSize;
+        const target = &candidate.modes[mode_index];
+        try copyText(&target.name, mode.name);
+        target.binding_count = mode.bindings.len;
+        for (mode.bindings, 0..) |binding, index| {
+            target.bindings[index].key = binding.key;
+            target.bindings[index].modifiers = binding.modifiers;
+            try copyText(&target.bindings[index].command, binding.command);
+        }
     }
     for (wire.rules, 0..) |rule, index| {
         try copyText(&candidate.rules[index].bundle, rule.bundle);
@@ -179,12 +200,30 @@ fn validate(candidate: *const ConfigCandidate) !void {
         if (text(&workspace.name).len == 0) return error.EmptyWorkspaceName;
         try checkNumber(workspace.ratio, 0.1, 0.9);
     }
-    for (candidate.bindings[0..candidate.binding_count], 0..) |*binding, index| {
-        if (!knownKeyCode(binding.key)) return error.UnknownKey;
-        if (binding.modifiers == 0 or binding.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
-        _ = try commands.parse(text(&binding.command), candidate.workspace_count);
-        for (candidate.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;
+    if (!std.mem.eql(u8, text(&candidate.modes[0].name), "main")) return error.MainModeRequired;
+    var total_bindings: usize = 0;
+    for (candidate.modes[0..candidate.mode_count], 0..) |*mode, mode_index| {
+        const name = text(&mode.name);
+        if (name.len == 0) return error.EmptyModeName;
+        for (name) |character| if (!std.ascii.isAlphanumeric(character) and character != '-' and character != '_') return error.InvalidModeName;
+        for (candidate.modes[0..mode_index]) |*previous| if (std.mem.eql(u8, text(&previous.name), name)) return error.DuplicateMode;
     }
+    for (candidate.modes[0..candidate.mode_count], 0..) |*mode, mode_index| {
+        total_bindings += mode.binding_count;
+        var escape_to_main = false;
+        for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| {
+            if (!knownKeyCode(binding.key)) return error.UnknownKey;
+            if ((mode_index == 0 and binding.modifiers == 0) or binding.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
+            const command = try commands.parse(text(&binding.command), candidate.workspace_count);
+            if (command == .mode) {
+                if (candidate.modeIndex(command.mode.text()) == null) return error.UnknownMode;
+                if (binding.key == 0x35 and binding.modifiers == 0 and std.mem.eql(u8, command.mode.text(), "main")) escape_to_main = true;
+            }
+            for (mode.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;
+        }
+        if (mode_index != 0 and !escape_to_main) return error.ModeEscapeRequired;
+    }
+    if (total_bindings > 256) return error.TooManyBindings;
     for (candidate.rules[0..candidate.rule_count]) |rule| if (rule.workspace) |workspace| {
         if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
     };
@@ -321,6 +360,7 @@ fn knownKeyCode(code: u32) bool {
 }
 
 fn modifiers(value: []const u8) !u32 {
+    if (value.len == 0) return 0;
     var parts = std.mem.splitScalar(u8, value, '+');
     var flags: u32 = 0;
     while (parts.next()) |part| {
@@ -355,6 +395,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         @memset(source[start..end], ' ');
     }
     var result: ConfigCandidate = .{};
+    try copyText(&result.modes[0].name, "main");
     for (&result.workspaces, 0..) |*workspace, index| {
         const name = try std.fmt.bufPrint(&workspace.name, "{d}", .{index + 1});
         workspace.name[name.len] = 0;
@@ -367,7 +408,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "rules", "status_bar" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar" });
     if (rawField(state, "status_bar") != native.LUA_TNIL) {
         try checkKeys(state, &.{ "enabled", "label" });
         result.status_bar.enabled = try fieldBool(state, "enabled", true);
@@ -400,14 +441,20 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
     }
     pop(state);
     if (rawField(state, "bindings") != native.LUA_TNIL) {
-        result.binding_count = try arrayCount(state, 128);
-        for (0..result.binding_count) |index| {
+        try readBindings(state, &result.modes[0]);
+    }
+    pop(state);
+    if (rawField(state, "modes") != native.LUA_TNIL) {
+        const count = try arrayCount(state, 7);
+        result.mode_count = count + 1;
+        for (0..count) |index| {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
-            try checkKeys(state, &.{ "key", "mods", "command" });
-            const binding = &result.bindings[index];
-            binding.key = try keyCode((try fieldString(state, "key")) orelse return error.MissingKey);
-            binding.modifiers = try modifiers((try fieldString(state, "mods")) orelse return error.MissingModifiers);
-            try copyText(&binding.command, (try fieldString(state, "command")) orelse return error.MissingCommand);
+            try checkKeys(state, &.{ "name", "bindings" });
+            const mode = &result.modes[index + 1];
+            try copyText(&mode.name, (try fieldString(state, "name")) orelse return error.MissingModeName);
+            if (rawField(state, "bindings") == native.LUA_TNIL) return error.MissingBindings;
+            try readBindings(state, mode);
+            pop(state);
             pop(state);
         }
     }
@@ -428,4 +475,17 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
     }
     try validate(&result);
     return result;
+}
+
+fn readBindings(state: *native.lua_State, mode: *Mode) !void {
+    mode.binding_count = try arrayCount(state, 128);
+    for (0..mode.binding_count) |index| {
+        _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
+        try checkKeys(state, &.{ "key", "mods", "command" });
+        const binding = &mode.bindings[index];
+        binding.key = try keyCode((try fieldString(state, "key")) orelse return error.MissingKey);
+        binding.modifiers = try modifiers((try fieldString(state, "mods")) orelse return error.MissingModifiers);
+        try copyText(&binding.command, (try fieldString(state, "command")) orelse return error.MissingCommand);
+        pop(state);
+    }
 }

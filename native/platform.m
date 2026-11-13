@@ -276,14 +276,106 @@ bool platform_read_frame(uint64_t identity, WMRect *frame) {
     return false;
 }
 
-void platform_focus(uint64_t identity) {
+bool platform_focus(uint64_t identity) {
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) {
         NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:record.observation.pid];
-        [application activateWithOptions:0];
-        AXUIElementPerformAction(record.element, kAXRaiseAction);
+        BOOL activated = [application activateWithOptions:0];
+        AXError raised = AXUIElementPerformAction(record.element, kAXRaiseAction);
         AXUIElementSetAttributeValue(record.element, kAXMainAttribute, kCFBooleanTrue);
         dirty = YES;
+        return activated && raised == kAXErrorSuccess;
     }
+    return false;
+}
+
+uint64_t platform_focused_window(void) {
+    NSRunningApplication *application = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!application) return 0;
+    AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
+    AXUIElementSetMessagingTimeout(appElement, 0.08);
+    id focusedWindow = attribute(appElement, kAXFocusedWindowAttribute);
+    CFRelease(appElement);
+    if (!focusedWindow || CFGetTypeID((__bridge CFTypeRef)focusedWindow) != AXUIElementGetTypeID()) return 0;
+    for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier && !record.observation.stale && CFEqual(record.element, (__bridge CFTypeRef)focusedWindow)) return record.observation.identity;
+    return 0;
+}
+
+static WMLaunchStatus launchStatus;
+uint64_t platform_launch(const char *bundle, bool new_instance) {
+    NSString *identifier = [NSString stringWithUTF8String:bundle];
+    NSURL *url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
+    if (!url) return 0;
+    NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
+    configuration.createsNewApplicationInstance = new_instance;
+    configuration.activates = YES;
+    uint64_t requestID = launchStatus.request_id + 1;
+    launchStatus = (WMLaunchStatus){ .request_id = requestID, .state = 1 };
+    [NSWorkspace.sharedWorkspace openApplicationAtURL:url configuration:configuration completionHandler:^(NSRunningApplication *application, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (launchStatus.request_id != requestID) return;
+            launchStatus.state = error || !application ? 3 : 2;
+            copyUTF8(launchStatus.message, sizeof(launchStatus.message), error.localizedDescription ?: @"");
+        });
+    }];
+    return requestID;
+}
+WMLaunchStatus platform_launch_status(void) { return launchStatus; }
+
+bool platform_exec(const char *shell) {
+    NSTask *task = [NSTask new];
+    task.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+    task.arguments = @[@"-c", [NSString stringWithUTF8String:shell]];
+    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    NSError *error = nil;
+    return [task launchAndReturnError:&error];
+}
+
+static WindowRecord *closingRecord;
+static double closingProcessToken;
+double platform_monotonic(void) { return CACurrentMediaTime(); }
+void platform_close_cancel(void) { closingRecord = nil; closingProcessToken = 0; }
+
+bool platform_close(uint64_t identity, bool track, double *process_token) {
+    if (platform_focused_window() != identity) return false;
+    for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.stale && !record.observation.minimized && !record.observation.fullscreen) {
+        NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:record.observation.pid];
+        double token = application.launchDate.timeIntervalSinceReferenceDate;
+        if (track && (!application.launchDate || token == 0)) return false;
+        id button = attribute(record.element, kAXCloseButtonAttribute);
+        if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID()) return false;
+        if (AXUIElementPerformAction((__bridge AXUIElementRef)button, kAXPressAction) != kAXErrorSuccess) return false;
+        if (track) { closingRecord = record; closingProcessToken = token; *process_token = token; }
+        dirty = YES;
+        return true;
+    }
+    return false;
+}
+
+int platform_close_state(uint64_t identity, int pid, double process_token) {
+    if (!closingRecord || closingRecord.observation.identity != identity || closingRecord.observation.pid != pid || closingProcessToken != process_token) return -1;
+    NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    if (!application || application.terminated || !application.launchDate || application.launchDate.timeIntervalSinceReferenceDate != process_token) return -1;
+    AXUIElementRef appElement = AXUIElementCreateApplication(pid);
+    AXUIElementSetMessagingTimeout(appElement, 0.08);
+    CFTypeRef value = NULL;
+    AXError result = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &value);
+    CFRelease(appElement);
+    if (result != kAXErrorSuccess || !value || CFGetTypeID(value) != CFArrayGetTypeID()) { if (value) CFRelease(value); return -1; }
+    NSArray *allWindows = CFBridgingRelease(value);
+    for (id window in allWindows) {
+        if (CFGetTypeID((__bridge CFTypeRef)window) != AXUIElementGetTypeID()) return -1;
+        if (CFEqual(closingRecord.element, (__bridge CFTypeRef)window)) return 0;
+    }
+    return allWindows.count == 0 ? 2 : 1;
+}
+
+bool platform_terminate_if_empty(uint64_t identity, int pid, double process_token) {
+    if (platform_close_state(identity, pid, process_token) != 2) return false;
+    NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    if (!application.launchDate || application.launchDate.timeIntervalSinceReferenceDate != process_token) return false;
+    return [application terminate];
 }
 
 static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
@@ -436,6 +528,11 @@ int platform_main(int argc, char **argv) {
         socketPath = [NSString stringWithFormat:@"/tmp/huen-wm-%u.sock", getuid()];
         NSMutableArray<NSString *> *arguments = [NSMutableArray array];
         for (int index = 1; index < argc; index++) {
+            NSString *first = arguments.firstObject;
+            if (first && ![@[@"start", @"doctor", @"validate", @"help", @"--help"] containsObject:first]) {
+                [arguments addObject:[NSString stringWithUTF8String:argv[index]]];
+                continue;
+            }
             if (!strcmp(argv[index], "--config") || !strcmp(argv[index], "--app")) {
                 if (index + 1 >= argc) { fprintf(stderr, "missing value for %s\n", argv[index]); return 1; }
                 BOOL isConfig = !strcmp(argv[index], "--config"); NSString *value = [NSString stringWithUTF8String:argv[++index]];
@@ -446,7 +543,7 @@ int platform_main(int argc, char **argv) {
         }
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
-        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus|swap left|right|up|down\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down\nhuen-wm swap|move left|right|up|down | resize DELTA\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
             NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.0", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;

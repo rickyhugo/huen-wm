@@ -16,6 +16,10 @@ var layouts: tiling.Store = .{};
 var windows: std.ArrayList(Window) = .empty;
 var displays: std.ArrayList(Display) = .empty;
 var focused: ?u64 = null;
+var active_mode: usize = 0;
+const PendingClose = struct { identity: u64, pid: c_int, process_token: f64, deadline: f64 };
+var pending_close: ?PendingClose = null;
+var close_state: enum { idle, pending, closed, termination_requested, termination_rejected, expired, cancelled } = .idle;
 var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
 var suspended = false;
@@ -62,11 +66,12 @@ fn deriveStatus() StatusPresentation {
         .index => index_text,
         .index_and_name => if (std.mem.eql(u8, name, index_text)) name else std.fmt.bufPrint(&label_buffer, "{s}  {s}", .{ index_text, name }) catch unreachable,
     };
-    statusText(&presentation.title, label, 24);
+    statusText(&presentation.title, if (active_mode != 0 and !suspended) text(&config.modes[active_mode].name) else label, 24);
     var tooltip_buffer: [512]u8 = undefined;
-    const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s}{s}", .{
+    const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s} · Mode {s}{s}", .{
         if (display) |current| text(&current.name) else "No display",
         name,
+        text(&config.modes[active_mode].name),
         if (transition_error != null) " · Workspace switch failed" else "",
     }) catch unreachable;
     statusText(&presentation.tooltip, tooltip, 255);
@@ -149,7 +154,8 @@ export fn wm_initialize(path: [*:0]const u8) bool {
 }
 
 export fn wm_activate_config() bool {
-    if (!native.platform_bindings(&config.bindings, config.binding_count)) return false;
+    if (!native.platform_bindings(&config.modes[0].bindings, config.modes[0].binding_count)) return false;
+    active_mode = 0;
     status_active = true;
     publishStatus();
     return true;
@@ -177,12 +183,13 @@ export fn wm_config_poll() void {
         rejectConfig("RuntimeSuspendedRestartToResume");
         return;
     }
-    if (!native.platform_bindings(&candidate.bindings, candidate.binding_count)) {
+    if (!native.platform_bindings(&candidate.modes[0].bindings, candidate.modes[0].binding_count)) {
         rejectConfig("HotkeyCollision");
         return;
     }
     applyLayoutDefaults(&candidate);
     config = candidate;
+    active_mode = 0;
     config_state = .ready;
     config_error = null;
     for (displays.items) |*display| display.workspace = @min(display.workspace, config.workspace_count - 1);
@@ -567,7 +574,22 @@ fn reconcile() void {
     };
     native.platform_border(borderIdentity, config.border_width, config.border_color);
 }
+fn pollClose() void {
+    const pending = pending_close orelse return;
+    const observed = if (native.platform_monotonic() < pending.deadline) native.platform_close_state(pending.identity, pending.pid, pending.process_token) else -1;
+    if (native.platform_monotonic() >= pending.deadline) {
+        close_state = .expired;
+    } else if (observed == 2) {
+        close_state = if (native.platform_terminate_if_empty(pending.identity, pending.pid, pending.process_token)) .termination_requested else .termination_rejected;
+    } else if (observed == 1) {
+        close_state = .closed;
+    } else return;
+    pending_close = null;
+    native.platform_close_cancel();
+}
+
 export fn wm_tick() void {
+    pollClose();
     if (!initialized) return;
     defer publishStatus();
     var observedDisplays: [32]native.WMDisplay = undefined;
@@ -652,6 +674,43 @@ fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     }
     return result;
 }
+
+fn wrappedNeighbor(source_index: usize, direction: Direction) usize {
+    const source = windows.items[source_index];
+    const source_frame = if (source.floating) source.floating_frame else source.goal;
+    var forward_target: ?usize = null;
+    var forward_score = std.math.inf(f64);
+    var wrap_target = source_index;
+    var wrap_distance: f64 = 0;
+    var wrap_cross = std.math.inf(f64);
+    for (windows.items, 0..) |candidate, index| {
+        if (index == source_index or !visible(candidate) or candidate.display != source.display or candidate.workspace != source.workspace) continue;
+        const frame = if (candidate.floating) candidate.floating_frame else candidate.goal;
+        const horizontal = frame.left + frame.width / 2 - source_frame.left - source_frame.width / 2;
+        const vertical = frame.top + frame.height / 2 - source_frame.top - source_frame.height / 2;
+        const forward = switch (direction) {
+            .left => -horizontal,
+            .right => horizontal,
+            .up => -vertical,
+            .down => vertical,
+        };
+        const cross = switch (direction) {
+            .left, .right => @abs(vertical),
+            .up, .down => @abs(horizontal),
+        };
+        const score = forward + cross * 2;
+        if (forward > 1 and (score < forward_score or (score == forward_score and (forward_target == null or candidate.identity < windows.items[forward_target.?].identity)))) {
+            forward_target = index;
+            forward_score = score;
+        }
+        if (forward < wrap_distance or (forward == wrap_distance and (cross < wrap_cross or (cross == wrap_cross and candidate.identity < windows.items[wrap_target].identity)))) {
+            wrap_target = index;
+            wrap_distance = forward;
+            wrap_cross = cross;
+        }
+    }
+    return forward_target orelse wrap_target;
+}
 fn cancelTransition() void {
     if (transition != null) snapshot_presentation = .idle;
     transition = null;
@@ -718,7 +777,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
     for (windows.items) |window| if (window.display == displayIdentity and visible(window)) {
         if (focus_target == null or winner == window.identity) focus_target = window.identity;
     };
-    if (focus_target) |identity| native.platform_focus(identity);
+    if (focus_target) |identity| _ = native.platform_focus(identity);
     transition_error = null;
     native.platform_config_changed();
     return true;
@@ -741,7 +800,30 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
-        .status => return json(.{ .running = true, .suspended = suspended, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } }),
+        .status => {
+            const launch = native.platform_launch_status();
+            return json(.{ .running = true, .suspended = suspended, .active_mode = text(&config.modes[active_mode].name), .close_state = close_state, .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) }, .window_count = windows.items.len, .display_count = displays.items.len, .workspace_backend = "corner-parking", .filter = std.mem.span(native.platform_filter()), .scene_capture_allowed = native.huen_scene_capture_allowed(), .snapshot_presentation = snapshot_presentation, .snapshot_generation = generation, .transition_pending = transition != null, .transition_error = transition_error, .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error } });
+        },
+        .mode => |name| {
+            const index = config.modeIndex(name.text()) orelse return failure("UnknownMode");
+            const mode = &config.modes[index];
+            if (!native.platform_bindings(&mode.bindings, mode.binding_count)) return failure("HotkeyCollision");
+            active_mode = index;
+            return json(.{ .ok = true, .active_mode = text(&mode.name) });
+        },
+        .launch => |request| {
+            if (suspended) return failure("RuntimeSuspendedRestartToResume");
+            const request_id = native.platform_launch(request.bundle.text(), request.new_instance);
+            if (request_id == 0) return failure("ApplicationNotFound");
+            return json(.{ .ok = true, .accepted = true, .request_id = request_id });
+        },
+        .exec_and_forget => |shell| {
+            if (suspended) return failure("RuntimeSuspendedRestartToResume");
+            const terminated = allocator.dupeSentinel(u8, shell, 0) catch return failure("OutOfMemory");
+            defer allocator.free(terminated);
+            if (!native.platform_exec(terminated)) return failure("ProcessLaunchFailed");
+            return json(.{ .ok = true, .accepted = true });
+        },
         .windows => {
             const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8 };
             var items: std.ArrayList(Item) = .empty;
@@ -777,12 +859,17 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true, .request_id = request_id });
         },
         .quit => {
+            pending_close = null;
+            native.platform_close_cancel();
             cancelConfig();
             cancelTransition();
             native.platform_quit();
             return json(.{ .ok = true });
         },
         .restore => {
+            if (pending_close != null) close_state = .cancelled;
+            pending_close = null;
+            native.platform_close_cancel();
             cancelConfig();
             cancelTransition();
             suspended = true;
@@ -796,6 +883,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     if (suspended) return failure("RuntimeSuspendedRestartToResume");
     if (transition != null) return failure("WorkspaceTransitionPending");
     if (displays.items.len == 0) return failure("NoDisplays");
+    const observed_focus = native.platform_focused_window();
+    focused = if (observed_focus != 0) observed_focus else null;
     const displaySlot = activeDisplay();
     const display = &displays.items[displaySlot];
     switch (command) {
@@ -841,7 +930,18 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const state = workspaceLayout(source.display, source.workspace);
                     if (source.floating) source.floating_restore = true;
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
-                    native.platform_focus(source.identity);
+                    _ = native.platform_focus(source.identity);
+                },
+                .close => |quit_if_last| {
+                    if (pending_close != null) return failure("ClosePending");
+                    const window = windows.items[sourceIndex];
+                    var process_token: f64 = 0;
+                    if (!native.platform_close(window.identity, quit_if_last, &process_token)) return failure("CloseRejected");
+                    if (quit_if_last) {
+                        pending_close = .{ .identity = window.identity, .pid = window.observation.pid, .process_token = process_token, .deadline = native.platform_monotonic() + 5 };
+                        close_state = .pending;
+                    }
+                    return json(.{ .ok = true, .accepted = true });
                 },
                 .toggle_floating => {
                     if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
@@ -861,9 +961,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         return failure(transition_error orelse "WorkspacePlacementFailed");
                     }
                 },
-                .focus => |direction| {
-                    const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
-                    native.platform_focus(windows.items[target].identity);
+                .focus => |request| {
+                    const target = if (request.wrap) wrappedNeighbor(sourceIndex, request.direction) else neighbor(sourceIndex, request.direction) orelse return failure("NoWindowInDirection");
+                    const identity = windows.items[target].identity;
+                    if (!native.platform_focus(identity)) return failure("FocusRejected");
+                    const verified = native.platform_focused_window() == identity;
+                    if (verified) focused = identity;
+                    return json(.{ .ok = true, .accepted = true, .verified = verified, .target = identity });
                 },
                 .swap => |direction| {
                     const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
@@ -903,6 +1007,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     return json(.{ .ok = true });
 }
 export fn wm_shutdown() bool {
+    pending_close = null;
+    native.platform_close_cancel();
     status_active = false;
     native.platform_status_present(null);
     cancelConfig();
