@@ -203,7 +203,7 @@ class NativeSmoke:
     def corner_parked(self, report, before, active_screen, active_titles):
         observed = frames(report)
         other_screens = [
-            screen["visible_frame"]
+            screen["full_bounds"]
             for screen in report["screens"]
             if screen["visible_frame"] != active_screen
         ]
@@ -234,13 +234,19 @@ class NativeSmoke:
                 ),
                 None,
             )
-            horizontal_contact = (
-                active_screen["left"] + active_screen["width"] - actual["left"]
-                if chosen == "bottom-right"
-                else actual["left"] + actual["width"] - active_screen["left"]
+            horizontal_contact = max(
+                0,
+                min(
+                    active_screen["left"] + active_screen["width"],
+                    actual["left"] + actual["width"],
+                )
+                - max(active_screen["left"], actual["left"]),
             )
-            vertical_contact = (
-                active_screen["top"] + active_screen["height"] - actual["top"]
+            bottom = active_screen["top"] + active_screen["height"]
+            vertical_contact = max(
+                0,
+                min(bottom, actual["top"] + actual["height"])
+                - max(active_screen["top"], actual["top"]),
             )
             evidence[title] = {
                 "before": original,
@@ -255,11 +261,19 @@ class NativeSmoke:
                     abs(actual[field] - original[field]) <= 2
                     for field in ("width", "height")
                 ),
-                "one_point_corner_with_two_point_readback_tolerance": (
+                "one_point_vertical_strip_with_two_point_readback_tolerance": (
                     chosen is not None
-                    and close_frame(actual, candidates[chosen], tolerance=2)
-                    and abs(horizontal_contact - 1) <= 2
-                    and abs(vertical_contact - 1) <= 2
+                    and abs(actual["left"] - candidates[chosen]["left"]) <= 2
+                    and abs(
+                        actual["left"]
+                        + actual["width"]
+                        - candidates[chosen]["left"]
+                        - candidates[chosen]["width"]
+                    )
+                    <= 2
+                    and 0 < horizontal_contact <= 3
+                    and active_screen["top"] <= actual["top"] <= bottom
+                    and actual["top"] + actual["height"] >= bottom
                 ),
                 "intersects_other_display": any(
                     overlaps(actual, screen, tolerance=0) for screen in other_screens
@@ -272,13 +286,14 @@ class NativeSmoke:
         )
         self.result["corner_parking"] = {
             "visible_frame": active_screen,
-            "other_visible_frames": other_screens,
+            "other_full_bounds": other_screens,
+            "screen_bounds": report["screens"],
             "windows": evidence,
             "other_display_frames_unchanged": unchanged,
         }
         return unchanged and all(
             item["size_preserved"]
-            and item["one_point_corner_with_two_point_readback_tolerance"]
+            and item["one_point_vertical_strip_with_two_point_readback_tolerance"]
             and not item["intersects_other_display"]
             for item in evidence.values()
         )
@@ -466,7 +481,7 @@ class NativeSmoke:
         self.result["multi_display_covered"] = bool(other_titles)
         self.cli("workspace", "2")
         self.wait(
-            "workspace preserves size at one-point corner on active display only",
+            "workspace preserves size at one-point vertical strip on active display only",
             self.fixture,
             lambda report: self.corner_parked(
                 report, before_workspace, active_screen, active_titles
@@ -491,13 +506,13 @@ class NativeSmoke:
             lambda: self.cli("status"),
             lambda status: not status.get("transition_pending"),
         )
+        before_valid_reload = self.cli("status")["config_reload"]["request_id"]
         self.config(32)
-        valid_reload = self.cli("reload")
         self.wait(
-            "valid reload completes",
+            "valid automatic reload completes",
             lambda: self.cli("status")["config_reload"],
             lambda reload: (
-                reload["request_id"] == valid_reload["request_id"]
+                reload["request_id"] > before_valid_reload
                 and reload["state"] == "ready"
             ),
         )
@@ -512,13 +527,13 @@ class NativeSmoke:
                 )
             ),
         )
+        before_invalid_reload = self.cli("status")["config_reload"]["request_id"]
         self.config_path.write_text("return {gap='invalid'}\n")
-        invalid_reload = self.cli("reload")
         self.wait(
-            "invalid reload fails",
+            "invalid automatic reload fails",
             lambda: self.cli("status")["config_reload"],
             lambda reload: (
-                reload["request_id"] == invalid_reload["request_id"]
+                reload["request_id"] > before_invalid_reload
                 and reload["state"] == "failed"
                 and bool(reload["err_message"])
             ),

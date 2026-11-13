@@ -119,7 +119,8 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
     }
     NSMutableArray<NSDictionary *> *screenReports = [[NSMutableArray alloc] init];
     for (NSScreen *screen in screens) {
-        [screenReports addObject:@{@"visible_frame": AXFrame(screen.visibleFrame, referenceHeight)}];
+        [screenReports addObject:@{@"visible_frame": AXFrame(screen.visibleFrame, referenceHeight),
+                                  @"full_bounds": AXFrame(screen.frame, referenceHeight)}];
     }
     NSDictionary *report = @{
         @"ready": @(self.ready),

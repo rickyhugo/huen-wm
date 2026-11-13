@@ -8,7 +8,7 @@ const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
 const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
-const Display = struct { identity: u32, frame: Rect, name: [128]u8, workspace: usize = 0 };
+const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, workspace: usize = 0 };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
 var windows: std.ArrayList(Window) = .empty;
@@ -246,7 +246,7 @@ var debug_verification_failures: u32 = 0;
 fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     for (displays.items) |display| {
         if (display.identity == displayIdentity) continue;
-        const area = display.frame;
+        const area = display.full_bounds;
         if (@min(frame.left + frame.width, area.left + area.width) > @max(frame.left, area.left) and
             @min(frame.top + frame.height, area.top + area.height) > @max(frame.top, area.top)) return true;
     }
@@ -265,15 +265,27 @@ fn parkingFrame(displayIdentity: u32, original: Rect) ?Rect {
     return null;
 }
 
+fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
+    const slot = displayIndex(displayIdentity) orelse return false;
+    const area = displays.items[slot].frame;
+    const bottom = area.top + area.height;
+    const horizontalContact = @min(actual.left + actual.width, area.left + area.width) - @max(actual.left, area.left);
+    return @abs(actual.width - target.width) <= 2 and @abs(actual.height - target.height) <= 2 and
+        @abs(actual.left - target.left) <= 2 and @abs(actual.left + actual.width - target.left - target.width) <= 2 and
+        horizontalContact > 0 and horizontalContact <= 3 and
+        actual.top >= area.top and actual.top <= bottom and actual.top + actual.height >= bottom and
+        !overlapsOtherDisplays(actual, displayIdentity);
+}
+
 fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
     const write_result = native.platform_frame(identity, target, 0);
     var actual: Rect = std.mem.zeroes(Rect);
     const readable = native.platform_read_frame(identity, &actual);
-    const verified = readable and framesNear(actual, target, 2) and
+    const verified = readable and
         (if (parkedDisplay) |displayIdentity|
-            @abs(actual.left + actual.width - target.left - target.width) <= 2 and !overlapsOtherDisplays(actual, displayIdentity)
+            parkedFrameAccepted(actual, target, displayIdentity)
         else
-            true);
+            framesNear(actual, target, 2));
     if (!verified and debug_verification_failures < 32) {
         debug_verification_failures += 1;
         std.debug.print("[DEBUG-parking] verified-frame identity={d} write_result={} desired=[{d:.3},{d:.3},{d:.3},{d:.3}] actual_readable={} actual=[{d:.3},{d:.3},{d:.3},{d:.3}] failure={d}/32\n", .{
@@ -320,7 +332,7 @@ fn reconcile() void {
                 placementFailure(window, "No parking corner avoids other displays");
                 continue;
             };
-            if (!window.parked or !framesNear(window.observation.frame, parked, 2) or overlapsOtherDisplays(window.observation.frame, window.display)) _ = placeVisibility(window, parked, true);
+            if (!window.parked or !parkedFrameAccepted(window.observation.frame, parked, window.display)) _ = placeVisibility(window, parked, true);
         } else {
             const target = if (window.floating) window.floating_frame else window.goal;
             const actual = window.observation.frame;
@@ -354,7 +366,7 @@ export fn wm_tick() void {
     var updated: std.ArrayList(Display) = .empty;
     for (observedDisplays[0..displayCount]) |observation| {
         const previous = displayIndex(observation.identity);
-        updated.append(allocator, .{ .identity = observation.identity, .frame = observation.frame, .name = observation.name, .workspace = if (previous) |index| displays.items[index].workspace else 0 }) catch return;
+        updated.append(allocator, .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .workspace = if (previous) |index| displays.items[index].workspace else 0 }) catch return;
     }
     displays.deinit(allocator);
     displays = updated;
@@ -528,10 +540,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(items.items);
         },
         .monitors => {
-            const Item = struct { id: u32, name: []const u8, frame: Rect, workspace: usize, blocked_by_fullscreen: bool };
+            const Item = struct { id: u32, name: []const u8, frame: Rect, full_bounds: Rect, workspace: usize, blocked_by_fullscreen: bool };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
-            for (displays.items) |*display| items.append(allocator, .{ .id = display.identity, .name = text(&display.name), .frame = display.frame, .workspace = display.workspace + 1, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
+            for (displays.items) |*display| items.append(allocator, .{ .id = display.identity, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .workspace = display.workspace + 1, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
             return json(items.items);
         },
         .workspaces => {

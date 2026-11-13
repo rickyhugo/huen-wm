@@ -10,7 +10,7 @@
 #include <lualib.h>
 typedef struct { double left, top, width, height; } WMRect;
 typedef struct { uint64_t identity; int pid; WMRect frame; bool minimized, fullscreen, focused, stale, onscreen; char bundle[256], title[512]; } WMWindow;
-typedef struct { uint32_t identity; WMRect frame; char name[128]; } WMDisplay;
+typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; } WMDisplay;
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 int platform_main(int argc, char **argv);
 lua_State *platform_lua_open(void);

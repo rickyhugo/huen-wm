@@ -1,6 +1,6 @@
 pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, bundle: [256]u8, title: [512]u8 };
-pub const WMDisplay = extern struct { identity: u32, frame: WMRect, name: [128]u8 };
+pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8 };
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
 pub const lua_State = opaque {};
 pub const LUA_OK = 0;

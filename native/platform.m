@@ -259,6 +259,8 @@ size_t platform_displays(WMDisplay *output, size_t capacity) {
         NSRect visible = screen.visibleFrame;
         WMDisplay display = {0}; display.identity = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
         display.frame = (WMRect){visible.origin.x, primaryHeight - NSMaxY(visible), visible.size.width, visible.size.height};
+        NSRect full = screen.frame;
+        display.full_bounds = (WMRect){full.origin.x, primaryHeight - NSMaxY(full), full.size.width, full.size.height};
         copyUTF8(display.name, sizeof(display.name), screen.localizedName);
         output[count++] = display;
     }
