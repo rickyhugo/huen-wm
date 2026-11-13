@@ -26,7 +26,7 @@ Use a broad integration smoke check where needed. Do not add unit tests.
 - [x] Confirm the user's feature priorities and SIP requirement.
 - [x] Compare two independent architecture proposals against the macOS API constraints.
 - [x] Establish pinned development tools and quick hooks.
-- [ ] Implement the native window manager against the selected model.
+- [x] Implement the native window manager against the selected model.
 - [ ] Exercise the executable and inspect the resulting window state.
 - [ ] Independently review the implementation and resolve demonstrated defects.
 - [ ] Commit the verified work and document remaining platform limits.
@@ -70,7 +70,9 @@ The user challenged that product choice.
 The selected presentation uses ScreenCaptureKit and a native overlay to conceal intermediate window placement.
 The overlay captures the outgoing display without huen-wm's own windows, then fades after placement completes.
 Screen Recording permission is optional. Without permission, workspace placement remains immediate.
-Offscreen placement is the storage mechanism, not the intended visible interaction.
+Corner parking stores inactive windows while the snapshot supplies the transition.
+Native readback disproved fully off-screen parking. macOS clamped a requested x-coordinate of 5608 to 1472 on a 1512-point display.
+The revised placement targets a one-point strip at an available bottom corner and rejects overlap with another display.
 Rejected placements must be reported and restored. A snapshot cannot make failed placement correct.
 
 This bridge has a small frozen C interface for capture, reveal, and cancellation.
@@ -97,8 +99,13 @@ Scene smoothness, capture timing, and parking remain unverified until native exe
 - `scripts/build-native-fixture.sh` builds the disposable Cocoa application.
 - `codesign --verify --strict --verbose=2 zig-out/fixtures/HuenFixture.app` passes.
 - `plutil -lint zig-out/fixtures/HuenFixture.app/Contents/Info.plist` passes.
-- The nonprompting Accessibility trust probe returns false. Native window operations remain unverified.
+- LaunchServices permission checks now report Accessibility and Screen Recording access. Direct shell invocations have a different permission context.
 - `xcrun clang -fobjc-arc -fblocks -Wall -Wextra -Werror -mmacosx-version-min=14.0 -fsyntax-only native/scene.m` passes.
 - Independent scene review found no concrete lifetime or cancellation defects. Native presentation remains unverified.
 - Comment review removed two redundant comments and made synchronous callback settlement explicit in internal names. Public lifetime contracts remain.
 - `mise exec -- hk install --mise` installed the repository-local pre-commit hook through Git configuration.
+- Headless smoke covers isolated Lua evaluation, malformed configuration, and invalid or truncated IPC replies.
+- Native fixture checks passed tiling, focus, 40-point movement, floating return, and layout changes on both one-display and two-display setups.
+- Native readback confirmed that far-offscreen parking is clamped even when AX setters return success. Corner parking is under implementation.
+- Full restoration, native reload, and scene assertions remain blocked behind workspace verification.
+- Native cleanup stopped the owned manager and fixture and restored AeroSpace without reported errors.

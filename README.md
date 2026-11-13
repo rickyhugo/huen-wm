@@ -2,7 +2,7 @@
 
 A native macOS tiling window manager with Hyprland-inspired dwindle, master layout, Lua configuration, keyboard control, focused-window borders, and workspace snapshots. Requires macOS 14 or later and Zig **exactly 0.17.0**. SIP stays enabled.
 
-The runtime compiles. Headless smoke checks cover configuration and CLI boundaries. Actual Accessibility placement, global hotkeys, borders, and workspace scenes remain unverified on a permission-granted desktop.
+Headless smoke checks cover configuration and CLI boundaries. Disposable native windows verified tiling, focus, movement, and layout changes. Workspace parking currently fails native readback. Global hotkeys, borders, and workspace scenes remain unverified.
 
 ## Build
 
@@ -72,7 +72,7 @@ Lua must return a table. See `config/example.lua` for the complete schema. Each 
 
 ## Workspace contract
 
-Each monitor selects its workspace independently. Workspaces use reversible offscreen parking through public Accessibility APIs. They do not hide applications or minimize windows into the Dock. User-minimized and native-fullscreen windows are not moved. A fullscreen window conservatively blocks its display. Disconnected displays migrate window intent to the first remaining display.
+Each monitor selects its workspace independently. Workspaces use reversible corner parking through public Accessibility APIs. macOS requires a narrow edge of parked windows to remain visible. They do not hide applications or minimize windows into the Dock. User-minimized and native-fullscreen windows are not moved. A fullscreen window conservatively blocks its display. Disconnected displays migrate window intent to the first remaining display.
 
 With Screen Recording permission, a nonactivating display snapshot covers a workspace transaction. Source parking and destination placement are read back before focus changes and the snapshot fades. Rejected placements trigger rollback. This is not an atomic compositor operation. Apps may constrain geometry or reject parking, and status reports the last transition error. Public on-screen window metadata is a conservative native-space safety hint, not a private Space identifier.
 
