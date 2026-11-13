@@ -976,6 +976,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
             return false;
         }
     }
+    if (workspace_owner == displayIdentity) owner_workspace = workspace;
     focusWorkspace(displayIdentity);
     transition_error = null;
     native.platform_config_changed();
@@ -1097,30 +1098,45 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     const display = &displays.items[displaySlot];
     switch (command) {
         .workspace => |workspace| {
+            var destination_slot = displaySlot;
             if (config.workspace_monitors != null) {
                 const owner = preferredOwner() orelse return failure("NoWorkspaceOwner");
-                snapshot_presentation = .instant;
-                if (!commitRouting(.{ .owner = owner, .activate = .{ .display = owner, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
-                workspace_owner = owner;
-                owner_workspace = workspace;
+                var migration = workspace_owner != owner;
+                for (windows.items) |window| if (window.display != owner) {
+                    migration = true;
+                };
+                if (migration) {
+                    generation += 1;
+                    snapshot_presentation = .instant;
+                    if (!commitRouting(.{ .owner = owner, .activate = .{ .display = owner, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    workspace_owner = owner;
+                    owner_workspace = workspace;
+                    routing_blocked = false;
+                    focusWorkspace(owner);
+                    native.platform_config_changed();
+                    return json(.{ .ok = true });
+                }
+                if (!routeMembership()) {
+                    routing_blocked = true;
+                    return failure(transition_error orelse "MonitorRoutingFailed");
+                }
                 routing_blocked = false;
-                focusWorkspace(owner);
-                native.platform_config_changed();
-                return json(.{ .ok = true });
+                destination_slot = displayIndex(owner).?;
             }
-            if (workspace == display.workspace) {
-                focusWorkspace(display.identity);
+            const destination = displays.items[destination_slot];
+            if (workspace == destination.workspace) {
+                focusWorkspace(destination.identity);
                 return json(.{ .ok = true });
             }
             generation += 1;
             if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
                 snapshot_presentation = .instant;
-                if (!commitWorkspace(displaySlot, workspace)) return failure(transition_error orelse "WorkspacePlacementFailed");
+                if (!commitWorkspace(destination_slot, workspace)) return failure(transition_error orelse "WorkspacePlacementFailed");
                 return json(.{ .ok = true });
             }
             snapshot_presentation = .pending;
-            transition = .{ .display = display.identity, .workspace = workspace, .generation = generation };
-            native.huen_scene_begin(display.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
+            transition = .{ .display = destination.identity, .workspace = workspace, .generation = generation };
+            native.huen_scene_begin(destination.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
             return json(.{ .ok = true, .accepted = true, .generation = generation });
         },
         .layout => |layout| workspaceLayout(display.identity, display.workspace).layout = layout,

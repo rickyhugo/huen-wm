@@ -32,11 +32,13 @@ When mouse follow is enabled, selecting a different monitor moves the pointer to
 
 Owner changes migrate window membership without changing workspace numbers or requesting focus. A disconnected monitor's windows retain their workspace numbers on a surviving monitor. The owner retains its active workspace across migration. With no displays, routing waits and retains intent.
 
-Topology changes cancel pending workspace scene captures. Global routing uses instant placement, not a sequence of per-monitor scene commits.
+Topology changes cancel pending workspace scene captures. Cross-display migration uses instant verified placement, not a sequence of per-monitor scene commits. With membership already on the unchanged owner, workspace switches retain the normal captured transition when duration is nonzero and capture is available. Capture targets the owner even when another monitor is selected.
 
 Routing snapshots window membership, geometry, parking state, floating geometry, active workspaces, and monitor selection before placement writes. Placement uses frame readback and the existing visibility and parking mechanisms. A rejected placement restores the prior state and attempts verified geometry rollback, including the failed write. A failed rollback retains recovery ownership and reports an error.
 
 Routing fails closed when required geometry is unreadable, a window is stale, a destination is blocked by native fullscreen, or a window cannot move safely while unavailable. The current implementation snapshots and verifies all eligible managed windows, so an unrelated stale window can block routing. Failed background routing blocks normal reconciliation until routing can succeed. Minimized windows that need a different display wait until they are available.
+
+A valid reload publishes its configuration and resets the binding mode to `main` even if routing fails. The failure is a runtime routing error, not a configuration rejection. `routing_blocked` prevents normal reconciliation while the runtime retries routing.
 
 `status` includes `selected_monitor`, `workspace_owner`, and `routing_blocked`. `monitors` includes `built_in`. With global routing enabled, `workspaces` lists each workspace only under its committed owner. Existing per-window placement errors and the status `transition_error` describe failures.
 
