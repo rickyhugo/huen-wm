@@ -39,14 +39,14 @@ def contains(bounds, frame, inset=0, tolerance=3):
     )
 
 
-def overlaps(first, second):
+def overlaps(first, second, tolerance=3):
     return (
         min(first["left"] + first["width"], second["left"] + second["width"])
         - max(first["left"], second["left"])
-        > 3
+        > tolerance
         and min(first["top"] + first["height"], second["top"] + second["height"])
         - max(first["top"], second["top"])
-        > 3
+        > tolerance
     )
 
 
@@ -198,6 +198,89 @@ class NativeSmoke:
                 overlaps(first, second)
                 for first, second in itertools.combinations(observed, 2)
             )
+        )
+
+    def corner_parked(self, report, before, active_screen, active_titles):
+        observed = frames(report)
+        other_screens = [
+            screen["visible_frame"]
+            for screen in report["screens"]
+            if screen["visible_frame"] != active_screen
+        ]
+        evidence = {}
+        for title in active_titles:
+            original = before[title]
+            actual = observed[title]
+            candidates = {
+                "bottom-right": dict(
+                    original,
+                    left=active_screen["left"] + active_screen["width"] - 1,
+                    top=active_screen["top"] + active_screen["height"] - 1,
+                ),
+                "bottom-left": dict(
+                    original,
+                    left=active_screen["left"] + 1 - original["width"],
+                    top=active_screen["top"] + active_screen["height"] - 1,
+                ),
+            }
+            chosen = next(
+                (
+                    corner
+                    for corner, candidate in candidates.items()
+                    if not any(
+                        overlaps(candidate, screen, tolerance=0)
+                        for screen in other_screens
+                    )
+                ),
+                None,
+            )
+            horizontal_contact = (
+                active_screen["left"] + active_screen["width"] - actual["left"]
+                if chosen == "bottom-right"
+                else actual["left"] + actual["width"] - active_screen["left"]
+            )
+            vertical_contact = (
+                active_screen["top"] + active_screen["height"] - actual["top"]
+            )
+            evidence[title] = {
+                "before": original,
+                "actual": actual,
+                "chosen_corner": chosen,
+                "desired": candidates.get(chosen),
+                "corner_contact_points": {
+                    "horizontal": horizontal_contact,
+                    "vertical": vertical_contact,
+                },
+                "size_preserved": all(
+                    abs(actual[field] - original[field]) <= 2
+                    for field in ("width", "height")
+                ),
+                "one_point_corner_with_two_point_readback_tolerance": (
+                    chosen is not None
+                    and close_frame(actual, candidates[chosen], tolerance=2)
+                    and abs(horizontal_contact - 1) <= 2
+                    and abs(vertical_contact - 1) <= 2
+                ),
+                "intersects_other_display": any(
+                    overlaps(actual, screen, tolerance=0) for screen in other_screens
+                ),
+            }
+        unchanged = all(
+            close_frame(observed[title], original, tolerance=2)
+            for title, original in before.items()
+            if title not in active_titles
+        )
+        self.result["corner_parking"] = {
+            "visible_frame": active_screen,
+            "other_visible_frames": other_screens,
+            "windows": evidence,
+            "other_display_frames_unchanged": unchanged,
+        }
+        return unchanged and all(
+            item["size_preserved"]
+            and item["one_point_corner_with_two_point_readback_tolerance"]
+            and not item["intersects_other_display"]
+            for item in evidence.values()
         )
 
     def exercise(self):
@@ -383,20 +466,10 @@ class NativeSmoke:
         self.result["multi_display_covered"] = bool(other_titles)
         self.cli("workspace", "2")
         self.wait(
-            "workspace parks only active display",
+            "workspace preserves size at one-point corner on active display only",
             self.fixture,
-            lambda report: (
-                all(
-                    not any(
-                        overlaps(screen["visible_frame"], frames(report)[title])
-                        for screen in report["screens"]
-                    )
-                    for title in active_titles
-                )
-                and all(
-                    close_frame(frames(report)[title], before_workspace[title])
-                    for title in other_titles
-                )
+            lambda report: self.corner_parked(
+                report, before_workspace, active_screen, active_titles
             ),
         )
         self.wait(
@@ -409,7 +482,7 @@ class NativeSmoke:
             "workspace returns native frames",
             self.fixture,
             lambda report: all(
-                close_frame(frame, before_workspace[title])
+                close_frame(frame, before_workspace[title], tolerance=2)
                 for title, frame in frames(report).items()
             ),
         )

@@ -243,11 +243,37 @@ fn placementFailure(window: *Window, message: []const u8) void {
 
 var debug_verification_failures: u32 = 0;
 
-fn verifiedFrame(identity: u64, target: Rect) bool {
+fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
+    for (displays.items) |display| {
+        if (display.identity == displayIdentity) continue;
+        const area = display.frame;
+        if (@min(frame.left + frame.width, area.left + area.width) > @max(frame.left, area.left) and
+            @min(frame.top + frame.height, area.top + area.height) > @max(frame.top, area.top)) return true;
+    }
+    return false;
+}
+
+fn parkingFrame(displayIdentity: u32, original: Rect) ?Rect {
+    const slot = displayIndex(displayIdentity) orelse return null;
+    const area = displays.items[slot].frame;
+    var candidate = original;
+    candidate.top = area.top + area.height - 1;
+    candidate.left = area.left + area.width - 1;
+    if (!overlapsOtherDisplays(candidate, displayIdentity)) return candidate;
+    candidate.left = area.left + 1 - original.width;
+    if (!overlapsOtherDisplays(candidate, displayIdentity)) return candidate;
+    return null;
+}
+
+fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
     const write_result = native.platform_frame(identity, target, 0);
     var actual: Rect = std.mem.zeroes(Rect);
     const readable = native.platform_read_frame(identity, &actual);
-    const verified = readable and framesNear(actual, target, 2);
+    const verified = readable and framesNear(actual, target, 2) and
+        (if (parkedDisplay) |displayIdentity|
+            @abs(actual.left + actual.width - target.left - target.width) <= 2 and !overlapsOtherDisplays(actual, displayIdentity)
+        else
+            true);
     if (!verified and debug_verification_failures < 32) {
         debug_verification_failures += 1;
         std.debug.print("[DEBUG-parking] verified-frame identity={d} write_result={} desired=[{d:.3},{d:.3},{d:.3},{d:.3}] actual_readable={} actual=[{d:.3},{d:.3},{d:.3},{d:.3}] failure={d}/32\n", .{
@@ -270,12 +296,12 @@ fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome
     if (!previouslyParked) window.parking_frame = original;
     // A failed AX write can still move the window. Own it before the first write.
     window.parked = true;
-    if (verifiedFrame(window.identity, target)) {
+    if (verifiedFrame(window.identity, target, if (parked) window.display else null)) {
         window.parked = parked;
         window.placement_error = null;
         return .applied;
     }
-    if (verifiedFrame(window.identity, original)) {
+    if (verifiedFrame(window.identity, original, null)) {
         window.parked = previouslyParked;
         placementFailure(window, "Placement rejected; prior geometry verified");
         return .rolled_back;
@@ -286,16 +312,15 @@ fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome
 fn reconcile() void {
     if (suspended or transition != null or displays.items.len == 0) return;
     deriveGoals();
-    var farRight: f64 = 0;
-    for (displays.items) |display| farRight = @max(farRight, display.frame.left + display.frame.width);
     for (windows.items) |*window| {
         if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
         if (!visible(window.*)) {
-            if (!window.parked) window.parking_frame = window.observation.frame;
-            var parked = window.parking_frame;
-            parked.left = farRight + 4096;
-            parked.top = 64;
-            if (!window.parked or !framesNear(window.observation.frame, parked, 2)) _ = placeVisibility(window, parked, true);
+            const original = if (window.parked) window.parking_frame else window.observation.frame;
+            const parked = parkingFrame(window.display, original) orelse {
+                placementFailure(window, "No parking corner avoids other displays");
+                continue;
+            };
+            if (!window.parked or !framesNear(window.observation.frame, parked, 2) or overlapsOtherDisplays(window.observation.frame, window.display)) _ = placeVisibility(window, parked, true);
         } else {
             const target = if (window.floating) window.floating_frame else window.goal;
             const actual = window.observation.frame;
@@ -315,7 +340,12 @@ fn reconcile() void {
             }
         }
     }
-    native.platform_border(focused orelse 0, config.border_width, config.border_color);
+    var borderIdentity: u64 = 0;
+    if (focused) |identity| if (windowIndex(identity)) |index| {
+        const window = windows.items[index];
+        if (visible(window) and !window.parked) borderIdentity = identity;
+    };
+    native.platform_border(borderIdentity, config.border_width, config.border_color);
 }
 export fn wm_tick() void {
     if (!initialized) return;
@@ -422,8 +452,6 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
     var count: usize = 0;
     displays.items[displaySlot].workspace = workspace;
     deriveGoals();
-    var farRight: f64 = 0;
-    for (displays.items) |display| farRight = @max(farRight, display.frame.left + display.frame.width);
     for (windows.items, 0..) |window, index| {
         if (window.display != displayIdentity or window.observation.minimized or window.observation.fullscreen) continue;
         if (!window.observation.onscreen and !window.parked) continue;
@@ -443,9 +471,12 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         const parked = window.workspace != workspace;
         var target = if (window.floating) window.floating_frame else window.goal;
         if (parked) {
-            target = if (window.parked) window.parking_frame else original;
-            target.left = farRight + 4096;
-            target.top = 64;
+            target = parkingFrame(window.display, if (window.parked) window.parking_frame else original) orelse {
+                displays.items[displaySlot].workspace = previousWorkspace;
+                deriveGoals();
+                placementFailure(&windows.items[index], "No parking corner avoids other displays");
+                return false;
+            };
         }
         placements[count] = .{ .index = index, .original = original, .target = target, .parked = parked, .previously_parked = window.parked, .parking_frame = window.parking_frame };
         count += 1;
