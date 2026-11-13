@@ -22,7 +22,7 @@
 @property double animationTime;
 @property double animationDuration;
 @property BOOL changed;
-@property BOOL rejectedTarget;
+@property WMMotionState motion;
 @end
 @implementation WindowRecord
 - (void)dealloc { if (_element) CFRelease(_element); }
@@ -228,7 +228,11 @@ static void scanWindows(void) {
 
 size_t platform_windows(WMWindow *output, size_t capacity) {
     size_t count = MIN(capacity, records.count);
-    for (size_t index = 0; index < count; index++) output[index] = records[index].observation;
+    for (size_t index = 0; index < count; index++) {
+        WindowRecord *record = records[index];
+        output[index] = record.observation;
+        output[index].motion = record.motion;
+    }
     return count;
 }
 
@@ -266,20 +270,20 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
         WMRect priorTarget = record.target;
-        if (duration > 0 && record.rejectedTarget && framesNear(priorTarget, frame, 2)) return false;
-        if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.animationDuration > 0) return true;
+        if (duration > 0 && record.motion == WMMotionRejected && framesNear(priorTarget, frame, 2)) return false;
+        if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.motion == WMMotionAnimating) return true;
         WMRect current;
         if (!readFrame(record.element, &current)) return false;
         if (framesNear(current, frame, intent == WMFrameIntentVerifiedPlacement ? 0 : 2)) {
             record.animationDuration = 0;
-            record.rejectedTarget = NO;
+            record.motion = WMMotionIdle;
             record.target = frame;
             return true;
         }
-        record.rejectedTarget = NO;
+        record.motion = WMMotionIdle;
         record.target = frame; record.changed = YES;
         if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame); }
-        record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration;
+        record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration; record.motion = WMMotionAnimating;
         return true;
     }
     return false;
@@ -498,7 +502,7 @@ bool platform_bindings(const WMBinding *bindings, size_t count) {
 
 size_t platform_restore(void) {
     size_t outstanding = 0;
-    for (WindowRecord *record in records) record.animationDuration = 0;
+    for (WindowRecord *record in records) { record.animationDuration = 0; record.motion = WMMotionIdle; }
     for (WindowRecord *record in records) if (record.changed) {
         WMRect actual;
         BOOL restored = NO;
@@ -633,14 +637,14 @@ int platform_main(int argc, char **argv) {
                 }
                 lastConfigCheck = now;
             }
-            for (WindowRecord *record in records) if (record.animationDuration > 0) {
-                if (record.observation.stale || !record.observation.onscreen || record.observation.minimized || record.observation.fullscreen) { record.animationDuration = 0; continue; }
+            for (WindowRecord *record in records) if (record.motion == WMMotionAnimating) {
+                if (record.observation.stale || !record.observation.onscreen || record.observation.minimized || record.observation.fullscreen) { record.animationDuration = 0; record.motion = WMMotionIdle; continue; }
                 double progress = MIN(1, (now - record.animationTime) / record.animationDuration); double eased = 1 - pow(1 - progress, 3);
                 WMRect start = record.animationStart, target = record.target;
                 BOOL applied = writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased});
                 if (!applied || progress >= 1) {
                     WMRect actual;
-                    record.rejectedTarget = !applied || !readFrame(record.element, &actual) || !framesNear(actual, target, 2);
+                    record.motion = !applied || !readFrame(record.element, &actual) || !framesNear(actual, target, 2) ? WMMotionRejected : WMMotionIdle;
                     record.animationDuration = 0;
                     dirty = YES;
                 }

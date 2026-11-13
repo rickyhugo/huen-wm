@@ -10,7 +10,8 @@
 #include <lualib.h>
 typedef struct { double left, top, width, height; } WMRect;
 typedef enum { WMFrameIntentVisibleGoal = 0, WMFrameIntentVerifiedPlacement = 1 } WMFrameIntent;
-typedef struct { uint64_t identity; int pid; WMRect frame; bool minimized, fullscreen, focused, stale, onscreen; char bundle[256], title[512]; } WMWindow;
+typedef enum { WMMotionIdle, WMMotionAnimating, WMMotionRejected } WMMotionState;
+typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen; char bundle[256], title[512]; } WMWindow;
 typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; bool built_in; } WMDisplay;
 typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);

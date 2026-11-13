@@ -793,7 +793,7 @@ export fn wm_tick() void {
         if (windowIndex(observation.identity)) |index| {
             var window = &windows.items[index];
             window.observation = observation;
-            if (displayIndex(window.display) != null and transition == null and window.floating and !managedFullscreen(window.*) and !window.parked and !observation.stale) {
+            if (displayIndex(window.display) != null and transition == null and window.floating and !managedFullscreen(window.*) and !window.parked and !observation.stale and observation.motion == .idle) {
                 if (window.floating_restore) {
                     if (framesNear(observation.frame, window.floating_frame, 2)) window.floating_restore = false;
                 } else window.floating_frame = observation.frame;
