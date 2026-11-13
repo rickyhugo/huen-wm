@@ -4,6 +4,9 @@ pub const Layout = enum { dwindle, master };
 pub const Direction = enum { left, right, up, down };
 pub const Axis = enum { width, height };
 pub const Orientation = enum { horizontal, vertical, toggle };
+pub const Selection = enum { parent, child };
+pub const GroupMode = enum { tabbed, stacked };
+pub const Group = union(enum) { join: Direction, tabbed, stacked, split, next, previous };
 pub const Name = struct {
     bytes: [128:0]u8 = @splat(0),
 
@@ -35,6 +38,9 @@ pub const Command = union(enum) {
     close: bool,
     swap: Direction,
     move: Direction,
+    tilemove: Direction,
+    select: Selection,
+    group: Group,
     resize: f64,
     resize_points: struct { axis: Axis, delta: f64 },
     split: Orientation,
@@ -55,6 +61,19 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .exec_and_forget = shell };
     }
     var argument = tokens.next();
+    if (std.mem.eql(u8, verb, "group")) {
+        const action = argument orelse return error.MissingArgument;
+        if (std.mem.eql(u8, action, "join")) {
+            const direction = std.meta.stringToEnum(Direction, tokens.next() orelse return error.MissingArgument) orelse return error.InvalidDirection;
+            if (tokens.next() != null) return error.ExtraArgument;
+            return .{ .group = .{ .join = direction } };
+        }
+        if (tokens.next() != null) return error.ExtraArgument;
+        inline for (.{ "tabbed", "stacked", "split", "next", "previous" }) |name| {
+            if (std.mem.eql(u8, action, name)) return .{ .group = @unionInit(Group, name, {}) };
+        }
+        return error.InvalidGroupAction;
+    }
     if (std.mem.eql(u8, verb, "resize")) {
         const value = argument orelse return error.MissingArgument;
         if (std.meta.stringToEnum(Axis, value)) |axis| {
@@ -110,7 +129,8 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .toggle_floating;
     }
     const value = argument orelse return error.MissingArgument;
-    inline for (.{ "swap", "move" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);
+    inline for (.{ "swap", "move", "tilemove" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);
+    if (std.mem.eql(u8, verb, "select")) return .{ .select = std.meta.stringToEnum(Selection, value) orelse return error.InvalidSelection };
     if (std.mem.eql(u8, verb, "layout")) return .{ .layout = std.meta.stringToEnum(Layout, value) orelse return error.InvalidLayout };
     if (std.mem.eql(u8, verb, "split")) return .{ .split = std.meta.stringToEnum(Orientation, value) orelse return error.InvalidOrientation };
     const index = std.fmt.parseInt(usize, value, 10) catch return error.UnknownCommand;
