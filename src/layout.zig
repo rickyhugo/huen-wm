@@ -1040,7 +1040,7 @@ pub const Store = struct {
     pub fn importSnapshot(self: *Store, snapshot: *const Snapshot) !void {
         var seen: [2047]bool = @splat(false);
         for (snapshot.roots, 0..) |slot, index| if (slot) |state| {
-            if (state.workspace >= 10 or !std.math.isFinite(state.ratio) or state.ratio < 0.1 or state.ratio > 0.9) return error.InvalidSnapshot;
+            if (state.workspace >= 10 or !std.math.isFinite(state.ratio) or state.ratio <= 0 or state.ratio >= 1) return error.InvalidSnapshot;
             for (snapshot.roots[0..index]) |earlier| if (earlier) |other| if (state.display == other.display and state.workspace == other.workspace) return error.InvalidSnapshot;
             if (state.root) |root| {
                 if (root >= snapshot.nodes.len or snapshot.nodes[root].previous != null or snapshot.nodes[root].next != null) return error.InvalidSnapshot;
