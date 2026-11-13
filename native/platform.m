@@ -99,13 +99,16 @@ static BOOL canMove(WindowRecord *record) {
 
 static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     if (!canMove(record)) return NO;
+    WMRect current;
+    BOOL resizeNeeded = !readFrame(record.element, &current) || current.width != frame.width || current.height != frame.height;
     CGPoint origin = CGPointMake(frame.left, frame.top);
     CGSize extent = CGSizeMake(frame.width, frame.height);
     AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
     AXValueRef size = AXValueCreate(kAXValueCGSizeType, &extent);
     // Move before resizing to avoid clamping at the old origin, then restore the origin after resizing.
     AXError initialPositionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
-    AXError sizeResult = AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size);
+    // Even an unchanged size can be clamped after moving down or offscreen.
+    AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     CFRelease(position); CFRelease(size);
     return initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
