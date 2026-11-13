@@ -239,6 +239,7 @@ size_t platform_displays(WMDisplay *output, size_t capacity) {
         if (count >= capacity) break;
         NSRect visible = screen.visibleFrame;
         WMDisplay display = {0}; display.identity = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+        display.built_in = CGDisplayIsBuiltin(display.identity);
         display.frame = (WMRect){visible.origin.x, primaryHeight - NSMaxY(visible), visible.size.width, visible.size.height};
         NSRect full = screen.frame;
         display.full_bounds = (WMRect){full.origin.x, primaryHeight - NSMaxY(full), full.size.width, full.size.height};
@@ -246,6 +247,19 @@ size_t platform_displays(WMDisplay *output, size_t capacity) {
         output[count++] = display;
     }
     return count;
+}
+
+bool platform_pointer(WMPoint *point) {
+    CGEventRef event = CGEventCreate(NULL);
+    if (!event) return false;
+    CGPoint location = CGEventGetLocation(event);
+    CFRelease(event);
+    *point = (WMPoint){location.x, location.y};
+    return true;
+}
+
+bool platform_warp_pointer(WMPoint point) {
+    return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
 
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent) {
@@ -543,7 +557,7 @@ int platform_main(int argc, char **argv) {
         }
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
-        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down\nhuen-wm swap|move left|right|up|down | resize DELTA\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down\nhuen-wm swap|move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace INDEX | send-to-workspace INDEX\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
             NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.0", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;

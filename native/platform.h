@@ -11,7 +11,10 @@
 typedef struct { double left, top, width, height; } WMRect;
 typedef enum { WMFrameIntentVisibleGoal = 0, WMFrameIntentVerifiedPlacement = 1 } WMFrameIntent;
 typedef struct { uint64_t identity; int pid; WMRect frame; bool minimized, fullscreen, focused, stale, onscreen; char bundle[256], title[512]; } WMWindow;
-typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; } WMDisplay;
+typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; bool built_in; } WMDisplay;
+typedef struct { double left; double top; } WMPoint;
+bool platform_pointer(WMPoint *point);
+bool platform_warp_pointer(WMPoint point);
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
 typedef struct { char title[160], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;

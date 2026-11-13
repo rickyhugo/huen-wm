@@ -15,7 +15,11 @@ pub const Mode = struct {
     bindings: [128]native.WMBinding = @splat(std.mem.zeroes(native.WMBinding)),
     binding_count: usize = 0,
 };
+pub const Monitor = enum { external, @"built-in" };
+pub const MonitorPreferences = struct { order: [2]Monitor = .{ .external, .@"built-in" }, count: usize };
 pub const ConfigCandidate = struct {
+    workspace_monitors: ?MonitorPreferences = null,
+    mouse_follows_monitor: bool = false,
     status_bar: StatusBar = .{},
     gap: f64 = 12,
     border_width: f64 = 2,
@@ -118,6 +122,8 @@ const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireRule = struct { bundle: []const u8, floating: bool, workspace: ?usize };
 const WireConfig = struct {
+    workspace_monitors: ?[]const Monitor,
+    mouse_follows_monitor: bool,
     status_bar: StatusBar,
     gap: f64,
     border_width: f64,
@@ -143,6 +149,8 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
     defer allocator.free(buffer);
     var writer: std.Io.Writer = .fixed(buffer);
     std.json.Stringify.value(WireConfig{
+        .workspace_monitors = if (candidate.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
+        .mouse_follows_monitor = candidate.mouse_follows_monitor,
         .status_bar = candidate.status_bar,
         .gap = candidate.gap,
         .border_width = candidate.border_width,
@@ -162,6 +170,12 @@ fn decode(response: []const u8) !ConfigCandidate {
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
     var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len };
     candidate.status_bar = wire.status_bar;
+    candidate.mouse_follows_monitor = wire.mouse_follows_monitor;
+    if (wire.workspace_monitors) |preferences| {
+        if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
+        candidate.workspace_monitors = .{ .count = preferences.len };
+        @memcpy(candidate.workspace_monitors.?.order[0..preferences.len], preferences);
+    }
     for (wire.workspaces, 0..) |workspace, index| {
         try copyText(&candidate.workspaces[index].name, workspace.name);
         candidate.workspaces[index].layout = workspace.layout;
@@ -192,6 +206,10 @@ fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
 }
 
 fn validate(candidate: *const ConfigCandidate) !void {
+    if (candidate.workspace_monitors) |preferences| {
+        if (preferences.count == 0 or preferences.count > 2) return error.InvalidMonitorPreferences;
+        if (preferences.count == 2 and preferences.order[0] == preferences.order[1]) return error.DuplicateMonitor;
+    }
     try checkNumber(candidate.gap, 0, 100);
     try checkNumber(candidate.border_width, 0, 12);
     try checkNumber(candidate.duration, 0, 0.5);
@@ -408,7 +426,21 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor" });
+    result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
+    if (rawField(state, "workspace_monitors") != native.LUA_TNIL) {
+        const count = try arrayCount(state, 2);
+        if (count == 0) return error.InvalidMonitorPreferences;
+        result.workspace_monitors = .{ .count = count };
+        for (0..count) |index| {
+            if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedString;
+            var length: usize = 0;
+            const value = native.lua_tolstring(state, -1, &length);
+            result.workspace_monitors.?.order[index] = std.meta.stringToEnum(Monitor, value[0..length]) orelse return error.UnknownMonitor;
+            pop(state);
+        }
+    }
+    pop(state);
     if (rawField(state, "status_bar") != native.LUA_TNIL) {
         try checkKeys(state, &.{ "enabled", "label" });
         result.status_bar.enabled = try fieldBool(state, "enabled", true);

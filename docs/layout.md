@@ -95,10 +95,12 @@ Each display supports the configured maximum of 10 workspaces.
 Node exhaustion returns `LayoutCapacityExceeded` without replacing an existing
 node. These bounds accommodate all 1024 tracked windows in one tree.
 
-A disconnected display loses its layout roots.
-Its windows migrate to the first remaining display's active workspace.
-The destination tree inserts their identities and rebuilds their splits.
-The disconnected display's ratios and fullscreen selection do not survive migration.
+A disconnected display's windows keep their workspace numbers on a surviving
+display. Whole-workspace migration preserves the tree, runtime layout, ratio,
+and fullscreen selection unless destination state collides.
+Destination state wins, except empty default state yields to incoming state.
+Colliding source trees are released and their members join the destination tree.
+See [monitor routing](monitors.md) for owner selection and rollback behavior.
 
 Geometry projection does not change membership based on the active workspace.
 A rejected workspace switch therefore does not discard the parked workspace's tree.

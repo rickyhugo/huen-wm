@@ -132,7 +132,9 @@ Existing verbs keep their grammar and reject extra arguments.
 | `status`, `windows`, `monitors`, `workspaces` | None. |
 | `reload`, `quit`, `stop`, `restore`, `recover` | None. |
 | `swap`, `move` | One direction. |
-| `resize` | One finite ratio delta with absolute value at most `0.5`. |
+| `resize` | One finite ratio delta with absolute value at most `0.5`, or `width`/`height` and a finite point delta with absolute value at most `10000`. |
+| `split` | `horizontal`, `vertical`, or `toggle`. |
+| `fullscreen` | None. Toggles managed fullscreen without creating a macOS Space. |
 | `toggle-floating` | None. |
 | `layout` | `dwindle` or `master`. |
 | `workspace`, `send-to-workspace` | One workspace index, starting at `1`. |

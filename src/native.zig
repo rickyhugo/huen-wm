@@ -1,7 +1,10 @@
 pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const WMFrameIntent = enum(c_uint) { visible_goal = 0, verified_placement = 1 };
 pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, bundle: [256]u8, title: [512]u8 };
-pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8 };
+pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8, built_in: bool };
+pub const WMPoint = extern struct { left: f64, top: f64 };
+pub extern "c" fn platform_pointer(point: *WMPoint) bool;
+pub extern "c" fn platform_warp_pointer(point: WMPoint) bool;
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
 pub const WMStatusRow = extern struct { title: [80]u8, command: [128]u8, checked: bool, enabled: bool };
 pub const WMStatusPresentation = extern struct { title: [160]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
