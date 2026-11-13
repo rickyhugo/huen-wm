@@ -46,11 +46,11 @@ pub const Command = union(enum) {
 };
 
 pub fn parse(input: []const u8, workspace_count: usize) !Command {
-    if (input.len > 511 or std.mem.indexOfScalar(u8, input, 0) != null or !std.unicode.utf8ValidateSlice(input)) return error.InvalidCommandText;
-    var tokens = std.mem.tokenizeAny(u8, input, " \t\r\n");
+    if (input.len > 511 or std.mem.indexOfScalar(u8, input, 0) != null or std.mem.indexOfAny(u8, input, "\r\n") != null or !std.unicode.utf8ValidateSlice(input)) return error.InvalidCommandText;
+    var tokens = std.mem.tokenizeAny(u8, input, " \t");
     const verb = tokens.next() orelse return error.MissingCommand;
     if (std.mem.eql(u8, verb, "exec-and-forget")) {
-        const shell = std.mem.trimStart(u8, tokens.rest(), " \t\r\n");
+        const shell = std.mem.trimStart(u8, tokens.rest(), " \t");
         if (shell.len == 0) return error.MissingArgument;
         return .{ .exec_and_forget = shell };
     }

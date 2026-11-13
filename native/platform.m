@@ -564,9 +564,11 @@ int platform_main(int argc, char **argv) {
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }
         if (![verb isEqualToString:@"start"]) {
+            NSString *operands = [arguments componentsJoinedByString:@" "];
+            if ([operands rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n"]].location != NSNotFound) { fputs("command must be one line\n", stderr); return 1; }
+            NSString *command = [operands stringByAppendingString:@"\n"];
+            if ([command lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 511) { fputs("command too long\n", stderr); return 1; }
             int descriptor = connectSocket(); if (descriptor < 0) { fprintf(stderr, "huen-wm is not running for this user\n"); return 1; }
-            NSString *command = [[arguments componentsJoinedByString:@" "] stringByAppendingString:@"\n"];
-            if ([command lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 511) { fputs("command too long\n", stderr); close(descriptor); return 1; }
             int noSignal = 1;
             setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
             const char *commandBytes = command.UTF8String;

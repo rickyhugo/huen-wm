@@ -73,6 +73,9 @@ The completion message contains the native error when available.
 A successful NSWorkspace completion does not guarantee a new window.
 
 `exec-and-forget` explicitly interprets shell syntax.
+Commands must fit on one line. Embedded carriage returns and newlines are invalid
+in CLI operands and configured bindings. Shell commands can use semicolons or a
+script path instead.
 Lua configuration evaluation does not execute this command.
 The shell starts only when the binding or runtime command runs.
 Standard input, output, and error use the null device.

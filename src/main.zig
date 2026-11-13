@@ -839,7 +839,7 @@ fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     var best: f64 = std.math.inf(f64);
     var result: ?usize = null;
     for (windows.items, 0..) |candidate, index| {
-        if (index == sourceIndex or !visible(candidate)) continue;
+        if (index == sourceIndex or !visible(candidate) or candidate.parked) continue;
         const candidateFrame = if (candidate.floating) candidate.floating_frame else candidate.goal;
         const horizontal = candidateFrame.left + candidateFrame.width / 2 - sourceFrame.left - sourceFrame.width / 2;
         const vertical = candidateFrame.top + candidateFrame.height / 2 - sourceFrame.top - sourceFrame.height / 2;
@@ -872,7 +872,7 @@ fn wrappedNeighbor(source_index: usize, direction: Direction) usize {
     var wrap_distance: f64 = 0;
     var wrap_cross = std.math.inf(f64);
     for (windows.items, 0..) |candidate, index| {
-        if (index == source_index or !visible(candidate) or candidate.display != source.display or candidate.workspace != source.workspace) continue;
+        if (index == source_index or !visible(candidate) or candidate.parked or candidate.display != source.display or candidate.workspace != source.workspace) continue;
         const frame = if (candidate.floating) candidate.floating_frame else candidate.goal;
         const horizontal = frame.left + frame.width / 2 - source_frame.left - source_frame.width / 2;
         const vertical = frame.top + frame.height / 2 - source_frame.top - source_frame.height / 2;
