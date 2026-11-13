@@ -248,7 +248,7 @@ size_t platform_displays(WMDisplay *output, size_t capacity) {
     return count;
 }
 
-bool platform_frame(uint64_t identity, WMRect frame, double duration) {
+bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
         WMRect priorTarget = record.target;
@@ -256,11 +256,11 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration) {
         if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.animationDuration > 0) return true;
         WMRect current;
         if (!readFrame(record.element, &current)) return false;
-        if (framesNear(current, frame, duration > 0 ? 2 : 0)) {
+        if (framesNear(current, frame, intent == WMFrameIntentVerifiedPlacement ? 0 : 2)) {
             record.animationDuration = 0;
             record.rejectedTarget = NO;
             record.target = frame;
-            return canMove(record);
+            return true;
         }
         record.rejectedTarget = NO;
         record.target = frame; record.changed = YES;

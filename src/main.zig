@@ -364,7 +364,7 @@ fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
 }
 
 fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
-    _ = native.platform_frame(identity, target, 0);
+    _ = native.platform_frame(identity, target, 0, .verified_placement);
     var actual: Rect = std.mem.zeroes(Rect);
     const readable = native.platform_read_frame(identity, &actual);
     const verified = readable and
@@ -456,7 +456,7 @@ fn reconcile() void {
                 const outcome = placeVisibility(window, target, false);
                 if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             } else {
-                const applied = native.platform_frame(window.identity, target, config.duration);
+                const applied = native.platform_frame(window.identity, target, config.duration, .visible_goal);
                 var accepted: Rect = actual;
                 const rejected = !applied or (config.duration == 0 and (!native.platform_read_frame(window.identity, &accepted) or !framesNear(accepted, target, 2)));
                 if (rejected) {
