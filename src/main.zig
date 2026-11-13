@@ -253,16 +253,15 @@ fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     return false;
 }
 
-fn parkingFrame(displayIdentity: u32, original: Rect) ?Rect {
+fn parkingFrames(displayIdentity: u32, original: Rect) ?[2]Rect {
     const slot = displayIndex(displayIdentity) orelse return null;
     const area = displays.items[slot].frame;
     var candidate = original;
     candidate.top = area.top + area.height - 1;
     candidate.left = area.left + area.width - 1;
-    if (!overlapsOtherDisplays(candidate, displayIdentity)) return candidate;
+    const right = candidate;
     candidate.left = area.left + 1 - original.width;
-    if (!overlapsOtherDisplays(candidate, displayIdentity)) return candidate;
-    return null;
+    return .{ right, candidate };
 }
 
 fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
@@ -289,12 +288,11 @@ fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
     return verified;
 }
 
-const PlacementOutcome = enum { applied, rolled_back, recovery_required, unreadable };
+const PlacementOutcome = enum { applied, rolled_back, recovery_required, unreadable, no_corner };
 
-fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
+fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
     var original: Rect = undefined;
     if (!native.platform_read_frame(window.identity, &original)) {
-        placementFailure(window, "Placement geometry unreadable");
         return .unreadable;
     }
     const previouslyParked = window.parked;
@@ -308,24 +306,62 @@ fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome
     }
     if (verifiedFrame(window.identity, original, null)) {
         window.parked = previouslyParked;
-        placementFailure(window, "Placement rejected; prior geometry verified");
         return .rolled_back;
     }
-    placementFailure(window, "Placement and rollback rejected; recovery ownership retained");
     return .recovery_required;
 }
+
+fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
+    switch (outcome) {
+        .applied => {},
+        .rolled_back => placementFailure(window, "Placement rejected; prior geometry verified"),
+        .recovery_required => placementFailure(window, "Placement and rollback rejected; recovery ownership retained"),
+        .unreadable => placementFailure(window, "Placement geometry unreadable"),
+        .no_corner => placementFailure(window, "No parking corner avoids other displays"),
+    }
+}
+
+fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
+    const outcome = attemptVisibility(window, target, parked);
+    reportPlacementOutcome(window, outcome);
+    return outcome;
+}
+
+fn parkWindow(window: *Window) PlacementOutcome {
+    var actual: Rect = undefined;
+    if (!native.platform_read_frame(window.identity, &actual)) {
+        reportPlacementOutcome(window, .unreadable);
+        return .unreadable;
+    }
+    const candidates = parkingFrames(window.display, if (window.parked) window.parking_frame else actual) orelse {
+        reportPlacementOutcome(window, .no_corner);
+        return .no_corner;
+    };
+    if (window.parked) {
+        for (candidates) |candidate| {
+            if (parkedFrameAccepted(actual, candidate, window.display)) {
+                window.placement_error = null;
+                return .applied;
+            }
+        }
+    }
+    var outcome: PlacementOutcome = .no_corner;
+    for (candidates) |candidate| {
+        if (overlapsOtherDisplays(candidate, window.display)) continue;
+        outcome = attemptVisibility(window, candidate, true);
+        if (outcome != .rolled_back) break;
+    }
+    reportPlacementOutcome(window, outcome);
+    return outcome;
+}
+
 fn reconcile() void {
     if (suspended or transition != null or displays.items.len == 0) return;
     deriveGoals();
     for (windows.items) |*window| {
         if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
         if (!visible(window.*)) {
-            const original = if (window.parked) window.parking_frame else window.observation.frame;
-            const parked = parkingFrame(window.display, original) orelse {
-                placementFailure(window, "No parking corner avoids other displays");
-                continue;
-            };
-            if (!window.parked or !parkedFrameAccepted(window.observation.frame, parked, window.display)) _ = placeVisibility(window, parked, true);
+            _ = parkWindow(window);
         } else {
             const target = if (window.floating) window.floating_frame else window.goal;
             const actual = window.observation.frame;
@@ -475,22 +511,17 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
             return false;
         }
         const parked = window.workspace != workspace;
-        var target = if (window.floating) window.floating_frame else window.goal;
-        if (parked) {
-            target = parkingFrame(window.display, if (window.parked) window.parking_frame else original) orelse {
-                displays.items[displaySlot].workspace = previousWorkspace;
-                deriveGoals();
-                placementFailure(&windows.items[index], "No parking corner avoids other displays");
-                return false;
-            };
-        }
+        const target = if (window.floating) window.floating_frame else window.goal;
         placements[count] = .{ .index = index, .original = original, .target = target, .parked = parked, .previously_parked = window.parked, .parking_frame = window.parking_frame };
         count += 1;
     }
     for (placements[0..count], 0..) |placement, position| {
-        const outcome = placeVisibility(&windows.items[placement.index], placement.target, placement.parked);
+        const outcome = if (placement.parked)
+            parkWindow(&windows.items[placement.index])
+        else
+            placeVisibility(&windows.items[placement.index], placement.target, false);
         if (outcome != .applied) {
-            for (placements[0 .. position + 1]) |rollback| {
+            for (placements[0..position]) |rollback| {
                 var window = &windows.items[rollback.index];
                 _ = placeVisibility(window, rollback.original, rollback.previously_parked);
                 if (rollback.previously_parked) window.parking_frame = rollback.parking_frame;

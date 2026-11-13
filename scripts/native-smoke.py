@@ -223,14 +223,18 @@ class NativeSmoke:
                     top=active_screen["top"] + active_screen["height"] - 1,
                 ),
             }
-            chosen = next(
+            observed_side = next(
                 (
                     corner
                     for corner, candidate in candidates.items()
-                    if not any(
-                        overlaps(candidate, screen, tolerance=0)
-                        for screen in other_screens
+                    if abs(actual["left"] - candidate["left"]) <= 2
+                    and abs(
+                        actual["left"]
+                        + actual["width"]
+                        - candidate["left"]
+                        - candidate["width"]
                     )
+                    <= 2
                 ),
                 None,
             )
@@ -251,8 +255,8 @@ class NativeSmoke:
             evidence[title] = {
                 "before": original,
                 "actual": actual,
-                "chosen_corner": chosen,
-                "desired": candidates.get(chosen),
+                "observed_side": observed_side,
+                "desired": candidates.get(observed_side),
                 "corner_contact_points": {
                     "horizontal": horizontal_contact,
                     "vertical": vertical_contact,
@@ -262,15 +266,7 @@ class NativeSmoke:
                     for field in ("width", "height")
                 ),
                 "one_point_vertical_strip_with_two_point_readback_tolerance": (
-                    chosen is not None
-                    and abs(actual["left"] - candidates[chosen]["left"]) <= 2
-                    and abs(
-                        actual["left"]
-                        + actual["width"]
-                        - candidates[chosen]["left"]
-                        - candidates[chosen]["width"]
-                    )
-                    <= 2
+                    observed_side is not None
                     and 0 < horizontal_contact <= 3
                     and active_screen["top"] <= actual["top"] <= bottom
                     and actual["top"] + actual["height"] >= bottom
