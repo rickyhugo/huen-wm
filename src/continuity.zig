@@ -13,7 +13,7 @@ pub const LiveWindow = struct {
     frame: native.WMRect,
     attributes: session.NativeAttributes,
 };
-pub const Screen = struct { identity: u32, workspace: usize, frame: native.WMRect, hint: [128]u8 };
+pub const Screen = struct { identity: u32, workspace: usize, full_bounds: native.WMRect, hint: [128]u8 };
 pub const Assignment = struct { identity: u64, display: u32, workspace: usize, floating: bool, frame: ?native.WMRect };
 pub const Active = struct { display: u32, workspace: usize };
 pub const Imported = struct {
@@ -121,7 +121,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
             .root = root_index orelse return error.MissingRoot,
             .display_hint = try memory.dupe(u8, text(&screen.hint)),
             .floating = window.floating,
-            .floating_frame = if (window.floating) .{ .left = window.frame.left - screen.frame.left, .top = window.frame.top - screen.frame.top, .width = window.frame.width, .height = window.frame.height } else null,
+            .floating_frame = if (window.floating) .{ .left = window.frame.left - screen.full_bounds.left, .top = window.frame.top - screen.full_bounds.top, .width = window.frame.width, .height = window.frame.height } else null,
         };
     }
     for (temporary.nodes, 0..) |node, index| {
@@ -228,7 +228,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         const current = mapping[index] orelse continue;
         const destination = destinations[saved.root] orelse continue;
         const screen = screenFor(screens, destination.display) orelse continue;
-        try assignments.append(allocator, .{ .identity = windows[current].identity, .display = destination.display, .workspace = destination.workspace, .floating = saved.floating, .frame = if (saved.floating_frame) |frame| .{ .left = frame.left + screen.frame.left, .top = frame.top + screen.frame.top, .width = frame.width, .height = frame.height } else null });
+        try assignments.append(allocator, .{ .identity = windows[current].identity, .display = destination.display, .workspace = destination.workspace, .floating = saved.floating, .frame = if (saved.floating_frame) |frame| .{ .left = frame.left + screen.full_bounds.left, .top = frame.top + screen.full_bounds.top, .width = frame.width, .height = frame.height } else null });
     }
     var active: std.ArrayList(Active) = .empty;
     errdefer active.deinit(allocator);

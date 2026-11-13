@@ -108,7 +108,7 @@ fn sessionWindows() ![]continuity.LiveWindow {
 }
 fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
     for (displays.items, 0..) |display, index| {
-        output[index] = .{ .identity = display.identity, .workspace = display.workspace, .frame = display.frame, .hint = @splat(0) };
+        output[index] = .{ .identity = display.identity, .workspace = display.workspace, .full_bounds = display.full_bounds, .hint = @splat(0) };
         _ = session.huen_session_display_uuid(display.identity, &output[index].hint, output[index].hint.len);
     }
     return output[0..displays.items.len];
