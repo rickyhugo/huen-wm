@@ -626,11 +626,8 @@ pub const Store = struct {
         const target = handles.target;
         if (placement == .swap) {
             if (self.nodes[source].content != .leaf or self.nodes[target].content != .leaf) return error.SwapRequiresLeaves;
-            const identity = self.nodes[source].content.leaf;
-            self.nodes[source].content.leaf = self.nodes[target].content.leaf;
-            self.nodes[target].content.leaf = identity;
+            self.swap(self.nodes[source].content.leaf, self.nodes[target].content.leaf);
             state.selection = target_ref;
-            self.revision +%= 1;
             return;
         }
         var free_count: usize = 0;
@@ -860,13 +857,17 @@ pub const Store = struct {
         return self.eligibleLeaf(try self.resolve(reference_value));
     }
 
-    pub fn labelIdentity(self: *const Store, reference_value: NodeRef) !u64 {
-        var handle = try self.resolve(reference_value);
+    fn rememberedLeaf(self: *const Store, ancestor: Handle) Handle {
+        var handle = ancestor;
         while (self.nodes[handle].content != .leaf) {
             const node = self.nodes[handle];
             handle = node.last_child orelse if (node.content == .group) node.content.group.selected else self.firstChild(handle).?;
         }
-        return self.nodes[handle].content.leaf;
+        return handle;
+    }
+
+    pub fn labelIdentity(self: *const Store, reference_value: NodeRef) !u64 {
+        return self.nodes[self.rememberedLeaf(try self.resolve(reference_value))].content.leaf;
     }
 
     pub fn hiddenLeaves(self: *const Store, state: *const WorkspaceLayout, output: []u64) !usize {
@@ -1081,8 +1082,54 @@ pub const Store = struct {
     pub fn swap(self: *Store, first: u64, second: u64) void {
         const first_leaf = self.leaf(first);
         const second_leaf = self.leaf(second);
+        var remembered: [2047]?Handle = @splat(null);
+        for ([_]?Handle{ first_leaf, second_leaf }) |leaf_handle| {
+            var ancestor = if (leaf_handle) |handle| self.nodes[handle].parent else null;
+            while (ancestor) |handle| : (ancestor = self.nodes[handle].parent) {
+                if (remembered[handle] == null and self.nodes[handle].last_child != null) remembered[handle] = self.rememberedLeaf(handle);
+            }
+        }
         if (first_leaf) |handle| self.nodes[handle].content.leaf = second;
         if (second_leaf) |handle| self.nodes[handle].content.leaf = first;
+        for ([_]?Handle{ first_leaf, second_leaf }) |leaf_handle| {
+            var ancestor = if (leaf_handle) |handle| self.nodes[handle].parent else null;
+            while (ancestor) |handle| : (ancestor = self.nodes[handle].parent) {
+                const original = remembered[handle] orelse continue;
+                var child = (if (first_leaf == original) second_leaf else if (second_leaf == original) first_leaf else original) orelse {
+                    self.nodes[handle].last_child = null;
+                    continue;
+                };
+                if (!self.contains(handle, child)) {
+                    self.nodes[handle].last_child = null;
+                    continue;
+                }
+                while (self.nodes[child].parent) |parent| {
+                    self.nodes[parent].last_child = child;
+                    if (parent == handle) break;
+                    child = parent;
+                }
+            }
+        }
+        for (&self.roots) |*slot| if (slot.*) |*state| {
+            if (state.last_focused) |identity| {
+                const destination = if (identity == first) second_leaf else if (identity == second) first_leaf else null;
+                if (destination) |handle| if (state.root != self.rootOf(handle)) {
+                    state.last_focused = null;
+                };
+            }
+            if (state.selection) |selection| {
+                const original = self.resolve(selection) catch {
+                    state.selection = null;
+                    continue;
+                };
+                if (original != first_leaf and original != second_leaf) continue;
+                const destination = (if (original == first_leaf) second_leaf else first_leaf) orelse {
+                    state.selection = null;
+                    continue;
+                };
+                state.selection = if (state.root == self.rootOf(destination)) self.reference(destination) else null;
+            }
+        };
         self.revision +%= 1;
     }
 };
