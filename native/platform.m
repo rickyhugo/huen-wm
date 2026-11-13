@@ -321,7 +321,14 @@ uint64_t platform_focused_window(void) {
 static WMLaunchStatus launchStatus;
 uint64_t platform_launch(const char *bundle, bool new_instance) {
     NSString *identifier = [NSString stringWithUTF8String:bundle];
-    NSURL *url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
+    NSURL *url = nil;
+    for (NSRunningApplication *application in [NSRunningApplication runningApplicationsWithBundleIdentifier:identifier]) {
+        if (!application.terminated && application.bundleURL && [NSFileManager.defaultManager fileExistsAtPath:application.bundleURL.path]) {
+            url = application.bundleURL;
+            break;
+        }
+    }
+    if (!url) url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
     if (!url) return 0;
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
     configuration.createsNewApplicationInstance = new_instance;
