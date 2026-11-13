@@ -127,3 +127,38 @@ The normal unfiltered checkpoint was not touched.
 The installed app remained unchanged throughout acceptance.
 The initial personal-config hash was not captured, so acceptance has no before-and-after config-hash proof.
 The verifier made no personal-config edits.
+
+## Local installation
+
+After combined acceptance, the exact signed bundle was copied to `~/Applications/Huen WM.app`.
+All eight bundle entries match the candidate, including file contents and modes.
+The installed executable retains SHA256 `a80c834caa55e0558bb3058e27eb16e276a6a8abafce51947c68a596f3a2398e`.
+
+The personal config adds only:
+
+```lua
+session = { enabled = true },
+mouse = { enabled = true, mods = "ctrl+alt" },
+```
+
+Existing bindings, rules, and workspaces remain intact.
+Its SHA256 is `b33242a9d7b1a0600877a5ee81d616de1f633cfb2d2179394f0559f9e1a4843c`.
+The original app ZIP, config, and metadata are under `~/.local/state/huen-wm/backups/2026-11-13-workspace-controls/`.
+Extracting that ZIP reproduced the original bundle manifest.
+
+Installed config validation and doctor passed without permission prompts.
+The focused installed-preset run passed all 14 recorded checks.
+They include native gap-10 tiling, main-to-resize-to-main binding registration, original-frame restore, clean session save, and clean quit.
+The run also confirmed ten workspaces, preferred monitor ownership, unique public identities, and available mouse capability.
+It did not repeat the candidate's gesture suite.
+
+The run's aggregate result remains false because its final cursor comparison failed.
+The cursor moved without gesture injection, for an unknown reason.
+Follow-up cleanup returned it within one point of the original fractional position, but not exactly.
+Buttons remained released and modifiers clear.
+This cleanup qualification does not change the individual native check results.
+
+Final cleanup restored AeroSpace's original enabled state, PID, and main mode.
+No manager, fixture, probe, or checkpoint remains.
+Login startup was not enabled.
+Installation evidence and the preserved cursor failure are in `../huen-workspace-install/`.

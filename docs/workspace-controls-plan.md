@@ -12,7 +12,7 @@ Keep SIP enabled, Lua configuration, and the existing verified native placement 
 - [x] Phase B: Design the workflow.
 - [x] Phase C: Run the loop.
 - [x] Phase D: Keep the audit trail.
-- [ ] Phase E: Verify and hand back.
+- [x] Phase E: Verify and hand back.
 
 ### Architecture
 
@@ -108,7 +108,7 @@ It does not promise restoring arbitrary windows after application relaunch or re
 - [x] Integrate focus memory, container/group transactions, rules, and native controls.
 - [x] Integrate clean restart save/restore.
 - [x] Independently review and exercise native acceptance.
-- [ ] Publish the feature PR with verified outcomes and explicit limits.
+- [x] Publish the feature PR with verified outcomes and explicit limits.
 
 ## Unit evidence
 
@@ -118,7 +118,7 @@ Raw evidence is in `../huen-rule-verification/`. The installed app and personal 
 The layout unit adds group topology, selection, focus memory, hidden-group projection, edits, and pointer previews.
 Independent review found three defects before native use.
 Corrections `1d32ed0`, `666b1f7`, and `da733b0` prevent four-child ungroup corruption, repair identity-following ancestor memory, and derive previews from the actual proposed projection.
-A fresh independent review confirmed all three fixes. Native container behavior remains pending integration.
+A fresh independent review confirmed all three fixes. Native container behavior was still pending at that unit checkpoint.
 
 The native interaction unit is `d7a94c2`. Strict Objective-C compilation and C/Zig ABI checks passed, followed by independent static review.
 The session unit is `5bd4a83`. Bounded conversion and matching checks passed, followed by independent static review.
@@ -180,4 +180,10 @@ The existing baseline passed all 22 checks.
 See [workspace controls verification](workspace-controls-verification.md) for outcomes, corrections, screenshots, and limits.
 Group child selection survives restart. An internal parent editing selection is not promised after verified focus selects a leaf.
 
-Installation of the exact verified artifact and PR publication are the remaining handback steps.
+[PR #2](https://github.com/rickyhugo/huen-wm/pull/2) is open for review.
+GitHub CLI created it because no built-in PR tool or Origin executable was available.
+The exact verified artifact is installed.
+The personal config enables session continuity and Control+Option mouse controls while preserving existing shortcuts.
+The installed-preset native checks passed, with a cursor-cleanup qualification recorded in the [verification report](workspace-controls-verification.md#local-installation).
+AeroSpace remains the active manager outside controlled fixture runs.
+The PR remains unmerged.
