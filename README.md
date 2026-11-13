@@ -16,6 +16,8 @@ sh scripts/bundle.sh
 
 The signed development app is `zig-out/Huen WM.app`. The bundle script does not launch it. Run `sh scripts/bundle.sh --install` explicitly to copy it to `~/Applications/Huen WM.app`. Nothing installs a launch agent or login item. Ad-hoc signing keeps a stable bundle identifier, `dev.huen-wm`, but macOS may require renewed permission after rebuilding.
 
+To enable startup separately, use the [opt-in login helper](docs/login-startup.md).
+
 Lua 5.5.1 is compiled from checked-in, checksum-recorded upstream source. The mise Lua pin is for tooling, not a runtime dependency. `mise run check` uses hk quick hooks for formatting, names, and Lua syntax.
 
 ## Run deliberately
@@ -66,7 +68,11 @@ The example binds Control+Option+H/J/K/L to directional focus. Names identify ph
 
 Lua must return a table. See `config/example.lua` for the complete schema. Each evaluation runs in a fresh child of the same executable. Invalid fields, types, commands, duplicate bindings, and hotkey collisions reject the reload. Consumed tables cannot have metatables. Collections must be dense arrays without extra keys. The previous configuration and hotkeys stay active on failure. File changes trigger reload automatically. Rules match an exact bundle ID and set `floating` or a numbered `workspace` on first discovery.
 
-`status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. Its tooltip includes the monitor and full workspace name. The menu offers all configured workspaces, **Reload configuration**, and **Quit**. Workspace actions use the active monitor, not the screen containing the menu bar. Pending transitions keep the old title and checkmark until placement completes. Workspace actions are disabled during transitions, without monitors, or after restore. Restore shows **Paused**. Switch failures appear in the tooltip and stderr. Set `enabled = false` to remove the item; a successful reload can enable it again. Invalid reloads retain the previous settings. Workspace changes no longer show a centered popup.
+`status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. Its tooltip includes the monitor and full workspace name.
+
+The menu offers all configured workspaces, **Reload configuration**, and **Quit**. Workspace actions use the active monitor, not the screen containing the menu bar. Pending transitions keep the old title and checkmark until placement completes. Workspace actions are disabled during transitions, without monitors, or after restore. Restore shows **Paused**. Switch failures appear in the tooltip and `status.transition_error`. Placement failures and rejected menu commands also write to stderr.
+
+Set `enabled = false` to remove the item. A successful reload can enable it again. Invalid reloads retain the previous settings. Workspace changes no longer show a centered popup.
 
 `reload` returns `accepted` and a `request_id` before evaluation finishes. `status.config_reload` reports the request ID, `pending`, `ready`, or `failed`, and `err_message`. A second request fails with `ConfigLoadPending` while the first request is in flight. Workspace transitions defer automatic reloads and publication of completed candidates. Restore and quit cancel pending configuration work.
 
