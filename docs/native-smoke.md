@@ -36,3 +36,39 @@ The driver does not check swap, send-to-workspace, hotkeys, borders, minimize or
 It checks layout and resize together because two windows can have identical geometry in both layouts.
 It does not independently observe unrelated applications' geometry.
 The fixture also records its activation state and the frontmost application's identity to diagnose focus loss during desktop interaction.
+
+## Prepare broader native checks
+
+Keep the smoke driver unchanged. For a separate controlled native run, pass these arguments directly to the fixture executable.
+The defaults retain the three Alpha, Beta, and Gamma windows, their frames, and their titles.
+
+- `--windows N` creates 1 through 8 windows. The default is 3. Additional names are Delta, Epsilon, Zeta, Eta, and Theta.
+- `--identifiers none` is the default and sets every public `NSWindow.accessibilityIdentifier` to nil.
+- `--identifiers unique` sets identifiers such as `dev.huen-wm.fixture.alpha`, using each lowercase window name.
+- `--identifiers duplicate` sets every identifier to `dev.huen-wm.fixture.duplicate`.
+- `--report <absolute-path>` enables the independent JSON report.
+- `--spread` retains the existing display placement behavior.
+
+`--windows`, `--identifiers`, and `--report` each accept one occurrence. Missing values, invalid values, and duplicates exit with code 2 and a stderr message.
+Repeated `--spread` and unknown arguments retain their previous behavior. Unknown arguments are ignored.
+
+The report retains its existing keys and adds the configured `window_count` and `identifier_mode`.
+Each window adds a nullable `identifier` and the public `NSWindow.windowNumber` as `window_number`.
+The window number helps diagnose pointer occlusion within a run. Do not use it as a persistent identity.
+The identifier field reports the Cocoa property, not an independent AX readback.
+Probe the native AXIdentifier before claiming identifier exposure or restart identity.
+
+With `--report`, a public NSEvent local monitor counts events delivered to the fixture.
+`mouse_events` contains `left_down`, `left_up`, `left_drag`, `right_down`, `right_up`, and `right_drag`, initially zero.
+`last_mouse_event` is initially null. It then contains `type`, `position`, `modifiers`, and `time` for one event.
+`position.left` and `position.top` use global top-left coordinates relative to the primary screen, like the frame report.
+`modifiers` is the native modifier-flags bitmask. `time` is the NSEvent timestamp in seconds since system startup.
+The monitor returns the original event unchanged. It does not monitor mouse movement or write on a timer.
+Report writes do not post input events.
+
+For physical input checks, compare counters before and after an ordinary click, then before and after a modifier drag.
+An ordinary click must reach the fixture. A drag consumed by the manager must not add delivered drag events.
+Record down and up counts separately because the manager may consume only part of the gesture.
+Counters show application delivery, not whether a particular control acted on the event.
+Repeat with four or more windows and each identifier mode as needed.
+Actual AX exposure, restart identity, and physical input behavior require native verification. Compilation alone does not verify them.
