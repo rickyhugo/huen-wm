@@ -21,6 +21,7 @@
 @property WMRect animationStart;
 @property double animationTime;
 @property double animationDuration;
+@property double placementVisibilityDeadline;
 @property BOOL changed;
 @property WMMotionState motion;
 @end
@@ -109,8 +110,10 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     // Even an unchanged size can be clamped after moving down or offscreen.
     AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
+    BOOL applied = initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
+    if (applied) record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
     CFRelease(position); CFRelease(size);
-    return initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
+    return applied;
 }
 
 static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
@@ -208,9 +211,9 @@ static BOOL scanWindowSnapshot(void) {
                 if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) matchingCG++;
             }
             observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
-            if (frames.count == windows.count && matchingAX == 1 && matchingCG == 0) unmatched = YES;
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
+            if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
             copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
             NSString *title = attribute(element, kAXTitleAttribute);
@@ -660,6 +663,7 @@ int platform_main(int argc, char **argv) {
                 }
                 lastConfigCheck = now;
             }
+            now = CACurrentMediaTime();
             for (WindowRecord *record in records) if (record.motion == WMMotionAnimating) {
                 if (record.observation.stale || !record.observation.onscreen || record.observation.minimized || record.observation.fullscreen) { record.animationDuration = 0; record.motion = WMMotionIdle; continue; }
                 double progress = MIN(1, (now - record.animationTime) / record.animationDuration); double eased = 1 - pow(1 - progress, 3);
