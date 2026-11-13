@@ -233,10 +233,19 @@ It does not mutate the store.
 `commitResize(preview, gap)` revalidates the revision, reference, axis, and clamp before mutation.
 The gap is the current projection gap.
 
-`previewDrop(state, source, target, placement)` returns a typed rectangle and a revision without mutation.
+`previewDrop(state, source, target, placement, scratch)` returns the moved subtree's
+projected rectangle and the original revision without changing the live store.
+It applies the edit and arranges a copy with the current workspace bounds and gap.
+The rectangle accounts for ancestor collapse, split ratios, gaps, and group headers.
+For `join`, it covers the moved child below the target group's headers.
+For `swap`, it covers the source identity's projected destination.
+The caller owns a reusable `Store` scratch buffer, separate from the live store.
+The method overwrites this buffer on each call and does not allocate.
+Passing the live store as scratch returns `InvalidPreviewScratch`.
 Pointer `join` targets an explicit group.
 Center drops use leaf-only `swap`.
 `commitDrop(state, preview)` rejects a changed revision before applying the explicit edit.
+Commit does not require scratch storage.
 `drop` also supports command joins that create a group around a leaf.
 
 The input owner cancels previews on reload, display routing, shutdown, or transition start.
@@ -268,7 +277,7 @@ Native focus runs only after placement succeeds.
 ```zig
 const source = try layouts.selected(state, focused);
 const target = try layouts.directionalTarget(state, source, .right);
-const preview = try layouts.previewDrop(state, source, target, .right);
+const preview = try layouts.previewDrop(state, source, target, .right, preview_scratch);
 try layouts.commitDrop(state, preview);
 layouts.arrange(state, usable_frame, gap);
 switch (layouts.visibility(identity)) {

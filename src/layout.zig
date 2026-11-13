@@ -958,30 +958,34 @@ pub const Store = struct {
         self.revision +%= 1;
     }
 
-    pub fn previewDrop(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop) !MovePreview {
+    fn pointerDropHandles(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop) !struct { source: Handle, target: Handle } {
         const handles = try self.editHandles(state, source_ref, target_ref);
         if (!self.nodes[handles.source].visible or !self.nodes[handles.target].visible) return error.NoTileTarget;
-        var rect = self.nodes[handles.target].frame;
         switch (placement) {
-            .left => rect.width /= 2,
-            .right => {
-                rect.width /= 2;
-                rect.left += rect.width;
-            },
-            .up => rect.height /= 2,
-            .down => {
-                rect.height /= 2;
-                rect.top += rect.height;
-            },
             .join => if (self.nodes[handles.target].content != .group) return error.NoGroup,
             .swap => if (self.nodes[handles.source].content != .leaf or self.nodes[handles.target].content != .leaf) return error.SwapRequiresLeaves,
+            else => {},
         }
-        return .{ .source = source_ref, .target = target_ref, .placement = placement, .rect = rect, .revision = self.revision };
+        return .{ .source = handles.source, .target = handles.target };
+    }
+
+    pub fn previewDrop(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop, scratch: *Store) !MovePreview {
+        if (scratch == self) return error.InvalidPreviewScratch;
+        const handles = try self.pointerDropHandles(state, source_ref, target_ref, placement);
+        const frame = self.nodes[state.root.?].frame;
+        @memcpy(std.mem.asBytes(scratch), std.mem.asBytes(self));
+        const projected_state = scratch.lookup(state.display, state.workspace) orelse return error.MissingLayoutRoot;
+        projected_state.* = state.*;
+        try scratch.drop(projected_state, source_ref, target_ref, placement);
+        scratch.arrange(projected_state, frame, state.projection_gap);
+        const moved = if (placement == .swap) handles.target else handles.source;
+        if (!scratch.nodes[moved].visible) return error.NoTileTarget;
+        return .{ .source = source_ref, .target = target_ref, .placement = placement, .rect = scratch.nodes[moved].frame, .revision = self.revision };
     }
 
     pub fn commitDrop(self: *Store, state: *WorkspaceLayout, preview: MovePreview) !void {
         if (preview.revision != self.revision) return error.StaleGesture;
-        _ = try self.previewDrop(state, preview.source, preview.target, preview.placement);
+        _ = try self.pointerDropHandles(state, preview.source, preview.target, preview.placement);
         try self.drop(state, preview.source, preview.target, preview.placement);
     }
 
