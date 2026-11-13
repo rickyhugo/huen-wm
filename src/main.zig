@@ -1,6 +1,7 @@
 const std = @import("std");
 const native = @import("native.zig");
 const configuration = @import("config.zig");
+const rules = @import("rules.zig");
 const commands = @import("command.zig");
 const tiling = @import("layout.zig");
 const allocator = std.heap.c_allocator;
@@ -815,10 +816,17 @@ export fn wm_tick() void {
             const display = nearestDisplay(observation.frame);
             const displaySlot = displayIndex(display).?;
             var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = displays.items[displaySlot].workspace, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
-            for (config.rules[0..config.rule_count]) |rule| if (std.mem.eql(u8, text(&rule.bundle), text(&observation.bundle))) {
-                window.floating = rule.floating;
-                if (rule.workspace) |workspace| window.workspace = workspace;
-            };
+            const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
+            window.floating = decision.floating orelse false;
+            if (decision.workspace) |workspace| window.workspace = workspace;
+            if (window.floating) {
+                if (decision.geometry) |geometry| {
+                    const destination = preferredOwner() orelse display;
+                    const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
+                    window.floating_frame = boundedFloating(.{ .left = area.left + geometry.left, .top = area.top + geometry.top, .width = geometry.width, .height = geometry.height }, area);
+                    window.floating_restore = true;
+                }
+            }
             windows.append(allocator, window) catch return;
         }
     }

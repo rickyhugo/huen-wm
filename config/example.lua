@@ -18,6 +18,8 @@ bind("ctrl+alt", "r", "reload")
 
 return {
     status_bar = { enabled = true, label = "name" },
+    session = { enabled = false },
+    mouse = { enabled = false, mods = "ctrl+alt" },
     gap = 12,
     layout = "dwindle",
     master_ratio = 0.55,
@@ -28,5 +30,10 @@ return {
     bindings = bindings,
     rules = {
         { bundle = "com.apple.systempreferences", floating = true },
+        -- {
+        --     bundle = "com.apple.TextEdit",
+        --     title = { glob = "Notes *" },
+        --     geometry = { left = 40, top = 60, width = 800, height = 600 },
+        -- },
     },
 }

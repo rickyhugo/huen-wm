@@ -44,10 +44,12 @@ static EventHotKeyRef hotkeyRefs[256];
 static WMBinding currentBindings[256];
 static volatile sig_atomic_t interrupted;
 void platform_error(const char *message) { fprintf(stderr, "%s\n", message ?: "unknown error"); }
-static void copyUTF8(char *destination, size_t capacity, NSString *source) {
+static bool copyUTF8(char *destination, size_t capacity, NSString *source) {
     NSUInteger used = 0;
-    [source getBytes:destination maxLength:capacity - 1 usedLength:&used encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, source.length) remainingRange:NULL];
+    NSRange remaining = NSMakeRange(0, source.length);
+    [source getBytes:destination maxLength:capacity - 1 usedLength:&used encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, source.length) remainingRange:&remaining];
     destination[used] = 0;
+    return remaining.length == 0 && memchr(destination, 0, used) == NULL;
 }
 
 static void luaBudget(lua_State *state, lua_Debug *debug) { (void)debug; luaL_error(state, "configuration instruction budget exceeded"); }
@@ -217,7 +219,7 @@ static BOOL scanWindowSnapshot(void) {
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
             copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
             NSString *title = attribute(element, kAXTitleAttribute);
-            copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
+            observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
             record.observation = observation;
             [seen addObject:@(observation.identity)];
         }
