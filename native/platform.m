@@ -30,6 +30,7 @@
 @end
 
 static NSMutableArray<WindowRecord *> *records;
+static NSArray<NSDictionary *> *inputWindowOrdering;
 static NSMutableDictionary<NSNumber *, NSValue *> *observers;
 static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 static uint64_t nextIdentity = 1;
@@ -130,6 +131,7 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
 static BOOL scanWindowSnapshot(void) {
     BOOL unmatched = NO;
     NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    inputWindowOrdering = visibleWindows;
     NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
     for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
         if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
@@ -273,6 +275,26 @@ static void scanWindows(void) {
         if (attempt) usleep(10000);
         if (scanWindowSnapshot()) break;
     }
+}
+
+bool platform_session_attributes(uint64_t identity, HuenSessionAttributes *output) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.stale && !record.observation.minimized && !record.observation.fullscreen) {
+        return huen_session_identify(record.element, record.observation.pid, output);
+    }
+    return false;
+}
+
+bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame) {
+    if (!window_id || !inputWindowOrdering) return false;
+    CGRect target = CGRectMake(frame.left, frame.top, frame.width, frame.height);
+    for (NSDictionary *front in inputWindowOrdering) {
+        if ([front[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == window_id) return true;
+        if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) return false;
+        if (CGRectIntersectsRect(target, bounds)) return false;
+    }
+    return false;
 }
 
 size_t platform_windows(WMWindow *output, size_t capacity) {

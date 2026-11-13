@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include "session.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,8 @@ int platform_main(int argc, char **argv);
 lua_State *platform_lua_open(void);
 size_t platform_windows(WMWindow *output, size_t capacity);
 size_t platform_refresh_windows(WMWindow *output, size_t capacity);
+bool platform_session_attributes(uint64_t identity, HuenSessionAttributes *output);
+bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame);
 size_t platform_displays(WMDisplay *output, size_t capacity);
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent);
 bool platform_read_frame(uint64_t identity, WMRect *frame);

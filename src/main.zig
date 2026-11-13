@@ -6,6 +6,8 @@ const commands = @import("command.zig");
 const tiling = @import("layout.zig");
 const pointer = @import("pointer.zig");
 const interaction = @import("interaction.zig");
+const session = @import("session.zig");
+const continuity = @import("continuity.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -48,6 +50,154 @@ const StatusPresentation = union(enum) {
 var published_status: StatusPresentation = .disabled;
 var status_active = false;
 var pointer_controls: pointer.Controls = .{};
+var session_config_hash: [64]u8 = @splat(0);
+var session_boot: [128]u8 = @splat(0);
+var session_loaded = false;
+var session_focus_pending = false;
+var session_frozen: ?continuity.Frozen = null;
+var session_freeze_attempted = false;
+var session_save_attempted = false;
+var session_status: struct {
+    load: enum { disabled, pending, none, restored, rejected, failed } = .disabled,
+    save: enum { idle, frozen, saved, skipped, failed } = .idle,
+    matched: usize = 0,
+    unmatched: usize = 0,
+    ambiguous: usize = 0,
+    unavailable: usize = 0,
+    errors: usize = 0,
+    err_message: ?[]const u8 = null,
+} = .{};
+
+fn sessionError(message: []const u8) void {
+    session_status.err_message = message;
+    session_status.errors += 1;
+}
+fn configureSession() void {
+    if (!config.session.enabled) return;
+    const encoded = std.json.Stringify.valueAlloc(allocator, config, .{}) catch |err| {
+        sessionError(@errorName(err));
+        return;
+    };
+    defer allocator.free(encoded);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
+    session_config_hash = std.fmt.bytesToHex(digest, .lower);
+    if (!session.huen_session_boot_identity(&session_boot, session_boot.len)) sessionError("BootIdentityUnavailable");
+    if (!session_loaded) session_status.load = .pending;
+}
+fn sessionScope() session.Scope {
+    return .{ .config = &session_config_hash, .filter = std.mem.span(native.platform_filter()), .boot = text(&session_boot) };
+}
+fn sessionWindows() ![]continuity.LiveWindow {
+    var result: std.ArrayList(continuity.LiveWindow) = .empty;
+    errdefer result.deinit(allocator);
+    session_status.unavailable = 0;
+    for (windows.items) |window| {
+        var attributes: session.NativeAttributes = undefined;
+        if (!externallyEligible(window) or !native.platform_session_attributes(window.identity, &attributes)) {
+            session_status.unavailable += 1;
+            continue;
+        }
+        _ = attributes.key() catch {
+            session_status.unavailable += 1;
+            continue;
+        };
+        try result.append(allocator, .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .floating = window.floating, .frame = window.floating_frame, .attributes = attributes });
+    }
+    return result.toOwnedSlice(allocator);
+}
+fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
+    for (displays.items, 0..) |display, index| {
+        output[index] = .{ .identity = display.identity, .workspace = display.workspace, .frame = display.frame, .hint = @splat(0) };
+        _ = session.huen_session_display_uuid(display.identity, &output[index].hint, output[index].hint.len);
+    }
+    return output[0..displays.items.len];
+}
+fn loadSession() void {
+    if (session_loaded) return;
+    session_loaded = true;
+    if (!config.session.enabled) return;
+    var loaded = session.load(allocator, sessionScope());
+    defer loaded.deinit();
+    session_status.load = switch (loaded.diagnostic) {
+        .none => .none,
+        .ready => .pending,
+        .rejected => .rejected,
+    };
+    if (loaded.rejection) |rejection| sessionError(@tagName(rejection));
+    const checkpoint = loaded.snapshot() orelse return;
+    const current = sessionWindows() catch |err| {
+        sessionError(@errorName(err));
+        session_status.load = .failed;
+        return;
+    };
+    defer allocator.free(current);
+    var screens: [32]continuity.Screen = undefined;
+    const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), &config, preferredOwner()) catch |err| {
+        sessionError(@errorName(err));
+        session_status.load = .failed;
+        return;
+    };
+    defer imported.deinit();
+    layouts = imported.store.*;
+    for (imported.assignments) |assignment| {
+        const index = windowIndex(assignment.identity) orelse continue;
+        const window = &windows.items[index];
+        window.display = assignment.display;
+        window.workspace = assignment.workspace;
+        window.floating = assignment.floating;
+        if (assignment.frame) |frame| {
+            const screen = displays.items[displayIndex(assignment.display).?];
+            window.floating_frame = boundedFloating(frame, inset(screen.frame, config.gap));
+            window.floating_restore = true;
+        }
+    }
+    for (imported.active) |active| if (displayIndex(active.display)) |index| {
+        displays.items[index].workspace = active.workspace;
+    };
+    session_status.matched = imported.matched;
+    session_status.unmatched = checkpoint.windows.len - imported.matched;
+    session_status.ambiguous = imported.ambiguous;
+    session_status.load = if (imported.matched > 0) .restored else .none;
+    session_focus_pending = imported.matched > 0;
+}
+fn freezeSession() void {
+    if (session_freeze_attempted) return;
+    session_freeze_attempted = true;
+    if (!config.session.enabled) return;
+    const current = sessionWindows() catch |err| {
+        sessionError(@errorName(err));
+        session_status.save = .failed;
+        return;
+    };
+    defer allocator.free(current);
+    var screens: [32]continuity.Screen = undefined;
+    session_frozen = continuity.freeze(&layouts, current, sessionScreens(&screens), &config, sessionScope()) catch |err| {
+        sessionError(@errorName(err));
+        session_status.save = .failed;
+        return;
+    };
+    session_status.save = .frozen;
+}
+fn saveSession(clean: bool) void {
+    if (session_save_attempted or !config.session.enabled) return;
+    session_save_attempted = true;
+    if (session_frozen) |*checkpoint| {
+        defer checkpoint.deinit();
+        defer session_frozen = null;
+        if (!clean or checkpoint.snapshot.windows.len == 0) {
+            session_status.save = .skipped;
+            return;
+        }
+        session.save(allocator, checkpoint.snapshot, .clean) catch |err| {
+            sessionError(@errorName(err));
+            session_status.save = .failed;
+            return;
+        };
+        session_status.save = .saved;
+    }
+}
+
 fn pointerWindows(output: []pointer.Window) []pointer.Window {
     for (windows.items, 0..) |window, index| output[index] = .{
         .identity = window.identity,
@@ -125,7 +275,13 @@ fn pollPointer() void {
 }
 
 export fn wm_input_poll() void {
-    if (!initialized or suspended or pointer_controls.stop_deadline != null) return;
+    if (!initialized) return;
+    if (suspended or pointer_controls.stop_deadline != null) {
+        var discarded: interaction.Event = undefined;
+        var count: usize = 0;
+        while (count < 64 and interaction.huen_input_poll(&discarded)) : (count += 1) {}
+        return;
+    }
     pollPointer();
     if (pointer_controls.revision != layouts.revision) publishPointer();
 }
@@ -240,6 +396,7 @@ export fn wm_initialize(path: [*:0]const u8) bool {
     config = candidate;
     config_state = .ready;
     initialized = true;
+    configureSession();
     return true;
 }
 
@@ -281,6 +438,7 @@ export fn wm_config_poll() void {
     applyLayoutDefaults(&candidate);
     config = candidate;
     pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
+    configureSession();
     active_mode = 0;
     config_state = .ready;
     config_error = null;
@@ -984,6 +1142,7 @@ export fn wm_tick() void {
             _ = windows.orderedRemove(index);
         } else index += 1;
     }
+    loadSession();
     routing_blocked = if (!suspended and transition == null) !routeMembership() else routing_blocked;
     focused = observed_focus;
     if (observed_focus != last_observed_focus) {
@@ -998,6 +1157,10 @@ export fn wm_tick() void {
     };
     if (selected_display == null or displayIndex(selected_display.?) == null) selected_display = displays.items[0].identity;
     reconcile();
+    if (session_focus_pending) {
+        session_focus_pending = false;
+        focusWorkspace(displays.items[activeDisplay()].identity);
+    }
 }
 fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     const source = windows.items[sourceIndex];
@@ -1178,6 +1341,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .transition_pending = transition != null,
                 .transition_error = transition_error,
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
+                .session = session_status,
                 .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
             });
         },
@@ -1252,8 +1416,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             native.platform_close_cancel();
             cancelConfig();
             cancelTransition();
+            freezeSession();
             suspended = true;
             const outstanding = native.platform_restore();
+            if (outstanding == 0) saveSession(true);
             native.platform_border(0, 0, 0);
             if (outstanding != 0) return json(.{ .@"error" = true, .err_message = "Geometry restoration incomplete. Retry restore after unminimizing or leaving fullscreen.", .outstanding = outstanding, .suspended = true });
             return json(.{ .ok = true, .suspended = true, .note = "Restored live-session geometry. Restart to resume tiling." });
@@ -1468,6 +1634,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     return json(.{ .ok = true });
 }
 export fn wm_shutdown() bool {
+    freezeSession();
     suspended = true;
     pending_close = null;
     native.platform_close_cancel();
@@ -1476,8 +1643,10 @@ export fn wm_shutdown() bool {
     cancelConfig();
     if (config_request.inFlight()) return false;
     if (!pointer_controls.stop(native.platform_monotonic())) return false;
+    if (pointer_controls.forced_stop) native.platform_error("Input release drain exceeded 250 ms; tap teardown forced");
     cancelTransition();
     const outstanding = native.platform_restore();
+    saveSession(outstanding == 0);
     if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
     native.platform_border(0, 0, 0);
     return true;

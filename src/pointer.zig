@@ -1,6 +1,7 @@
 const std = @import("std");
 const layout = @import("layout.zig");
 const bridge = @import("interaction.zig");
+const native = @import("native.zig");
 const allocator = std.heap.c_allocator;
 
 pub const Window = struct {
@@ -80,9 +81,22 @@ pub const Controls = struct {
             if (state.layout != .dwindle) continue;
             var projected_headers: [2047]layout.Header = undefined;
             const header_count = try store.headers(state, &projected_headers);
+            var group_safety: [2047]?bool = @splat(null);
             for (projected_headers[0..header_count]) |header| {
                 if (header.rect.width <= 0 or header.rect.height <= 0) continue;
-                if (!safeSubtree(store, header.group, windows)) continue;
+                if (group_safety[header.group.slot] == null) {
+                    var safe = safeSubtree(store, header.group, windows);
+                    const identity = try store.representative(header.group);
+                    const window = if (identity) |candidate| findWindow(windows, candidate) else null;
+                    if (window) |candidate| {
+                        for (projected_headers[0..header_count]) |sibling| {
+                            if (!std.meta.eql(sibling.group, header.group)) continue;
+                            if (!native.platform_input_rect_unobscured(candidate.public_id, sibling.rect)) safe = false;
+                        }
+                    } else safe = false;
+                    group_safety[header.group.slot] = safe;
+                }
+                if (!group_safety[header.group.slot].?) continue;
                 var item = std.mem.zeroes(bridge.HeaderItem);
                 item.group = reference(header.group);
                 item.child = reference(header.child);
@@ -107,6 +121,9 @@ pub const Controls = struct {
             const boundary_count = try store.boundaries(state, 6, &boundaries);
             for (boundaries[0..boundary_count]) |boundary| {
                 if (!safeSubtree(store, boundary.node, windows)) continue;
+                const identity = (try store.representative(boundary.node)) orelse continue;
+                const window = findWindow(windows, identity) orelse continue;
+                if (!native.platform_input_rect_unobscured(window.public_id, boundary.rect)) continue;
                 var hit = std.mem.zeroes(bridge.HitRegion);
                 hit.kind = .boundary;
                 hit.rect = rect(boundary.rect);
@@ -136,7 +153,6 @@ pub const Controls = struct {
         try self.headers.appendSlice(allocator, headers.items);
         self.ready = ready;
         self.revision = store.revision;
-        self.error_message = null;
     }
 
     pub fn event(self: *Controls, store: *layout.Store, windows: []const Window, sample: bridge.Event, gap: f64, color: u32, width: f64) !?Edit {
@@ -152,6 +168,7 @@ pub const Controls = struct {
             _ = try store.resolve(group);
             _ = try store.resolve(child);
             if (!safeSubtree(store, group, windows)) return error.ObscuredGroup;
+            if (!unobscured(store, group, windows, coreRect(sample.target.rect))) return error.ObscuredGroup;
             return .{ .group = .{ .group = group, .child = child } };
         }
         if (sample.kind == .start) {
@@ -166,6 +183,7 @@ pub const Controls = struct {
             };
             const workspace = state orelse return error.StaleNode;
             if (!safeSubtree(store, source, windows)) return error.ObscuredSource;
+            if (!unobscured(store, source, windows, coreRect(sample.target.rect))) return error.ObscuredSource;
             var boundary: ?layout.Boundary = null;
             if (sample.gesture == .resize) {
                 if (store.nodes[handle].content != .branch) return error.InvalidBoundary;
@@ -203,6 +221,7 @@ pub const Controls = struct {
             const hit = target orelse return null;
             const target_ref = try coreReference(if (hit.kind == .header) hit.group else hit.node);
             if (!safeSubtree(store, target_ref, windows)) return error.ObscuredTarget;
+            if (!unobscured(store, target_ref, windows, coreRect(hit.rect))) return error.ObscuredTarget;
             const placement: layout.Drop = if (hit.kind == .header) .join else dropPlacement(hit.rect, sample.point);
             if (self.scratch == null) self.scratch = try allocator.create(layout.Store);
             const preview = try store.previewDrop(state, gesture.source, target_ref, placement, self.scratch.?);
@@ -237,6 +256,11 @@ fn safeSubtree(store: *const layout.Store, node: layout.NodeRef, windows: []cons
         found = true;
     }
     return found;
+}
+fn unobscured(store: *const layout.Store, node: layout.NodeRef, windows: []const Window, frame: layout.Rect) bool {
+    const identity = (store.representative(node) catch return false) orelse return false;
+    const window = findWindow(windows, identity) orelse return false;
+    return native.platform_input_rect_unobscured(window.public_id, frame);
 }
 fn reference(node: layout.NodeRef) bridge.NodeRef {
     return .{ .slot = node.slot, .generation = node.generation };

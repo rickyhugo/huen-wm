@@ -168,9 +168,31 @@ A directory-fsync failure is reported even if rename already replaced the checkp
 
 ## Integration and verification status
 
-The integrator adds `native/session.m` to the Objective-C ARC build and imports `src/session.zig`.
+The runtime links `native/session.m` and owns retained AX record lookup through `platform_session_attributes`.
+`src/continuity.zig` converts between bounded session records and the layout store.
+Its conversion storage and temporary stores are heap allocated.
+
+Startup matching runs after the first window snapshot, before discovery placement.
+Unavailable metadata is omitted on both sides of matching.
+Matched records remap workspace names by occurrence and displays by current monitor policy.
+Unmatched leaves disappear and singleton containers collapse.
+Unmatched current windows keep current rules and join through normal discovery.
+No imported record grants parking or original-frame recovery ownership.
+
+The configuration scope is SHA-256 over the complete decoded configuration.
+Any effective configuration change rejects the previous checkpoint.
+The application filter and boot identity are checked separately.
+Default-disabled sessions perform no checkpoint storage I/O or native identity collection.
+Enabling sessions through reload starts clean-save support but defers loading until a new process.
+
+`restore`, `quit`, and signal shutdown share one frozen logical snapshot.
+The frozen snapshot is saved once, only after native original-frame restoration is clean.
+A suspended runtime never exports its later reconciled state over that snapshot.
+`status.session` exposes load and save outcomes, matched and unmatched saved records,
+ambiguous matches, unavailable live metadata, error count, and the last error.
+`restored` describes imported logical intent. Native placement and focus still require desktop acceptance.
+
 The native unit uses public AppKit, Foundation, and ApplicationServices APIs.
-No changes to platform records, configuration, layout, build files, or runtime wiring are included here.
 Strict Objective-C compilation and a linked Zig 0.17 module probe compile the public paths.
 The headless probe exercises bounded JSON conversion and strict duplicate matching without AX calls or session-file access.
 Actual application identity reads, file durability, manager restart restoration, display routing, native geometry, and native focus remain pending integration verification.
