@@ -8,27 +8,27 @@ Keep SIP enabled, Lua configuration, and the existing verified native placement 
 ## Playbook
 
 - [x] Read the Principles section of the poteto-mode skill.
-- [ ] Phase A: Frame.
-- [ ] Phase B: Design the workflow.
+- [x] Phase A: Frame.
+- [x] Phase B: Design the workflow.
 - [ ] Phase C: Run the loop.
 - [ ] Phase D: Keep the audit trail.
 - [ ] Phase E: Verify and hand back.
 
 ### Architecture
 
-- [ ] Ground.
-- [ ] Sketch.
-- [ ] Agree. Proceed after comparison without an approval pause.
+- [x] Ground.
+- [x] Sketch.
+- [x] Agree. Proceed after comparison without an approval pause.
 - [ ] Implement.
 - [ ] Scrap. Revisit the model if implementation repeatedly violates its boundaries.
 
 ### Design comparison
 
-- [ ] Frame.
-- [ ] Fan out.
-- [ ] Cross-judge. No distinct-family judge is configured; same-model review remains available.
-- [ ] Pick.
-- [ ] Graft.
+- [x] Frame.
+- [x] Fan out.
+- [x] Cross-judge. Skipped because no distinct-family judge is configured. Both candidates used Sol.
+- [x] Pick.
+- [x] Graft.
 - [ ] Verify.
 
 ## Scope and acceptance
@@ -66,3 +66,46 @@ Base is merged commit `de2a0b4062cadc8a3cc46e363b3ce9eb57f10cc0`.
 Installed runtime and the prior acceptance evidence are recorded in `verification-feature-completion.md`.
 The current tree is binary, focus restoration chooses a fullscreen winner or the first eligible window, and runtime layout state is process-local.
 The decision trail remains `decisions.tsv`.
+
+## Selected design
+
+Candidate A preserves binary splits and adds explicit ordered tabbed/stacked groups in the same bounded node pool.
+Candidate B replaces all containers with arbitrary-child groups.
+Both keep parentage in one owner and reject a separate group-membership registry.
+
+| Criterion, higher is better | A | B |
+| --- | ---: | ---: |
+| Safety and recovery | 4 | 4 |
+| Interface simplicity | 4 | 4 |
+| Integration cost | 4 | 2 |
+| Native verification effort | 4 | 3 |
+| Existing command compatibility | 5 | 3 |
+
+Choose A because binary resize and projection already have native evidence.
+Use B's typed visibility reasons and generation-tagged presentation events.
+Reject heuristic title/geometry persistence fallback. Match unique public identifiers or document URLs within the same application process lifetime.
+Unknown or ambiguous windows receive current rules and fresh layout membership.
+Persistence therefore supports a normal manager restart while applications remain open, with explicit unmatched reporting.
+It does not promise restoring arbitrary windows after application relaunch or reboot.
+
+### Contracts
+
+- `layout.zig` owns topology, container selection, focus memory, projection, group visibility, and shared resize boundaries. Preserve existing binary and master APIs while adding the new commands.
+- Commands are `select parent|child`, `tilemove DIRECTION`, `group join DIRECTION`, and `group tabbed|stacked|split|next|previous`. Existing `move` keeps floating-and-nudge behavior.
+- Native group headers use copied typed presentations. Clicks carry a generation and target reference, not borrowed runtime pointers.
+- Mouse controls are opt-in through `mouse = { enabled = true, mods = "ctrl+alt" }`. Modified left drag reorders; modified right drag resizes. Preview is local until release commits through verified placement.
+- Session continuity is opt-in through `session = { enabled = true }`. Persist versioned bounded logical state with atomic private-file writes. Never persist native recovery authority.
+- Rules gain optional `title = { literal = "..." }` or `title = { glob = "..." }` and display-local floating geometry. Matching predicates are AND. Later matching rules override only explicitly supplied actions.
+- Group hiding uses verified corner parking, with inactive-group membership distinct from inactive-workspace membership. Failed group edits restore topology and geometry while retaining actual native recovery obligations.
+- Stateful native placement remains owned by one integration writer. Leaf workers do not edit the installed app, personal config, or live desktop.
+
+### Implementation units
+
+- [ ] Extend pure layout and command grammar.
+- [ ] Extend isolated configuration and rule decisions.
+- [ ] Add native group headers and bounded pointer capture.
+- [ ] Define persistence checkpoints and native stable attributes.
+- [ ] Integrate focus memory, container/group transactions, rules, and native controls.
+- [ ] Integrate clean restart save/restore.
+- [ ] Independently review and exercise native acceptance.
+- [ ] Publish the feature PR with verified outcomes and explicit limits.
