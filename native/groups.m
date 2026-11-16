@@ -31,7 +31,9 @@
     return YES;
 }
 - (void)mouseDown:(NSEvent *)event {
+    // Publication runs from a common-modes timer inside this tracking loop and can close the panel.
     __attribute__((objc_precise_lifetime)) HuenHeaderButton *trackingButton = self;
+    __attribute__((objc_precise_lifetime)) NSWindow *trackingPanel = self.window;
     trackingButton->_pressedItem = self.item;
     trackingButton->_tracking = YES;
     [super mouseDown:event];
