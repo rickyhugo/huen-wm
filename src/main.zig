@@ -1469,7 +1469,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     const displaySlot = activeDisplay();
     const display = &displays.items[displaySlot];
     switch (command) {
-        .workspace => |workspace| {
+        .workspace => |selection| {
+            if (selection != .index) return failure("UnsupportedSelector");
+            const workspace = selection.index;
             var destination_slot = displaySlot;
             if (config.workspace_monitors != null) {
                 const owner = preferredOwner() orelse return failure("NoWorkspaceOwner");
@@ -1602,7 +1604,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     window.floating = !window.floating;
                     window.floating_frame = window.observation.frame;
                 },
-                .send_to_workspace => |workspace| {
+                .send_to_workspace => |selection| {
+                    if (selection != .index) return failure("UnsupportedSelector");
+                    const workspace = selection.index;
                     const owner = preferredOwner();
                     const destination = owner orelse windows.items[sourceIndex].display;
                     const activation = ownerActivation(owner);

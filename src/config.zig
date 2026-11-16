@@ -41,6 +41,11 @@ pub const ConfigCandidate = struct {
         for (self.modes[0..self.mode_count], 0..) |*mode, index| if (std.mem.eql(u8, text(&mode.name), name)) return index;
         return null;
     }
+
+    pub fn workspaceIndex(self: *const ConfigCandidate, name: []const u8) ?usize {
+        for (self.workspaces[0..self.workspace_count], 0..) |*workspace, index| if (std.mem.eql(u8, text(&workspace.name), name)) return index;
+        return null;
+    }
 };
 pub const LoadResult = union(enum) { ready: ConfigCandidate, failed: anyerror };
 pub const Completion = struct { generation: u64, result: LoadResult };
@@ -257,9 +262,13 @@ fn validate(candidate: *const ConfigCandidate) !void {
             if (!knownKeyCode(binding.key)) return error.UnknownKey;
             if ((mode_index == 0 and binding.modifiers == 0) or binding.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
             const command = try commands.parse(text(&binding.command), candidate.workspace_count);
-            if (command == .mode) {
-                if (candidate.modeIndex(command.mode.text()) == null) return error.UnknownMode;
-                if (binding.key == 0x35 and binding.modifiers == 0 and std.mem.eql(u8, command.mode.text(), "main")) escape_to_main = true;
+            switch (command) {
+                .mode => |name| {
+                    if (candidate.modeIndex(name.text()) == null) return error.UnknownMode;
+                    if (binding.key == 0x35 and binding.modifiers == 0 and std.mem.eql(u8, name.text(), "main")) escape_to_main = true;
+                },
+                .workspace, .send_to_workspace => |selection| if (selection == .name and candidate.workspaceIndex(selection.name.text()) == null) return error.UnknownWorkspaceName,
+                else => {},
             }
             for (mode.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;
         }

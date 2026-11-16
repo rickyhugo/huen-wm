@@ -35,6 +35,13 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { motion_duration = 'fast' }",
         "return { workspaces = {} }",
         "return { bindings = {{ mods='alt', key='h', command='workspace 99' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace +0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace -11' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace occupied' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace 1+' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace previous 2' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace name:' }} }",
+        "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='send-to-workspace name:two' }} }",
         "return {bindings={{mods='+alt++',key='h',command='quit'}}}",
         "return { bindings = {{ mods='alt', key='h', command='quit' }, { mods='alt', key='h', command='quit' }} }",
         "while true do end",
@@ -67,6 +74,9 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     config.write_bytes(b" " * (256 * 1024 + 1))
     invoke("validate", "--config", str(config), success=False)
     config.write_text("return {bindings={{mods='alt',key='b',command='workspace 1'}},workspaces={'one'}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    selectors = ("previous", "+1", "-10", "occupied+1", "occupied-2", "empty", "next-empty", "name:web dev")
+    config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("warn('@on'); for index=1,1000 do warn(string.rep('x',512)) end; return {}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
