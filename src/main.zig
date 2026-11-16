@@ -9,6 +9,7 @@ const interaction = @import("interaction.zig");
 const session = @import("session.zig");
 const continuity = @import("continuity.zig");
 const selector = @import("selector.zig");
+const history = @import("history.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -22,6 +23,7 @@ var layouts: tiling.Store = .{};
 var windows: std.ArrayList(Window) = .empty;
 var displays: std.ArrayList(Display) = .empty;
 var focused: ?u64 = null;
+var focus_history: history.Ring = .{};
 var active_mode: usize = 0;
 const PendingClose = struct { identity: u64, pid: c_int, process_token: f64, deadline: f64 };
 var pending_close: ?PendingClose = null;
@@ -35,7 +37,7 @@ var routing_blocked = false;
 var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
 var suspended = false;
-const Transition = struct { display: u32, workspace: usize, generation: u64 };
+const Transition = struct { display: u32, workspace: usize, generation: u64, focus_target: ?u64 };
 const SnapshotPresentation = enum { idle, pending, instant, captured, fallback };
 var transition: ?Transition = null;
 var generation: u64 = 0;
@@ -837,6 +839,7 @@ fn layoutMembers(output: []tiling.Member) []tiling.Member {
 fn rememberFocus(identity: u64) void {
     const index = windowIndex(identity) orelse return;
     const window = windows.items[index];
+    focus_history.push(identity);
     var members: [1024]tiling.Member = undefined;
     layouts.rememberFocus(workspaceLayout(window.display, window.workspace), identity, layoutMembers(&members)) catch |err| {
         transition_error = @errorName(err);
@@ -1193,6 +1196,7 @@ export fn wm_tick() void {
         };
         if (!found) {
             layouts.forgetIdentity(windows.items[index].identity);
+            focus_history.forget(windows.items[index].identity);
             _ = windows.orderedRemove(index);
         } else index += 1;
     }
@@ -1213,7 +1217,7 @@ export fn wm_tick() void {
     reconcile();
     if (session_focus_pending) {
         session_focus_pending = false;
-        focusWorkspace(displays.items[activeDisplay()].identity);
+        focusWorkspace(displays.items[activeDisplay()].identity, null);
     }
 }
 fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
@@ -1300,13 +1304,18 @@ fn refreshObservations() void {
     }
 }
 
-fn focusWorkspace(displayIdentity: u32) void {
+fn focusable(identity: u64) bool {
+    const window = windows.items[windowIndex(identity) orelse return false];
+    return externallyEligible(window) and displayIndex(window.display) != null;
+}
+
+fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     refreshObservations();
     if (!deriveGoals()) return;
     const index = displayIndex(displayIdentity) orelse return;
     const state = workspaceLayout(displayIdentity, displays.items[index].workspace);
     var members: [1024]tiling.Member = undefined;
-    const target = layouts.focusCandidate(state, layoutMembers(&members));
+    const target = focus_target orelse layouts.focusCandidate(state, layoutMembers(&members));
     if (target) |identity| {
         const window = windows.items[windowIndex(identity) orelse return];
         if (!visible(window) or window.parked) {
@@ -1327,7 +1336,7 @@ fn focusWorkspace(displayIdentity: u32) void {
     selectDisplay(displayIdentity);
 }
 
-fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
+fn commitWorkspace(displaySlot: usize, workspace: usize, focus_target: ?u64) bool {
     const displayIdentity = displays.items[displaySlot].identity;
     if (displayBlocked(displayIdentity)) {
         transition_error = "Native fullscreen window blocks this display";
@@ -1342,7 +1351,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
     displays.items[displaySlot].workspace = workspace;
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
-    if (layouts.focusCandidate(state, layoutMembers(&members))) |identity| {
+    if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| {
         if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
             transaction.rollback(0);
             transition_error = @errorName(err);
@@ -1352,7 +1361,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
     if (!transaction.commit()) return false;
     recordPrevious(displaySlot, prior, workspace);
     if (workspace_owner == displayIdentity) owner_workspace = workspace;
-    focusWorkspace(displayIdentity);
+    focusWorkspace(displayIdentity, focus_target);
     transition_error = null;
     native.platform_config_changed();
     return true;
@@ -1366,10 +1375,27 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     snapshot_presentation = if (covered) .captured else .fallback;
     const slot = displayIndex(pending.display);
     if (slot) |displaySlot| {
-        _ = commitWorkspace(displaySlot, pending.workspace);
+        _ = commitWorkspace(displaySlot, pending.workspace, pending.focus_target);
     } else transition_error = "Display disconnected during workspace capture";
     transition = null;
     if (covered) native.huen_scene_finish(pending.generation);
+}
+fn switchWorkspace(display_slot: usize, workspace: usize, focus_target: ?u64) [*:0]const u8 {
+    const destination = displays.items[display_slot];
+    if (workspace == destination.workspace) {
+        focusWorkspace(destination.identity, focus_target);
+        return json(.{ .ok = true, .changed = false });
+    }
+    generation += 1;
+    if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
+        snapshot_presentation = .instant;
+        if (!commitWorkspace(display_slot, workspace, focus_target)) return failure(transition_error orelse "WorkspacePlacementFailed");
+        return json(.{ .ok = true });
+    }
+    snapshot_presentation = .pending;
+    transition = .{ .display = destination.identity, .workspace = workspace, .generation = generation, .focus_target = focus_target };
+    native.huen_scene_begin(destination.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
+    return json(.{ .ok = true, .accepted = true, .generation = generation });
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
@@ -1518,7 +1544,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     owner_workspace = workspace;
                     routing_blocked = false;
                     recordPrevious(destination_slot, prior, workspace);
-                    focusWorkspace(owner);
+                    focusWorkspace(owner, null);
                     native.platform_config_changed();
                     return json(.{ .ok = true });
                 }
@@ -1528,21 +1554,15 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 }
                 routing_blocked = false;
             }
-            const destination = displays.items[destination_slot];
-            if (workspace == destination.workspace) {
-                focusWorkspace(destination.identity);
-                return json(.{ .ok = true, .changed = false });
-            }
-            generation += 1;
-            if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
-                snapshot_presentation = .instant;
-                if (!commitWorkspace(destination_slot, workspace)) return failure(transition_error orelse "WorkspacePlacementFailed");
-                return json(.{ .ok = true });
-            }
-            snapshot_presentation = .pending;
-            transition = .{ .display = destination.identity, .workspace = workspace, .generation = generation };
-            native.huen_scene_begin(destination.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
-            return json(.{ .ok = true, .accepted = true, .generation = generation });
+            return switchWorkspace(destination_slot, workspace, null);
+        },
+        .focus_last => {
+            const identity = focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow");
+            const window = windows.items[windowIndex(identity).?];
+            const slot = displayIndex(window.display).?;
+            if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, identity);
+            focusWorkspace(window.display, identity);
+            return json(.{ .ok = true, .verified = focused == identity, .target = identity });
         },
         .layout => |layout| {
             const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));

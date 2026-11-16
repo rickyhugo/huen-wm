@@ -62,11 +62,15 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return os.execute('true')",
         "return { workspace_back_and_forth = 'yes' }",
         "return { bindings = {{ mods='alt', key='h', command='move-to-workspace' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus last 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus --wrap last' }} }",
         "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
         "return {",
     ):
         config.write_text(content)
         invoke("validate", "--config", str(config), success=False)
+    config.write_text("return {bindings={{mods='alt',key='tab',command='focus last'}}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0, workspace_back_and_forth = true }; return settings")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     invoke("validate", "--config", str(config) + ".missing", success=False)
