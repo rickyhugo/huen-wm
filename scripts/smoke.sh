@@ -21,7 +21,7 @@ def invoke(*arguments, success=True):
     return completed
 
 help_text = invoke("--help").stdout
-assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor"))
+assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces"))
 doctor = json.loads(invoke("doctor").stdout)
 assert doctor["zig"] == "0.17.0" and not doctor["permission_prompted"]
 assert not doctor["screen_capture_required_for_tiling"]
@@ -82,6 +82,22 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor name:' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor left 1' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor 2' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='send-to-monitor' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='send-to-monitor sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='send-to-monitor name:' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='send-to-monitor right 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-monitor' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-monitor sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-monitor name:' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-monitor right 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-workspace-to-monitor' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-workspace-to-monitor sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-workspace-to-monitor name:' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-workspace-to-monitor right 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='swap-monitor-workspaces' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='swap-monitor-workspaces sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='swap-monitor-workspaces name:' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='swap-monitor-workspaces right 1' }} }",
         "return {",
     ):
         config.write_text(content)
@@ -103,7 +119,9 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}},{{mods='ctrl',key='{key}',command='move-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     monitor_selectors = ("left", "right", "up", "down", "next", "previous", "built-in", "external", "name:DELL U2725QE")
-    config.write_text("return {bindings={" + ",".join(f"{{mods='alt',key='{key}',command='focus-monitor {selector}'}}" for key, selector in zip("asdfghjkl", monitor_selectors)) + "}}")
+    monitor_verbs = ("focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces")
+    monitor_modifiers = ("alt", "alt+shift", "ctrl", "ctrl+shift", "alt+ctrl")
+    config.write_text("return {bindings={" + ",".join(f"{{mods='{modifiers}',key='{key}',command='{verb} {selector}'}}" for verb, modifiers in zip(monitor_verbs, monitor_modifiers) for key, selector in zip("asdfghjkl", monitor_selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     for content, expected in (
         ("return { workspaces = {{ name='1', monitor='built-in' }} }", "MonitorRequiresGlobalWorkspaces"),

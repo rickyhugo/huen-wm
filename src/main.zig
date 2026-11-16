@@ -510,6 +510,11 @@ fn applyLayoutDefaults(candidate: *const Config) void {
     for (placements[0..config.workspace_count], remap[0..config.workspace_count]) |placement, next_index| if (next_index) |index| {
         remapped[index] = placement;
     };
+    // A reload returns workspaces with a monitor field to configuration placement. Leaving global
+    // routing clears every runtime home.
+    for (remapped[0..candidate.workspace_count], candidate.workspaces[0..candidate.workspace_count]) |*placement, *workspace| {
+        if (candidate.workspace_monitors == null or workspace.monitor.count > 0) placement.home = @splat(0);
+    }
     placements = remapped;
     var current: usize = 0;
     for (0..candidate.workspace_count) |workspace| if (shownWorkspace(workspace)) {
@@ -664,6 +669,11 @@ fn commitPlacements(resolved: [10]?u32) void {
     for (&placements, resolved) |*placement, destination| placement.display = destination;
 }
 
+fn displayUuid(identity: u32, home: *[128]u8) bool {
+    home.* = @splat(0);
+    return session.huen_session_display_uuid(identity, home, home.len);
+}
+
 const Routing = struct {
     const Activation = struct { display: u32, workspace: usize };
     destinations: [10]?u32 = @splat(null),
@@ -671,18 +681,16 @@ const Routing = struct {
     send: ?struct { index: usize, display: u32, workspace: usize } = null,
 };
 
-fn placementActivations(resolved: [10]?u32, forced: ?Routing.Activation, output: *[11]Routing.Activation) []Routing.Activation {
+fn placementActivations(resolved: [10]?u32, forced: []const Routing.Activation, output: *[11]Routing.Activation) []Routing.Activation {
     const workspace_count = config.workspace_count;
     var count: usize = 0;
-    var forced_used = false;
-    for (displays.items) |display| {
+    for (forced) |activation| {
+        output[count] = activation;
+        count += 1;
+    }
+    scan: for (displays.items) |display| {
         const identity = display.identity;
-        if (forced) |activation| if (activation.display == identity) {
-            output[count] = activation;
-            count += 1;
-            forced_used = true;
-            continue;
-        };
+        for (forced) |activation| if (activation.display == identity) continue :scan;
         const current = display.workspace;
         var gained = false;
         var hosts = false;
@@ -706,10 +714,6 @@ fn placementActivations(resolved: [10]?u32, forced: ?Routing.Activation, output:
         output[count] = .{ .display = identity, .workspace = choice.? };
         count += 1;
     }
-    if (forced) |activation| if (!forced_used) {
-        output[count] = activation;
-        count += 1;
-    };
     return output[0..count];
 }
 
@@ -864,10 +868,10 @@ fn commitRouting(request: Routing) bool {
             window.workspace = send.workspace;
         };
         if (destination != window.display) {
-            window.display = destination;
             const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
-            window.floating_frame = boundedFloating(window.floating_frame, area);
+            window.floating_frame = relocatedFloating(window.floating_frame, window.display, area);
             window.parking_frame = boundedFloating(window.parking_frame, area);
+            window.display = destination;
         }
     }
     if (request.send) |send| layouts.forgetIdentity(windows.items[send.index].identity);
@@ -892,7 +896,7 @@ fn routeMembership() bool {
     };
     if (!needed) return true;
     var activations: [11]Routing.Activation = undefined;
-    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, null, &activations) })) return false;
+    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{}, &activations) })) return false;
     commitPlacements(resolved);
     return true;
 }
@@ -960,6 +964,16 @@ fn boundedFloating(frame: Rect, area: Rect) Rect {
     bounded.left = std.math.clamp(frame.left, area.left, area.left + area.width - bounded.width);
     bounded.top = std.math.clamp(frame.top, area.top, area.top + area.height - bounded.height);
     return bounded;
+}
+
+// Keeps a floating window's center at the same proportional position in the destination area.
+fn relocatedFloating(frame: Rect, source: u32, area: Rect) Rect {
+    const slot = displayIndex(source) orelse return boundedFloating(frame, area);
+    const previous = inset(displays.items[slot].frame, config.gap);
+    var relocated = frame;
+    relocated.left = area.left + (frame.left + frame.width / 2 - previous.left) / previous.width * area.width - frame.width / 2;
+    relocated.top = area.top + (frame.top + frame.height / 2 - previous.top) / previous.height * area.height - frame.height / 2;
+    return boundedFloating(relocated, area);
 }
 
 fn floatRejectedTile(window: *Window) void {
@@ -1545,7 +1559,7 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
         generation += 1;
         snapshot_presentation = .instant;
         var activations: [11]Routing.Activation = undefined;
-        if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, .{ .display = owner, .workspace = workspace }, &activations) })) return failure(transition_error orelse "MonitorRoutingFailed");
+        if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = owner, .workspace = workspace }}, &activations) })) return failure(transition_error orelse "MonitorRoutingFailed");
         commitPlacements(resolved);
         routing_blocked = false;
         recordPrevious(destination_slot, from, workspace);
@@ -1564,6 +1578,74 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
     if (verified) recordPrevious(destination_slot, from, workspace);
     return json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
+// Sends a window to the target display's active workspace. Directions are relative to the window's
+// display. With global routing, a display that has no workspace placed on it rejects the send
+// instead of placing a workspace there.
+fn sendToMonitor(source_index: usize, selection: commands.MonitorSelector, follow: bool) [*:0]const u8 {
+    const source = windows.items[source_index];
+    var screens: [monitor.capacity]monitor.Screen = undefined;
+    const target = monitor.resolve(selection, monitorScreens(&screens), source.display) catch |err| return failure(@errorName(err));
+    const workspace = displays.items[displayIndex(target).?].workspace;
+    if (target == source.display) return json(.{ .ok = true, .changed = false, .monitor = target, .workspace = source.workspace + 1 });
+    const resolved = resolvePlacements();
+    if (config.workspace_monitors != null and resolved[workspace] != target) return failure("NoWorkspaceOnMonitor");
+    var activations: [11]Routing.Activation = undefined;
+    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = target, .workspace = workspace }}, &activations), .send = .{ .index = source_index, .display = target, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+    commitPlacements(resolved);
+    routing_blocked = false;
+    native.platform_config_changed();
+    if (!follow) {
+        // The selection stays, so keyboard focus returns to the selected display's candidate.
+        const selected = selected_display orelse source.display;
+        focusWorkspace(selected, null);
+        return json(.{ .ok = true, .monitor = target, .workspace = workspace + 1, .verified = selected_display == selected, .focused = focused });
+    }
+    const verified = focusVerified(source.identity);
+    return json(.{ .ok = true, .monitor = target, .workspace = workspace + 1, .verified = verified, .target = source.identity });
+}
+
+// Global mode: sets each moved workspace's runtime home to its destination display and shows it
+// there. A display in `vacated` that loses its shown workspace shows the global previous workspace
+// if it is placed there, else its lowest placed workspace, else nothing. Selects `follow`.
+fn rehomeWorkspaces(moves: []const Routing.Activation, vacated: ?u32, follow: u32) [*:0]const u8 {
+    var homes: [10][128]u8 = undefined;
+    for (&homes, placements) |*home, placement| home.* = placement.home;
+    for (moves) |move| if (!displayUuid(move.display, &placements[move.workspace].home)) {
+        for (&placements, homes) |*placement, home| placement.home = home;
+        return failure("MonitorUuidUnavailable");
+    };
+    const resolved = resolvePlacements();
+    var forced: [3]Routing.Activation = undefined;
+    @memcpy(forced[0..moves.len], moves);
+    var count = moves.len;
+    if (vacated) |identity| {
+        var fallback: ?usize = null;
+        if (global_previous) |previous| if (resolved[previous] == identity) {
+            fallback = previous;
+        };
+        if (fallback == null) for (0..config.workspace_count) |workspace| if (resolved[workspace] == identity) {
+            fallback = workspace;
+            break;
+        };
+        if (fallback) |workspace| {
+            forced[count] = .{ .display = identity, .workspace = workspace };
+            count += 1;
+        }
+    }
+    generation += 1;
+    snapshot_presentation = .instant;
+    var activations: [11]Routing.Activation = undefined;
+    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, forced[0..count], &activations) })) {
+        for (&placements, homes) |*placement, home| placement.home = home;
+        return failure(transition_error orelse "MonitorRoutingFailed");
+    }
+    commitPlacements(resolved);
+    routing_blocked = false;
+    focusWorkspace(follow, null);
+    native.platform_config_changed();
+    return json(.{ .ok = true, .monitor = follow, .verified = selected_display == follow, .focused = focused });
+}
+
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
     defer publishPointer();
@@ -1716,6 +1798,18 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             focusWorkspace(target, null);
             return json(.{ .ok = true, .accepted = true, .changed = changed, .monitor = target, .verified = selected_display == target, .focused = focused });
         },
+        .move_workspace_to_monitor, .swap_monitor_workspaces => |selection| {
+            if (config.workspace_monitors == null) return failure("RequiresGlobalWorkspaces");
+            var screens: [monitor.capacity]monitor.Screen = undefined;
+            const target = monitor.resolve(selection, monitorScreens(&screens), display.identity) catch |err| return failure(@errorName(err));
+            const workspace = display.workspace;
+            if (placements[workspace].display != display.identity) return failure("NoWorkspaceOnMonitor");
+            if (target == display.identity) return json(.{ .ok = true, .changed = false, .monitor = target });
+            if (command == .move_workspace_to_monitor) return rehomeWorkspaces(&.{.{ .display = target, .workspace = workspace }}, display.identity, target);
+            const target_workspace = displays.items[displayIndex(target).?].workspace;
+            if (placements[target_workspace].display != target) return failure("NoWorkspaceOnMonitor");
+            return rehomeWorkspaces(&.{ .{ .display = target, .workspace = workspace }, .{ .display = display.identity, .workspace = target_workspace } }, null, target);
+        },
         .cycle => |request| {
             var identities: [1024]u64 = undefined;
             const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return failure("NoWindowToCycle");
@@ -1859,7 +1953,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const destination = resolved[workspace] orelse windows.items[sourceIndex].display;
                     if (workspace == windows.items[sourceIndex].workspace and destination == windows.items[sourceIndex].display) return json(.{ .ok = true, .changed = false });
                     var activations: [11]Routing.Activation = undefined;
-                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, null, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{}, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     commitPlacements(resolved);
                     routing_blocked = false;
                     if (!visible(windows.items[sourceIndex])) focused = null;
@@ -1877,7 +1971,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     generation += 1;
                     snapshot_presentation = .instant;
                     var activations: [11]Routing.Activation = undefined;
-                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, .{ .display = destination, .workspace = workspace }, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = destination, .workspace = workspace }}, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     commitPlacements(resolved);
                     routing_blocked = false;
                     recordPrevious(destination_slot, from, workspace);
@@ -1885,6 +1979,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     native.platform_config_changed();
                     return json(.{ .ok = true, .verified = verified, .target = identity });
                 },
+                .send_to_monitor, .move_to_monitor => |selection| return sendToMonitor(sourceIndex, selection, command == .move_to_monitor),
                 .focus => |request| {
                     const target = if (request.wrap) wrappedNeighbor(sourceIndex, request.direction) else neighbor(sourceIndex, request.direction) orelse return failure("NoWindowInDirection");
                     const identity = windows.items[target].identity;

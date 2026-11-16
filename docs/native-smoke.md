@@ -78,7 +78,7 @@ The workflow run does not check selectors on a second display, `workspace_monito
 
 ## Check two-display owner routing and monitor focus
 
-`--owner`, `--monitors`, and `--global` replace the default checks. They need at least two displays, with at least one built-in and one external display.
+`--owner`, `--monitors`, `--global`, and `--monitor-moves` replace the default checks. They need at least two displays, with at least one built-in and one external display.
 With other hardware, the driver prints `SKIP`, records `skipped` in `result.json`, and exits with code zero before preflight.
 Both use the fixture with `--spread`, a 12-point gap, instant switches, and workspaces One, Two, and Three. They exclude `--scenes`, `--workflow`, and each other.
 The driver reads and warps the pointer through public CoreGraphics calls to set a known start position.
@@ -135,6 +135,26 @@ Each placement check reads `status`, `windows`, `workspaces`, and `monitors`. `s
 - A reload with mouse follow keeps the placement. `workspace 3` and `workspace previous` warp the pointer to each display's center.
 - A reload to the owner configuration (no `monitor` fields) routes every window to the external display, with the sent window parked in Three. A reload back to the split configuration returns Three to the built-in display. Neither reload leaves routing blocked.
 - `restore` returns the original fixture frames.
+
+`--monitor-moves` (N4, N5) checks window and workspace moves between displays. It starts in independent mode without mouse follow. The fixture's spread puts two windows on one display and one on the other.
+
+```sh
+python3 scripts/native-smoke.py \
+    --app "$HOME/Applications/Huen WM.app" \
+    --output "$PWD/native-monitor-moves-result" \
+    --monitor-moves
+```
+
+Window checks compare each window's display, workspace, and parking with the fixture frames. The checks run in this order:
+
+- Independent `send-to-monitor` moves the key window to the other display's workspace 1. The selection stays, and the source display's other window gets focus. `focus last` and `move-to-monitor` bring the window back, select its display, and focus it.
+- With workspace 2 on the single-window display, `move-to-monitor` puts a window in workspace 2 there and focuses it. A second `move-to-monitor` and `workspace 1` restore the start layout.
+- `move-workspace-to-monitor` and `swap-monitor-workspaces` return `RequiresGlobalWorkspaces`.
+- A reload to the split configuration of `--global` routes every window to One on the external display. `send-to-monitor built-in` puts the key window in Three and keeps the external display selected. `move-to-monitor external` returns it to One and focuses it.
+- `move-workspace-to-monitor built-in` shows One on the built-in display with its UUID as `home`. The external display falls back to Two, and the selection follows. `swap-monitor-workspaces external` shows One on the external display and Two on the built-in display and sets both homes.
+- A reload of the split configuration clears both homes, because One and Two have `monitor` fields. The start placement returns.
+- A reload to the owner configuration routes every workspace to the external display. `send-to-monitor built-in` and `swap-monitor-workspaces built-in` return `NoWorkspaceOnMonitor`. `move-workspace-to-monitor built-in` splits One onto the built-in display, and a reload keeps that home. Moving One back leaves the built-in display empty. From the empty display, `move-workspace-to-monitor` returns `NoWorkspaceOnMonitor`.
+- A reload to independent mode clears every home. `restore` returns the original fixture frames.
 
 None of these modes checks display disconnection or session restore.
 

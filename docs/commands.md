@@ -180,6 +180,40 @@ The reply contains `monitor`, `changed`, `verified`, and `focused`.
 A candidate whose focus is not confirmed leaves the selection unchanged.
 With `mouse_follows_monitor = true`, a selection change moves the pointer to the display's center if the pointer is outside it.
 
+## Monitor moves
+
+The monitor move commands take the same selectors as `focus-monitor`.
+
+`send-to-monitor MONITOR` moves the focused window to the target display's active workspace.
+Directions and cycles start at the window's display.
+The selected display does not change, and its candidate window gets focus.
+`move-to-monitor MONITOR` does the same send, then focuses the moved window and selects its display.
+Both commands work with and without `workspace_monitors`.
+Neither command changes the previous workspace.
+A target that is the window's own display replies `changed: false`.
+With `workspace_monitors`, a target display that has no workspace placed on it returns `NoWorkspaceOnMonitor`.
+In owner mode, every display except the owner is empty, so a send away from the owner returns `NoWorkspaceOnMonitor`.
+A floating window keeps the proportional position of its center inside the gapped area and stays inside that area.
+The reply contains `monitor` and `workspace`. `move-to-monitor` adds `verified` and `target`.
+
+`move-workspace-to-monitor MONITOR` moves the selected display's active workspace to the target display and shows it there.
+The workspace's runtime home becomes the target display's UUID.
+The source display then shows the previous workspace if it is placed there, else its lowest-numbered remaining workspace, else nothing.
+The selection follows the moved workspace.
+
+`swap-monitor-workspaces MONITOR` swaps the active workspaces of the selected display and the target display.
+Each workspace's home becomes the UUID of its new display.
+The selection follows the selected display's workspace to the target display.
+A target display without a placed workspace returns `NoWorkspaceOnMonitor`.
+
+Both workspace commands need `workspace_monitors` and otherwise return `RequiresGlobalWorkspaces`.
+Owner mode counts as global routing. A move or swap in owner mode splits the workspace set, so `status.workspace_owner` becomes null.
+A selected display that shows no workspace returns `NoWorkspaceOnMonitor`.
+A target that is the selected display replies `changed: false`.
+A display without a UUID returns `MonitorUuidUnavailable`.
+Both commands keep the previous workspace and reply with `monitor`, `verified`, and `focused`.
+See [monitor routing](monitors.md#runtime-homes) for how homes interact with reloads and hotplug.
+
 ## Workspace selectors
 
 `workspace`, `send-to-workspace`, and `move-to-workspace` take one selector.
@@ -256,7 +290,8 @@ Verbs reject extra arguments.
 | `swap` | One direction, `next`, or `previous`. |
 | `move` | One direction. |
 | `focus` | `last`, or an optional `--wrap` and one direction. |
-| `focus-monitor` | One monitor selector. |
+| `focus-monitor`, `send-to-monitor`, `move-to-monitor` | One monitor selector. |
+| `move-workspace-to-monitor`, `swap-monitor-workspaces` | One monitor selector. Need `workspace_monitors`. |
 | `cycle` | `next` or `previous`, then optionally `tiled` or `floating`. |
 | `center` | None. |
 | `move-by`, `resize-by` | Two finite point deltas, each with absolute value at most `10000`. |

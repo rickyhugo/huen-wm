@@ -72,7 +72,15 @@ A valid reload publishes its configuration and resets the binding mode to `main`
 
 `status` includes `selected_monitor`, `workspace_owner`, `placements`, and `routing_blocked`. `workspace_owner` is the shared display in owner mode and null when workspaces are split or global routing is off. `placements` lists each workspace's `index`, `name`, `display` (null without global routing or displays), and `home` (a display UUID hint, or an empty string when placement comes from configuration). `monitors` includes `built_in`, `uuid`, `workspace`, and `selected`. `uuid` is the CoreGraphics display UUID, or null when unavailable. `workspace` is the display's active workspace number. With global routing enabled, it is null on a display that has no workspace placed on it.
 
+`send-to-monitor` and `move-to-monitor` move the focused window to the target display's active workspace in both modes. With global routing enabled, an empty target display returns `NoWorkspaceOnMonitor`. `move-workspace-to-monitor` and `swap-monitor-workspaces` move whole workspaces and need global routing. See [monitor moves](commands.md#monitor-moves).
+
 `focus-monitor MONITOR` selects a display in both modes. See [commands](commands.md#monitor-focus). With global routing enabled, a display that has no workspace placed on it is empty, so the command selects it without a focus change. `workspace N` activates N on its display and selects that display. With global routing enabled, `workspaces` lists each workspace only under its committed display. Existing per-window placement errors and the status `transition_error` describe failures.
+
+## Runtime homes
+
+`move-workspace-to-monitor` and `swap-monitor-workspaces` set a workspace's runtime home to the destination display's UUID. A home takes precedence over the workspace's `monitor` list and `workspace_monitors`, so the workspace stays there across ticks and owner changes. In owner mode, a home splits the workspace set: the moved workspace stays on its home and the others keep following `workspace_monitors`.
+
+A reload clears the homes of workspaces that have a `monitor` field, so they return to their configured displays. Workspaces without `monitor` keep their homes. A reload without `workspace_monitors` clears every home. When the home display disconnects, the workspace moves to its fallback display and keeps its home. When the display reconnects, the workspace returns to it. `status.placements[].home` shows the UUID, or an empty string. Homes are runtime state. A restart does not restore them yet.
 
 ## Layout integration and verification limits
 

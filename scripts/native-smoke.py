@@ -185,6 +185,7 @@ class NativeSmoke:
             "owner": arguments.owner,
             "monitors": arguments.monitors,
             "global": arguments.global_routing,
+            "monitor_moves": arguments.monitor_moves,
         }
         self.fixture_pid = None
         self.manager_started = False
@@ -1770,6 +1771,355 @@ class NativeSmoke:
         self.restored(original_frames)
         self.result["passed"] = True
 
+    def class_of(self, display):
+        return "built-in" if self.monitors[display]["built_in"] else "external"
+
+    def observe_landing(self):
+        return {"windows": self.cli("windows"), "report": self.fixture()}
+
+    def lands(self, observation, expected):
+        report = observation["report"]
+        if not report:
+            return False
+        managed = {window["title"]: window for window in observation["windows"]}
+        observed = frames(report)
+        if set(managed) != set(expected) or set(observed) != set(expected):
+            return False
+        for title, (display, workspace, shown) in expected.items():
+            window = managed[title]
+            if window["display"] != display or window["workspace"] != workspace:
+                return False
+            area = self.monitors[display]["frame"]
+            if shown:
+                if window["parked"] or not contains(area, observed[title], WORKFLOW_GAP):
+                    return False
+            elif not window["parked"] or overlaps(area, observed[title]):
+                return False
+        return True
+
+    def landed(self, name, expected):
+        return self.wait(
+            name,
+            self.observe_landing,
+            lambda observation: self.lands(observation, expected),
+        )
+
+    def monitor_reply(self, name, arguments, display, workspace=None, target=None):
+        return self.reply(
+            name,
+            arguments,
+            lambda response: (
+                response.get("ok") is True
+                and response.get("monitor") == display
+                and (workspace is None or response.get("workspace") == workspace)
+                and (target is None or response.get("target") == self.identities[target])
+                and response.get("changed") is not False
+            ),
+        )
+
+    def placed(self, observation, placement, active, memberships, homes):
+        status = observation["status"]
+        report = observation["report"]
+        names = ("One", "Two", "Three")
+        displays = set(placement.values())
+        owner = next(iter(displays)) if len(displays) == 1 else None
+        if (
+            not report
+            or status.get("routing_blocked")
+            or status.get("workspace_owner") != owner
+        ):
+            return False
+        expected = [
+            {
+                "index": index,
+                "name": names[index - 1],
+                "display": placement[index],
+                "home": self.monitors[homes[index]]["uuid"] if index in homes else "",
+            }
+            for index in (1, 2, 3)
+        ]
+        if status.get("placements") != expected:
+            return False
+        if {
+            item["id"]: item["workspace"] for item in observation["monitors"]
+        } != active:
+            return False
+        listing = observation["workspaces"]
+        if sorted((item["index"], item["display"]) for item in listing) != sorted(
+            placement.items()
+        ):
+            return False
+        if {item["display"]: item["index"] for item in listing if item["active"]} != {
+            display: workspace
+            for display, workspace in active.items()
+            if workspace is not None
+        }:
+            return False
+        expected_windows = {}
+        for title in self.identities:
+            workspace = memberships.get(title, 1)
+            display = placement[workspace]
+            expected_windows[title] = (display, workspace, active[display] == workspace)
+        return self.lands(observation, expected_windows)
+
+    def placement(self, name, placement, active, memberships=None, homes=None):
+        return self.wait(
+            name,
+            self.observe_spread,
+            lambda observation: self.placed(
+                observation, placement, active, memberships or {}, homes or {}
+            ),
+        )
+
+    def exercise_monitor_moves(self):
+        original_frames = self.start_multi_display(None, False)
+        external = self.external
+        built_in = self.built_in
+        self.result["monitor_move_displays"] = {
+            "external": external,
+            "built_in": built_in,
+        }
+        windows = self.wait(
+            "independent mode keeps windows on both displays",
+            lambda: self.cli("windows"),
+            lambda windows: (
+                {window["display"] for window in windows} == {built_in, external}
+                and not any(window["parked"] for window in windows)
+            ),
+        )
+        counts = {}
+        for window in windows:
+            counts.setdefault(window["display"], set()).add(window["title"])
+        crowded = max(counts, key=lambda display: len(counts[display]))
+        lone = min(counts, key=lambda display: len(counts[display]))
+        if len(counts[crowded]) != 2 or len(counts[lone]) != 1:
+            raise Skipped(f"Needs a 2 and 1 window spread; found {counts}")
+        home = {title: crowded for title in counts[crowded]}
+        home.update({title: lone for title in counts[lone]})
+        crowded_class = self.class_of(crowded)
+        lone_class = self.class_of(lone)
+
+        def independent(moved=None, lone_workspace=1):
+            moved = moved or {}
+            result = {}
+            for title, display in home.items():
+                display, workspace = moved.get(title, (display, 1))
+                shown = display == crowded or workspace == lone_workspace
+                result[title] = (display, workspace, shown)
+            return result
+
+        self.focus_monitor("independent", crowded_class, False)
+        sent = self.keyed("independent source focuses a window", counts[crowded])
+        other = (counts[crowded] - {sent}).pop()
+        self.monitor_reply(
+            "independent send-to-monitor is accepted",
+            ("send-to-monitor", lone_class),
+            lone,
+            1,
+        )
+        self.landed(
+            "independent send-to-monitor lands on the active workspace",
+            independent({sent: (lone, 1)}),
+        )
+        self.selected("independent send-to-monitor keeps the selection", crowded)
+        self.keyed("independent send-to-monitor focuses the source candidate", {other})
+        self.targets("focus last returns to the sent window", ("focus", "last"), sent)
+        self.selected("focus last selects the sent window display", lone)
+        self.monitor_reply(
+            "independent move-to-monitor back is accepted",
+            ("move-to-monitor", crowded_class),
+            crowded,
+            1,
+            sent,
+        )
+        self.landed("independent move-to-monitor returns the window", independent())
+        self.selected("independent move-to-monitor selects the target", crowded)
+        self.keyed("independent move-to-monitor focuses the moved window", {sent})
+
+        self.focus_monitor("independent", lone_class, False)
+        self.accepted("independent workspace 2 on the lone display", "workspace", "2")
+        self.landed(
+            "independent workspace 2 parks the lone display",
+            independent(lone_workspace=2),
+        )
+        self.focus_monitor("independent", crowded_class, False)
+        carried = self.keyed("independent carried window is key", counts[crowded])
+        self.monitor_reply(
+            "independent move-to-monitor onto workspace 2 is accepted",
+            ("move-to-monitor", lone_class),
+            lone,
+            2,
+            carried,
+        )
+        self.landed(
+            "independent move-to-monitor lands on workspace 2",
+            independent({carried: (lone, 2)}, lone_workspace=2),
+        )
+        self.selected("independent move-to-monitor selects the lone display", lone)
+        self.keyed("independent move-to-monitor focuses the carried window", {carried})
+        self.monitor_reply(
+            "independent move-to-monitor home is accepted",
+            ("move-to-monitor", crowded_class),
+            crowded,
+            1,
+            carried,
+        )
+        self.focus_monitor("independent", lone_class, False)
+        self.accepted("independent workspace 1 on the lone display", "workspace", "1")
+        self.landed("independent layout is restored", independent())
+        self.rejected(
+            "independent move-workspace-to-monitor needs global routing",
+            ("move-workspace-to-monitor", crowded_class),
+            "RequiresGlobalWorkspaces",
+        )
+        self.rejected(
+            "independent swap-monitor-workspaces needs global routing",
+            ("swap-monitor-workspaces", crowded_class),
+            "RequiresGlobalWorkspaces",
+        )
+
+        owners = ("external", "built-in")
+        everyone = set(self.identities)
+        split = {1: external, 2: external, 3: built_in}
+        self.reload_monitors("reload to the split config", owners, False, split=True)
+        self.placement(
+            "split config routes every window to One on external",
+            split,
+            {external: 1, built_in: 3},
+        )
+        self.focus_monitor("global", "external", False)
+        sent = self.keyed("global source focuses a window", everyone)
+        self.monitor_reply(
+            "global send-to-monitor built-in is accepted",
+            ("send-to-monitor", "built-in"),
+            built_in,
+            3,
+        )
+        self.placement(
+            "global send-to-monitor lands in Three on built-in",
+            split,
+            {external: 1, built_in: 3},
+            {sent: 3},
+        )
+        self.selected("global send-to-monitor keeps external selected", external)
+        self.keyed("global send-to-monitor focuses an external window", everyone - {sent})
+        self.focus_monitor("global", "built-in", False)
+        self.keyed("global focus-monitor built-in focuses the sent window", {sent})
+        self.monitor_reply(
+            "global move-to-monitor external is accepted",
+            ("move-to-monitor", "external"),
+            external,
+            1,
+            sent,
+        )
+        self.placement(
+            "global move-to-monitor lands in One on external",
+            split,
+            {external: 1, built_in: 3},
+        )
+        self.selected("global move-to-monitor selects external", external)
+        self.keyed("global move-to-monitor focuses the moved window", {sent})
+
+        self.monitor_reply(
+            "move-workspace-to-monitor built-in is accepted",
+            ("move-workspace-to-monitor", "built-in"),
+            built_in,
+        )
+        moved = {1: built_in, 2: external, 3: built_in}
+        self.placement(
+            "One moves to built-in and external falls back to Two",
+            moved,
+            {external: 2, built_in: 1},
+            homes={1: built_in},
+        )
+        self.selected("move-workspace-to-monitor selects built-in", built_in)
+        self.keyed("move-workspace-to-monitor focuses a One window", everyone)
+        self.monitor_reply(
+            "swap-monitor-workspaces external is accepted",
+            ("swap-monitor-workspaces", "external"),
+            external,
+        )
+        swapped = {1: external, 2: built_in, 3: built_in}
+        self.placement(
+            "swap shows One on external and Two on built-in",
+            swapped,
+            {external: 1, built_in: 2},
+            homes={1: external, 2: built_in},
+        )
+        self.selected("swap-monitor-workspaces selects external", external)
+        self.reload_monitors("reload the split config", owners, True, split=True)
+        self.placement(
+            "reload resets homes of workspaces with monitor",
+            split,
+            {external: 1, built_in: 3},
+        )
+
+        self.reload_monitors("reload to the owner config", owners, False)
+        owned = {1: external, 2: external, 3: external}
+        self.placement(
+            "owner config routes every workspace to external",
+            owned,
+            {external: 1, built_in: None},
+        )
+        self.focus_monitor("owner", "external", False)
+        self.rejected(
+            "owner send-to-monitor to the empty display is rejected",
+            ("send-to-monitor", "built-in"),
+            "NoWorkspaceOnMonitor",
+        )
+        self.rejected(
+            "owner swap with the empty display is rejected",
+            ("swap-monitor-workspaces", "built-in"),
+            "NoWorkspaceOnMonitor",
+        )
+        self.monitor_reply(
+            "owner move-workspace-to-monitor built-in is accepted",
+            ("move-workspace-to-monitor", "built-in"),
+            built_in,
+        )
+        owner_split = {1: built_in, 2: external, 3: external}
+        self.placement(
+            "owner move splits One onto built-in",
+            owner_split,
+            {external: 2, built_in: 1},
+            homes={1: built_in},
+        )
+        self.reload_monitors("reload the owner config", owners, True)
+        self.placement(
+            "reload keeps the home of a workspace without monitor",
+            owner_split,
+            {external: 2, built_in: 1},
+            homes={1: built_in},
+        )
+        self.focus_monitor("owner split", "built-in", True)
+        self.monitor_reply(
+            "move-workspace-to-monitor external is accepted",
+            ("move-workspace-to-monitor", "external"),
+            external,
+        )
+        self.placement(
+            "moving the only built-in workspace leaves built-in empty",
+            owned,
+            {external: 1, built_in: None},
+            homes={1: external},
+        )
+        self.selected("the move selects external", external)
+        self.focus_monitor("owner", "built-in", True)
+        self.rejected(
+            "an empty selected display has no workspace to move",
+            ("move-workspace-to-monitor", "external"),
+            "NoWorkspaceOnMonitor",
+        )
+
+        self.reload_monitors("reload to independent mode", None, False)
+        self.check(
+            "independent reload clears every home",
+            all(item["home"] == "" for item in self.cli("status")["placements"]),
+            self.cli("status"),
+        )
+        self.restored(original_frames)
+        self.result["passed"] = True
+
     def titles_by_identity(self):
         return {identity: title for title, identity in self.identities.items()}
 
@@ -1889,6 +2239,12 @@ def main():
         action="store_true",
         help="Check per-workspace monitor placement on two displays instead",
     )
+    parser.add_argument(
+        "--monitor-moves",
+        dest="monitor_moves",
+        action="store_true",
+        help="Check window and workspace moves between two displays instead",
+    )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -1897,13 +2253,17 @@ def main():
         arguments.owner,
         arguments.monitors,
         arguments.global_routing,
+        arguments.monitor_moves,
     )
     if sum(exclusive) > 1:
-        parser.error("--workflow, --owner, --monitors, and --global are exclusive")
+        parser.error(
+            "--workflow, --owner, --monitors, --global, and --monitor-moves "
+            "are exclusive"
+        )
     if arguments.scenes and any(exclusive):
         parser.error(
-            "--workflow, --owner, --monitors, and --global use instant switches "
-            "and exclude --scenes"
+            "--workflow, --owner, --monitors, --global, and --monitor-moves "
+            "use instant switches and exclude --scenes"
         )
     smoke = NativeSmoke(arguments)
     try:
@@ -1915,6 +2275,8 @@ def main():
             smoke.exercise_monitors()
         elif arguments.global_routing:
             smoke.exercise_global()
+        elif arguments.monitor_moves:
+            smoke.exercise_monitor_moves()
         else:
             smoke.exercise()
     except Skipped as reason:

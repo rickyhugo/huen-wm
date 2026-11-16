@@ -77,6 +77,10 @@ pub const Command = union(enum) {
     send_to_workspace: WorkspaceSelector,
     move_to_workspace: WorkspaceSelector,
     focus_monitor: MonitorSelector,
+    send_to_monitor: MonitorSelector,
+    move_to_monitor: MonitorSelector,
+    move_workspace_to_monitor: MonitorSelector,
+    swap_monitor_workspaces: MonitorSelector,
 };
 
 fn pointDelta(value: []const u8) !f64 {
@@ -129,15 +133,15 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (tokens.next() != null) return error.ExtraArgument;
         return @unionInit(Command, verb_tag[1], try parseSelector(value, workspace_count));
     };
-    if (std.mem.eql(u8, verb, "focus-monitor")) {
+    inline for (.{ .{ "focus-monitor", "focus_monitor" }, .{ "send-to-monitor", "send_to_monitor" }, .{ "move-to-monitor", "move_to_monitor" }, .{ "move-workspace-to-monitor", "move_workspace_to_monitor" }, .{ "swap-monitor-workspaces", "swap_monitor_workspaces" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         const value = argument orelse return error.MissingArgument;
         if (std.mem.startsWith(u8, value, "name:")) {
             const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr);
-            return .{ .focus_monitor = try parseMonitorSelector(std.mem.trimEnd(u8, input[start..], " \t")) };
+            return @unionInit(Command, verb_tag[1], try parseMonitorSelector(std.mem.trimEnd(u8, input[start..], " \t")));
         }
         if (tokens.next() != null) return error.ExtraArgument;
-        return .{ .focus_monitor = try parseMonitorSelector(value) };
-    }
+        return @unionInit(Command, verb_tag[1], try parseMonitorSelector(value));
+    };
     if (std.mem.eql(u8, verb, "group")) {
         const action = argument orelse return error.MissingArgument;
         if (std.mem.eql(u8, action, "join")) {
