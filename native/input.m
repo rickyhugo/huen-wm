@@ -159,6 +159,12 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return event;
     }
+    if (type == kCGEventKeyDown) {
+        if (input.drag.phase != HuenDragActive ||
+            CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) != kVK_Escape) return event;
+        cancel_drag(HuenCancelEscape);
+        return NULL;
+    }
     if (input.drag.phase == HuenDragDraining && type == input.drag.down_type) input.drag.phase = HuenDragIdle;
     if (input.drag.phase != HuenDragIdle) {
         if (type == input.drag.up_type) {
@@ -183,15 +189,6 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
                     enqueue_motion();
                 }
             }
-            return NULL;
-        }
-        if (type == kCGEventFlagsChanged &&
-            carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) {
-            cancel_drag(HuenCancelModifiers);
-        }
-        if (type == kCGEventKeyDown && CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == kVK_Escape &&
-            input.drag.phase == HuenDragActive) {
-            cancel_drag(HuenCancelEscape);
             return NULL;
         }
         return event;
@@ -237,7 +234,7 @@ static bool install_tap(void) {
     CGEventMask mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
         CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventRightMouseDown) |
         CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged) |
-        CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown);
+        CGEventMaskBit(kCGEventKeyDown);
     input.tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
         kCGEventTapOptionDefault, mask, input_callback, NULL);
     if (!input.tap) return false;

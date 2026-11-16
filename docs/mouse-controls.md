@@ -88,6 +88,8 @@ A modified click therefore consumes its paired down and up without a reorder.
 The bridge does not move foreign windows during a gesture.
 
 Modifier loss, Escape, tap disable, permission loss, reconfiguration, publication invalidation, and shutdown cancel an active gesture.
+Modifier loss is read from the owned drag and release events, so the tap does not observe modifier changes.
+The tap observes key-down only for Escape. Outside an active gesture, each key-down returns after one phase comparison.
 Cancellation emits one cancel event and enters release draining.
 The owned drag stream and matching up remain consumed after cancellation.
 Draining ends without that up when a tap disable, invalid tap, or permission loss finds the owned button already released, or when the owned button goes down again.
