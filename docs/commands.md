@@ -119,6 +119,28 @@ At an edge, the wrapped search selects the opposite edge.
 Wrapped-focus geometry ties use window identity.
 With one eligible window, wrapped focus keeps that window.
 
+`focus last` focuses the most recently focused window other than the current one.
+A 16-entry history records verified and observed focus changes.
+Closed windows leave the history.
+Minimized, native fullscreen, stale, and display-less windows are skipped.
+A target on a hidden workspace first switches its display to that workspace.
+That switch reveals and focuses the target instead of the workspace's own candidate.
+Without a candidate, `focus last` returns `NoPreviousWindow`.
+
+`cycle next` and `cycle previous` focus through the active display's visible windows.
+`cycle next tiled` and `cycle next floating` restrict the candidates to one kind.
+Tiled windows come before floating windows.
+Each kind is ordered top to bottom, then left to right, then by identity.
+The order wraps.
+Minimized, stale, native fullscreen, group-hidden, and parked windows are skipped.
+Without a candidate, `cycle` returns `NoWindowToCycle`.
+With one candidate, `cycle` focuses it again.
+
+`swap next` and `swap previous` swap the focused tile with its neighbor in the same tiled order.
+They use the directional swap's placement and focus verification.
+A floating or managed fullscreen window returns `WindowNotTiled`.
+A single tile replies `changed: false`.
+
 Focus-dependent actions read the frontmost application's focused AX window immediately.
 They do not reuse the periodic observation's focused flag.
 An unknown or unmanaged focus returns `NoFocusedWindow`.
@@ -126,15 +148,76 @@ Focus replies report an accepted native request separately from immediate verifi
 `verified = false` means that activation has not been observed on the target.
 The next command reads actual focus again.
 
-## Existing command grammar
+## Workspace selectors
 
-Existing verbs keep their grammar and reject extra arguments.
+`workspace`, `send-to-workspace`, and `move-to-workspace` take one selector.
+
+| Selector | Target |
+| --- | --- |
+| `N` | Workspace `N`, starting at `1`. |
+| `name:NAME` | The workspace named `NAME`. The name runs to the end of the command and can contain spaces. |
+| `previous` | The workspace shown before the current one. |
+| `+N`, `-N` | The workspace `N` positions after or before the current one. The position wraps within the configured set. |
+| `occupied+N`, `occupied-N` | The same step, counting only the current workspace and workspaces with eligible windows. |
+| `empty` | The first workspace without eligible windows. |
+| `next-empty` | The first workspace without eligible windows after the current one, with wrap. |
+
+Offsets require a sign. Their absolute value is from 1 to 10.
+Eligible windows are not minimized, native fullscreen, or stale.
+Configuration rejects a `name:` selector without a matching workspace with `UnknownWorkspaceName`.
+After a reload removes that name, the runtime command returns the same error.
+
+With `workspace_monitors`, selectors resolve against the owner display.
+Otherwise they resolve against the active display and never select another monitor.
+Each display has its own previous workspace.
+With `workspace_monitors`, one previous workspace follows the owner across migration.
+The previous workspace changes only after a switch commits.
+A reload maps it to the workspace with the same name, or drops it.
+
+`previous` without a recorded workspace returns `NoPreviousWorkspace`.
+`empty` and `next-empty` without a match return `NoEmptyWorkspace`.
+`occupied+N` without another occupied workspace selects the current workspace.
+Selecting the current workspace replies `changed: false` and focuses its candidate.
+
+Set `workspace_back_and_forth = true` to make an index or name selector that matches the current workspace select the previous workspace.
+This applies to all three commands.
+Without a previous workspace, the selection stays on the current workspace.
+The option defaults to `false`.
+
+`move-to-workspace SELECTOR` sends the focused window and shows the target workspace in one placement commit.
+It then focuses the moved window and reports `verified` and `target`.
+It does not use the snapshot transition.
+Selecting the window's own workspace replies `changed: false`.
+
+## Floating geometry commands
+
+`center` centers the focused floating window in its display's gapped area.
+`move-by DX DY` moves the focused floating window by logical points.
+Both keep the window inside the gapped area.
+A tiled window returns `WindowNotFloating`.
+`move DIRECTION` keeps its existing behavior and makes a tiled window floating.
+
+`resize-by DX DY` keeps a floating window's top-left corner.
+Its width and height stay between 80 points and the gapped area's right and bottom edges.
+For a tiled window, `resize-by` applies `resize width DX` and `resize height DY` for each non-zero value.
+Master layout rejects a non-zero `DY` with `MasterHeightResizeUnsupported` before it changes the layout.
+The tiled reply reports `applied.width` and `applied.height`.
+A managed fullscreen window returns `ManagedFullscreenActive` for all three commands.
+
+## Command grammar
+
+Verbs reject extra arguments.
 
 | Commands | Arguments |
 | --- | --- |
 | `status`, `windows`, `monitors`, `workspaces` | None. |
 | `reload`, `quit`, `stop`, `restore`, `recover` | None. |
-| `swap`, `move` | One direction. |
+| `swap` | One direction, `next`, or `previous`. |
+| `move` | One direction. |
+| `focus` | `last`, or an optional `--wrap` and one direction. |
+| `cycle` | `next` or `previous`, then optionally `tiled` or `floating`. |
+| `center` | None. |
+| `move-by`, `resize-by` | Two finite point deltas, each with absolute value at most `10000`. |
 | `tilemove` | One direction. Detaches and reparents the selected tiled subtree. |
 | `select` | `parent` or `child`. Changes logical selection without native focus. |
 | `group join` | One direction. Joins the selected subtree to a neighboring group or leaf. |
@@ -144,7 +227,7 @@ Existing verbs keep their grammar and reject extra arguments.
 | `fullscreen` | None. Toggles managed fullscreen without creating a macOS Space. |
 | `toggle-floating` | None. |
 | `layout` | `dwindle` or `master`. |
-| `workspace`, `send-to-workspace` | One workspace index, starting at `1`. |
+| `workspace`, `send-to-workspace`, `move-to-workspace` | One workspace selector. |
 | `mode` | One configured mode name. |
 
 Flags precede their positional argument.
