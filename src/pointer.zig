@@ -143,15 +143,15 @@ pub const Controls = struct {
         }
         if (!bridge.huen_input_publish(&.{ .generation = self.generation, .hits = hits.items.ptr, .hit_count = hits.items.len, .ready = ready, .transitioning = !ready })) return error.InputPublicationRejected;
         for (headers.items) |*item| item.generation = self.generation;
-        if (ready) {
-            if (!bridge.huen_groups_publish(&.{ .generation = self.generation, .items = headers.items.ptr, .item_count = headers.items.len, .border_color = color, .border_width = width })) return error.HeaderPublicationRejected;
-        } else bridge.huen_groups_clear();
+        const headers_published = !ready or bridge.huen_groups_publish(&.{ .generation = self.generation, .items = headers.items.ptr, .item_count = headers.items.len, .border_color = color, .border_width = width });
+        if (!ready) bridge.huen_groups_clear();
         self.hits.clearRetainingCapacity();
         try self.hits.appendSlice(allocator, hits.items);
         self.headers.clearRetainingCapacity();
         try self.headers.appendSlice(allocator, headers.items);
         self.ready = ready;
         self.revision = store.revision;
+        if (!headers_published) return error.HeaderPublicationRejected;
     }
 
     pub fn event(self: *Controls, store: *layout.Store, windows: []const Window, sample: bridge.Event, gap: f64, color: u32, width: f64) !?Edit {
