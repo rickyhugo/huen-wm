@@ -823,6 +823,16 @@ pub const Store = struct {
         return @min(24 * @as(f64, @floatFromInt(rows)), @max(0, node.frame.height - minimum));
     }
 
+    fn headerSpan(origin: f64, extent: f64, position: usize, count: usize) struct { start: f64, size: f64 } {
+        const divisor: f64 = @floatFromInt(count);
+        const start = origin + extent * @as(f64, @floatFromInt(position)) / divisor;
+        const end = origin + extent * @as(f64, @floatFromInt(position + 1)) / divisor;
+        var size = end - start;
+        // Rounding can carry start + size past the shared edge, which the native bridge rejects as overlap.
+        while (start + size > end) size = std.math.nextAfter(f64, size, 0);
+        return .{ .start = start, .size = size };
+    }
+
     pub fn headers(self: *const Store, state: *const WorkspaceLayout, output: []Header) !usize {
         if (state.layout != .dwindle) return 0;
         var count: usize = 0;
@@ -835,15 +845,15 @@ pub const Store = struct {
             while (child) |current| : (child = self.nodes[current].next) {
                 if (count == output.len) return error.PresentationCapacityExceeded;
                 var rect = node.frame;
-                const divisor: f64 = @floatFromInt(container.count);
-                const position: f64 = @floatFromInt(offset);
                 if (container.mode == .tabbed) {
-                    rect.width /= divisor;
-                    rect.left += position * rect.width;
+                    const tab = headerSpan(node.frame.left, node.frame.width, offset, container.count);
+                    rect.left = tab.start;
+                    rect.width = tab.size;
                     rect.height = height;
                 } else {
-                    rect.height = height / divisor;
-                    rect.top += position * rect.height;
+                    const row = headerSpan(node.frame.top, height, offset, container.count);
+                    rect.top = row.start;
+                    rect.height = row.size;
                 }
                 output[count] = .{ .group = self.reference(@intCast(index)), .child = self.reference(current), .rect = rect, .selected = current == container.selected, .eligible = self.nodes[current].active, .revision = self.revision };
                 count += 1;

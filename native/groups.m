@@ -77,6 +77,12 @@ static bool valid_rect(HuenInteractionRect rect) {
            isfinite(rect.left + rect.width) && isfinite(rect.top + rect.height);
 }
 
+// AppKit conversion rounds shared edges of stacked rows into overlap, so compare caller coordinates.
+static bool rects_overlap(HuenInteractionRect first, HuenInteractionRect second) {
+    return first.left < second.left + second.width && second.left < first.left + first.width &&
+           first.top < second.top + second.height && second.top < first.top + first.height;
+}
+
 static NSRect cocoa_rect(HuenInteractionRect rect) {
     double primaryTop = CGDisplayBounds(CGMainDisplayID()).size.height;
     return NSMakeRect(rect.left, primaryTop - rect.top - rect.height, rect.width, rect.height);
@@ -153,7 +159,7 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
         for (NSValue *previous in row.items) {
             HuenHeaderItem previousItem;
             [previous getValue:&previousItem size:sizeof(previousItem)];
-            if (NSIntersectsRect(itemFrame, cocoa_rect(previousItem.rect))) return false;
+            if (rects_overlap(item->rect, previousItem.rect)) return false;
         }
         row.frame = NSUnionRect(row.frame, itemFrame);
         row.area += item->rect.width * item->rect.height;
