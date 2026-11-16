@@ -30,6 +30,7 @@
 @end
 
 static NSMutableArray<WindowRecord *> *records;
+static NSArray<NSDictionary *> *inputWindowOrdering;
 static NSMutableDictionary<NSNumber *, NSValue *> *observers;
 static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 static uint64_t nextIdentity = 1;
@@ -44,10 +45,12 @@ static EventHotKeyRef hotkeyRefs[256];
 static WMBinding currentBindings[256];
 static volatile sig_atomic_t interrupted;
 void platform_error(const char *message) { fprintf(stderr, "%s\n", message ?: "unknown error"); }
-static void copyUTF8(char *destination, size_t capacity, NSString *source) {
+static bool copyUTF8(char *destination, size_t capacity, NSString *source) {
     NSUInteger used = 0;
-    [source getBytes:destination maxLength:capacity - 1 usedLength:&used encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, source.length) remainingRange:NULL];
+    NSRange remaining = NSMakeRange(0, source.length);
+    [source getBytes:destination maxLength:capacity - 1 usedLength:&used encoding:NSUTF8StringEncoding options:0 range:NSMakeRange(0, source.length) remainingRange:&remaining];
     destination[used] = 0;
+    return remaining.length == 0 && memchr(destination, 0, used) == NULL;
 }
 
 static void luaBudget(lua_State *state, lua_Debug *debug) { (void)debug; luaL_error(state, "configuration instruction budget exceeded"); }
@@ -128,6 +131,7 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
 static BOOL scanWindowSnapshot(void) {
     BOOL unmatched = NO;
     NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    inputWindowOrdering = visibleWindows;
     NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
     for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
         if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
@@ -200,7 +204,10 @@ static BOOL scanWindowSnapshot(void) {
             WMWindow observation = record.observation;
             observation.frame = frame; observation.stale = false;
             observation.onscreen = false;
+            observation.public_window_id = 0;
+            observation.hit_eligible = false;
             NSUInteger matchingAX = 0, matchingCG = 0;
+            NSUInteger matchedOrder = NSNotFound;
             for (NSValue *candidate in frames.allValues) {
                 WMRect candidateFrame; [candidate getValue:&candidateFrame];
                 if (framesNear(frame, candidateFrame, 4)) matchingAX++;
@@ -208,16 +215,30 @@ static BOOL scanWindowSnapshot(void) {
             for (NSDictionary *visibleWindow in visibleWindows) {
                 if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
                 CGRect bounds;
-                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) matchingCG++;
+                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) {
+                    matchingCG++;
+                    matchedOrder = [visibleWindows indexOfObjectIdenticalTo:visibleWindow];
+                    observation.public_window_id = [visibleWindow[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+                }
             }
             observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
+            if (!observation.onscreen) observation.public_window_id = 0;
+            observation.hit_eligible = observation.public_window_id != 0;
+            for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
+                NSDictionary *front = visibleWindows[frontIndex];
+                if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+                CGRect bounds;
+                if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) { observation.hit_eligible = false; break; }
+                CGRect tile = CGRectMake(frame.left, frame.top, frame.width, frame.height);
+                if (CGRectIntersectsRect(tile, bounds)) observation.hit_eligible = false;
+            }
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
             if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
             copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
             NSString *title = attribute(element, kAXTitleAttribute);
-            copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
+            observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
             record.observation = observation;
             [seen addObject:@(observation.identity)];
         }
@@ -254,6 +275,26 @@ static void scanWindows(void) {
         if (attempt) usleep(10000);
         if (scanWindowSnapshot()) break;
     }
+}
+
+bool platform_session_attributes(uint64_t identity, HuenSessionAttributes *output) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.stale && !record.observation.minimized && !record.observation.fullscreen) {
+        return huen_session_identify(record.element, record.observation.pid, output);
+    }
+    return false;
+}
+
+bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame) {
+    if (!window_id || !inputWindowOrdering) return false;
+    CGRect target = CGRectMake(frame.left, frame.top, frame.width, frame.height);
+    for (NSDictionary *front in inputWindowOrdering) {
+        if ([front[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == window_id) return true;
+        if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) return false;
+        if (CGRectIntersectsRect(target, bounds)) return false;
+    }
+    return false;
 }
 
 size_t platform_windows(WMWindow *output, size_t capacity) {
@@ -664,6 +705,7 @@ int platform_main(int argc, char **argv) {
             (void)timerValue;
             wm_config_poll();
             if (interrupted) platform_quit();
+            wm_input_poll();
             double now = CACurrentMediaTime();
             if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
             if (now - lastConfigCheck > 0.25) {

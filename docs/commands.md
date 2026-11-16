@@ -135,6 +135,10 @@ Existing verbs keep their grammar and reject extra arguments.
 | `status`, `windows`, `monitors`, `workspaces` | None. |
 | `reload`, `quit`, `stop`, `restore`, `recover` | None. |
 | `swap`, `move` | One direction. |
+| `tilemove` | One direction. Detaches and reparents the selected tiled subtree. |
+| `select` | `parent` or `child`. Changes logical selection without native focus. |
+| `group join` | One direction. Joins the selected subtree to a neighboring group or leaf. |
+| `group` | `tabbed`, `stacked`, `split`, `next`, or `previous`. |
 | `resize` | One finite ratio delta with absolute value at most `0.5`, or `width`/`height` and a finite point delta with absolute value at most `10000`. |
 | `split` | `horizontal`, `vertical`, or `toggle`. |
 | `fullscreen` | None. Toggles managed fullscreen without creating a macOS Space. |
@@ -146,3 +150,29 @@ Existing verbs keep their grammar and reject extra arguments.
 Flags precede their positional argument.
 Repeated flags and unknown options are invalid.
 Runtime command text is bounded by the existing 511-byte transport limit.
+
+## Container commands
+
+The parser and pure layout APIs support these commands.
+Runtime dispatch and verified native placement require integration in `main.zig`.
+The existing runtime dispatch does not yet handle the new variants.
+
+`select parent` selects the actual parent container.
+`select child` selects its remembered eligible child, or its first eligible child.
+Neither command requests application activation.
+
+`tilemove DIRECTION` changes topology instead of swapping window identities.
+The direction determines the split axis and the insertion order.
+`group join DIRECTION` appends the selection to the neighboring explicit group.
+Without a target group, it creates a tabbed group with the target first.
+Directional edits do not wrap.
+No eligible target returns `NoTileTarget`.
+
+`group tabbed` and `group stacked` convert a selected binary split or change a selected group's mode.
+A selected leaf returns `NoContainer`.
+`group split` converts a selected group to an ordered binary split chain.
+`group next` and `group previous` cycle the nearest selected ancestor group's eligible direct children.
+The pure API returns a focus candidate, not evidence of successful native focus.
+
+Container commands require dwindle and return `ContainerRequiresDwindle` in master.
+The existing floating `move`, identity `swap`, and `focus --wrap` grammar is unchanged.

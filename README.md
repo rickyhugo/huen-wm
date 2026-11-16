@@ -1,10 +1,11 @@
 # huen-wm
 
-A native macOS tiling window manager with persistent dwindle splits, master layout, Lua configuration, keyboard modes, focused-window borders, workspace snapshots, and an optional menu-bar item. Requires macOS 14 or later and Zig **exactly 0.17.0**. SIP stays enabled.
+A native macOS tiling window manager with dwindle splits, tabbed and stacked groups, master layout, Lua configuration, keyboard modes, focused-window borders, workspace snapshots, and an optional menu-bar item. Mouse tiling and session continuity are opt-in. Requires macOS 14 or later and Zig **exactly 0.17.0**. SIP stays enabled.
 
 Headless smoke checks cover configuration and CLI boundaries. Native fixture checks pass tiling, focus, movement, workspace parking and return, automatic reload, and original-frame restoration. Global hotkeys, border appearance, and scene appearance remain unverified.
 
 The [feature-completion report](docs/verification-feature-completion.md) records final workflow checks, minimized-window recovery, measured responsiveness, and remaining limits.
+The [workspace controls report](docs/workspace-controls-verification.md) records combined native acceptance of groups, mouse controls, restart continuity, and richer rules, with remaining limits.
 
 ## Build
 
@@ -52,6 +53,14 @@ huen-wm workspaces
 huen-wm focus left
 huen-wm focus --wrap right
 huen-wm swap right
+huen-wm select parent
+huen-wm select child
+huen-wm tilemove right
+huen-wm group join left
+huen-wm group tabbed
+huen-wm group stacked
+huen-wm group next
+huen-wm group split
 huen-wm move down
 huen-wm resize 0.05
 huen-wm resize width 50
@@ -70,13 +79,21 @@ Lists and command results are JSON. Workspace indices start at one. `resize` cha
 
 `resize width DELTA` and `resize height DELTA` resize the focused tile in logical points. `split` changes its nearest binary split. Managed `fullscreen` fills the visible display without creating a macOS Space and preserves the underlying layout. See [layout controls](docs/layout.md).
 
+`select parent` and `select child` change the logical container selection without moving native focus. `tilemove` reparents that selection beside a directional neighbor. `group join` combines it with a neighbor. Groups support `tabbed`, `stacked`, `split`, `next`, and `previous`. Container edits require dwindle layout.
+
 Named modes replace bindings transactionally. Application commands support bundle-ID launch, explicit shell execution, close, and conditional normal termination. See [commands and modes](docs/commands.md).
 
 The example binds Control+Option+H/J/K/L to directional focus. Names identify physical ANSI key positions, independent of the active input layout. Add Shift to swap. Control+Option+1 through 5 selects workspaces. Add Shift to send the focused window. Control+Option+Space toggles floating. Plus/minus changes the split ratio. Control+Option+R reloads.
 
 ## Configuration
 
-Lua must return a table. `config/example.lua` provides basic settings. The [AeroSpace preset](docs/aerospace.md) adds Alt shortcuts, ten workspaces, resize mode, application actions, and external-monitor preference. Each evaluation runs in a fresh child of the same executable. Invalid fields, types, commands, duplicate bindings, and hotkey collisions reject the reload. Consumed tables cannot have metatables. Collections must be dense arrays without extra keys. The previous configuration and hotkeys stay active on failure. File changes trigger reload automatically. Rules match an exact bundle ID and set `floating` or a numbered `workspace` on first discovery.
+Lua must return a table. `config/example.lua` provides basic settings. The [AeroSpace preset](docs/aerospace.md) adds Alt shortcuts, ten workspaces, resize mode, application actions, and external-monitor preference. Each evaluation runs in a fresh child of the same executable. Invalid fields, types, commands, duplicate bindings, and hotkey collisions reject the reload. Consumed tables cannot have metatables. Collections must be dense arrays without extra keys. The previous configuration and hotkeys stay active on failure. File changes trigger reload automatically.
+
+[Window rules](docs/window-rules.md) match an exact bundle ID and an optional literal or glob title. They set floating state, a numbered workspace, or floating geometry on first discovery. Later matching rules replace only the actions they specify.
+
+Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](docs/mouse-controls.md).
+
+Set `session = { enabled = true }` to save logical layout after clean original-frame restoration. A normal manager restart can restore uniquely identified windows while their applications remain open. Missing or ambiguous public identities remain unmatched. This does not restore arbitrary application relaunches or reboots. See [session continuity](docs/session.md).
 
 `status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. Its tooltip includes the monitor and full workspace name.
 
@@ -91,6 +108,8 @@ Set `enabled = false` to remove the item. A successful reload can enable it agai
 ## Workspace contract
 
 Monitors select workspaces independently by default. Optional `workspace_monitors = { "external", "built-in" }` routes all workspaces to a preferred owner. `mouse_follows_monitor = true` enables lazy pointer centering after monitor selection. Disconnected-display migration preserves workspace numbers. See [monitor routing](docs/monitors.md) for migration and rollback behavior.
+
+Returning to a workspace restores its last eligible focused window, with managed fullscreen taking priority. Closed, minimized, or unavailable windows do not receive focus.
 
 Workspaces use reversible corner parking through public Accessibility APIs. macOS requires a narrow edge of parked windows to remain visible. They do not hide applications or minimize windows into the Dock. User-minimized and native-fullscreen windows are not moved. A native fullscreen window conservatively blocks its display.
 

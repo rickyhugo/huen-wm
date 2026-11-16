@@ -1,13 +1,16 @@
 const std = @import("std");
 const native = @import("native.zig");
 const commands = @import("command.zig");
+const Rules = @import("rules.zig");
 const allocator = std.heap.c_allocator;
 const Layout = commands.Layout;
 const max_source = 256 * 1024;
 const max_response = 128 * 1024;
 
 pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55 };
-pub const Rule = struct { bundle: [256:0]u8 = @splat(0), floating: bool = false, workspace: ?usize = null };
+pub const Rule = Rules.Rule;
+pub const Session = struct { enabled: bool = false };
+pub const Mouse = struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 };
 pub const StatusLabel = enum { name, index, index_and_name };
 pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
 pub const Mode = struct {
@@ -21,6 +24,8 @@ pub const ConfigCandidate = struct {
     workspace_monitors: ?MonitorPreferences = null,
     mouse_follows_monitor: bool = false,
     status_bar: StatusBar = .{},
+    session: Session = .{},
+    mouse: Mouse = .{},
     gap: f64 = 12,
     border_width: f64 = 2,
     border_color: u32 = 0x9bafff,
@@ -120,11 +125,14 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
 const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64 };
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
-const WireRule = struct { bundle: []const u8, floating: bool, workspace: ?usize };
+const WireTitle = struct { kind: @FieldType(Rules.Title, "kind"), pattern: []const u8 };
+const WireRule = struct { bundle: []const u8, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
     status_bar: StatusBar,
+    session: Session,
+    mouse: Mouse,
     gap: f64,
     border_width: f64,
     border_color: u32,
@@ -144,7 +152,13 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
         for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| bindings[mode_index][index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
         modes[mode_index] = .{ .name = text(&mode.name), .bindings = bindings[mode_index][0..mode.binding_count] };
     }
-    for (candidate.rules[0..candidate.rule_count], 0..) |*rule, index| rules[index] = .{ .bundle = text(&rule.bundle), .floating = rule.floating, .workspace = rule.workspace };
+    for (candidate.rules[0..candidate.rule_count], 0..) |*rule, index| rules[index] = .{
+        .bundle = text(&rule.bundle),
+        .title = if (rule.title) |*title| .{ .kind = title.kind, .pattern = text(&title.pattern) } else null,
+        .floating = rule.floating,
+        .workspace = rule.workspace,
+        .geometry = rule.geometry,
+    };
     const buffer = try allocator.alloc(u8, max_response);
     defer allocator.free(buffer);
     var writer: std.Io.Writer = .fixed(buffer);
@@ -152,6 +166,8 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
         .workspace_monitors = if (candidate.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
         .mouse_follows_monitor = candidate.mouse_follows_monitor,
         .status_bar = candidate.status_bar,
+        .session = candidate.session,
+        .mouse = candidate.mouse,
         .gap = candidate.gap,
         .border_width = candidate.border_width,
         .border_color = candidate.border_color,
@@ -170,6 +186,8 @@ fn decode(response: []const u8) !ConfigCandidate {
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
     var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len };
     candidate.status_bar = wire.status_bar;
+    candidate.session = wire.session;
+    candidate.mouse = wire.mouse;
     candidate.mouse_follows_monitor = wire.mouse_follows_monitor;
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
@@ -196,6 +214,11 @@ fn decode(response: []const u8) !ConfigCandidate {
         try copyText(&candidate.rules[index].bundle, rule.bundle);
         candidate.rules[index].floating = rule.floating;
         candidate.rules[index].workspace = rule.workspace;
+        candidate.rules[index].geometry = rule.geometry;
+        if (rule.title) |title| {
+            candidate.rules[index].title = .{ .kind = title.kind };
+            try copyText(&candidate.rules[index].title.?.pattern, title.pattern);
+        }
     }
     try validate(&candidate);
     return candidate;
@@ -206,6 +229,7 @@ fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
 }
 
 fn validate(candidate: *const ConfigCandidate) !void {
+    if (candidate.mouse.modifiers == 0 or candidate.mouse.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
     if (candidate.workspace_monitors) |preferences| {
         if (preferences.count == 0 or preferences.count > 2) return error.InvalidMonitorPreferences;
         if (preferences.count == 2 and preferences.order[0] == preferences.order[1]) return error.DuplicateMonitor;
@@ -242,9 +266,22 @@ fn validate(candidate: *const ConfigCandidate) !void {
         if (mode_index != 0 and !escape_to_main) return error.ModeEscapeRequired;
     }
     if (total_bindings > 256) return error.TooManyBindings;
-    for (candidate.rules[0..candidate.rule_count]) |rule| if (rule.workspace) |workspace| {
-        if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
-    };
+    for (candidate.rules[0..candidate.rule_count]) |*rule| {
+        if (text(&rule.bundle).len == 0) return error.MissingBundle;
+        if (rule.title) |*title| {
+            if (text(&title.pattern).len == 0) return error.EmptyTitlePattern;
+        }
+        if (rule.workspace) |workspace| {
+            if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
+        }
+        if (rule.geometry) |geometry| {
+            try checkNumber(geometry.left, -10000, 10000);
+            try checkNumber(geometry.top, -10000, 10000);
+            try checkNumber(geometry.width, 80, 10000);
+            try checkNumber(geometry.height, 80, 10000);
+            if (rule.floating == false) return error.GeometryRequiresFloating;
+        }
+    }
 }
 
 pub fn workerMain(path: [*:0]const u8) u8 {
@@ -426,7 +463,21 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "session", "mouse" });
+    if (rawField(state, "session") != native.LUA_TNIL) {
+        try checkKeys(state, &.{"enabled"});
+        result.session.enabled = try fieldBool(state, "enabled", false);
+    }
+    pop(state);
+    if (rawField(state, "mouse") != native.LUA_TNIL) {
+        try checkKeys(state, &.{ "enabled", "mods" });
+        result.mouse.enabled = try fieldBool(state, "enabled", false);
+        if (try fieldString(state, "mods")) |mods| {
+            result.mouse.modifiers = try modifiers(mods);
+            if (result.mouse.modifiers == 0) return error.ModifierRequired;
+        }
+    }
+    pop(state);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
     if (rawField(state, "workspace_monitors") != native.LUA_TNIL) {
         const count = try arrayCount(state, 2);
@@ -495,10 +546,35 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         result.rule_count = try arrayCount(state, 64);
         for (0..result.rule_count) |index| {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
-            try checkKeys(state, &.{ "bundle", "floating", "workspace" });
+            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry" });
             const rule = &result.rules[index];
             try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
-            rule.floating = try fieldBool(state, "floating", false);
+            if (rawField(state, "floating") != native.LUA_TNIL) {
+                if (native.lua_type(state, -1) != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
+                rule.floating = native.lua_toboolean(state, -1) != 0;
+            }
+            pop(state);
+            if (rawField(state, "title") != native.LUA_TNIL) {
+                try checkKeys(state, &.{ "literal", "glob" });
+                const literal = try fieldString(state, "literal");
+                const glob = try fieldString(state, "glob");
+                if ((literal == null) == (glob == null)) return error.InvalidTitlePredicate;
+                rule.title = .{ .kind = if (literal != null) .literal else .glob };
+                try copyText(&rule.title.?.pattern, literal orelse glob.?);
+            }
+            pop(state);
+            if (rawField(state, "geometry") != native.LUA_TNIL) {
+                try checkKeys(state, &.{ "left", "top", "width", "height" });
+                rule.geometry = .{
+                    .left = try requiredNumber(state, "left", -10000, 10000),
+                    .top = try requiredNumber(state, "top", -10000, 10000),
+                    .width = try requiredNumber(state, "width", 80, 10000),
+                    .height = try requiredNumber(state, "height", 80, 10000),
+                };
+                if (rule.floating == false) return error.GeometryRequiresFloating;
+                rule.floating = true;
+            }
+            pop(state);
             const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
             if (@floor(workspace) != workspace) return error.InvalidWorkspace;
             if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
@@ -507,6 +583,16 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
     }
     try validate(&result);
     return result;
+}
+
+fn requiredNumber(state: *native.lua_State, key: [*:0]const u8, minimum: f64, maximum: f64) !f64 {
+    const kind = rawField(state, key);
+    defer pop(state);
+    if (kind == native.LUA_TNIL) return error.MissingGeometryField;
+    if (kind != native.LUA_TNUMBER) return error.ExpectedNumber;
+    const number = native.lua_tonumberx(state, -1, null);
+    try checkNumber(number, minimum, maximum);
+    return number;
 }
 
 fn readBindings(state: *native.lua_State, mode: *Mode) !void {

@@ -1,7 +1,7 @@
 pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const WMFrameIntent = enum(c_uint) { visible_goal = 0, verified_placement = 1 };
 pub const WMMotionState = enum(c_uint) { idle, animating, rejected };
-pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, motion: WMMotionState, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, bundle: [256]u8, title: [512]u8 };
+pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, motion: WMMotionState, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, title_complete: bool, hit_eligible: bool, public_window_id: u32, bundle: [256]u8, title: [512]u8 };
 pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8, built_in: bool };
 pub const WMPoint = extern struct { left: f64, top: f64 };
 pub extern "c" fn platform_pointer(point: *WMPoint) bool;
@@ -22,6 +22,8 @@ pub extern "c" fn platform_lua_open() ?*lua_State;
 pub extern "c" fn platform_error(message: [*:0]const u8) void;
 pub extern "c" fn platform_windows(output: [*]WMWindow, capacity: usize) usize;
 pub extern "c" fn platform_refresh_windows(output: [*]WMWindow, capacity: usize) usize;
+pub extern "c" fn platform_session_attributes(identity: u64, output: *@import("session.zig").NativeAttributes) bool;
+pub extern "c" fn platform_input_rect_unobscured(window_id: u32, frame: WMRect) bool;
 pub extern "c" fn platform_displays(output: [*]WMDisplay, capacity: usize) usize;
 pub extern "c" fn platform_frame(identity: u64, frame: WMRect, duration: f64, intent: WMFrameIntent) bool;
 pub extern "c" fn platform_read_frame(identity: u64, frame: *WMRect) bool;
