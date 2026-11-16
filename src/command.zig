@@ -58,6 +58,7 @@ pub const Command = union(enum) {
     layout: Layout,
     workspace: WorkspaceSelector,
     send_to_workspace: WorkspaceSelector,
+    move_to_workspace: WorkspaceSelector,
 };
 
 fn parseSelector(value: []const u8, workspace_count: usize) !WorkspaceSelector {
@@ -87,7 +88,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .exec_and_forget = shell };
     }
     var argument = tokens.next();
-    inline for (.{ .{ "workspace", "workspace" }, .{ "send-to-workspace", "send_to_workspace" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
+    inline for (.{ .{ "workspace", "workspace" }, .{ "send-to-workspace", "send_to_workspace" }, .{ "move-to-workspace", "move_to_workspace" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         const value = argument orelse return error.MissingArgument;
         if (std.mem.startsWith(u8, value, "name:")) {
             const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr) + "name:".len;

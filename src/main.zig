@@ -1649,6 +1649,25 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     native.platform_config_changed();
                     return json(.{ .ok = true });
                 },
+                .move_to_workspace => |selection| {
+                    const owner = preferredOwner();
+                    const destination = owner orelse windows.items[sourceIndex].display;
+                    const destination_slot = displayIndex(destination).?;
+                    const prior = currentWorkspace(destination_slot);
+                    const workspace = resolveWorkspace(selection, destination_slot) catch |err| return failure(@errorName(err));
+                    if (workspace == windows.items[sourceIndex].workspace) return json(.{ .ok = true, .changed = false });
+                    const identity = windows.items[sourceIndex].identity;
+                    generation += 1;
+                    snapshot_presentation = .instant;
+                    if (!commitRouting(.{ .owner = owner, .activate = .{ .display = destination, .workspace = workspace }, .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    workspace_owner = owner;
+                    if (owner != null) owner_workspace = workspace;
+                    routing_blocked = false;
+                    recordPrevious(destination_slot, prior, workspace);
+                    const verified = focusVerified(identity);
+                    native.platform_config_changed();
+                    return json(.{ .ok = true, .verified = verified, .target = identity });
+                },
                 .focus => |request| {
                     const target = if (request.wrap) wrappedNeighbor(sourceIndex, request.direction) else neighbor(sourceIndex, request.direction) orelse return failure("NoWindowInDirection");
                     const identity = windows.items[target].identity;

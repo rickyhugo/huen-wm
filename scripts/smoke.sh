@@ -61,6 +61,8 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { gap = string.rep('x', 100000000) }",
         "return os.execute('true')",
         "return { workspace_back_and_forth = 'yes' }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-workspace' }} }",
+        "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
         "return {",
     ):
         config.write_text(content)
@@ -77,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     config.write_text("return {bindings={{mods='alt',key='b',command='workspace 1'}},workspaces={'one'}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     selectors = ("previous", "+1", "-10", "occupied+1", "occupied-2", "empty", "next-empty", "name:web dev")
-    config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
+    config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}},{{mods='ctrl',key='{key}',command='move-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("warn('@on'); for index=1,1000 do warn(string.rep('x',512)) end; return {}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
