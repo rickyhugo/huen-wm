@@ -126,6 +126,7 @@ Minimized, native fullscreen, stale, and display-less windows are skipped.
 A target on a hidden workspace first switches its display to that workspace.
 That switch reveals and focuses the target instead of the workspace's own candidate.
 Without a candidate, `focus last` returns `NoPreviousWindow`.
+With `workspace_monitors`, a target stranded off the owner display returns `WindowOffOwnerDisplay`.
 
 `cycle next` and `cycle previous` focus through the active display's visible windows.
 `cycle next tiled` and `cycle next floating` restrict the candidates to one kind.

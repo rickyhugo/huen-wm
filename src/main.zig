@@ -1614,6 +1614,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const identity = focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow");
             const window = windows.items[windowIndex(identity).?];
             const slot = displayIndex(window.display).?;
+            if (preferredOwner()) |owner| if (window.display != owner) return failure("WindowOffOwnerDisplay");
             if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, identity);
             focusWorkspace(window.display, identity);
             return json(.{ .ok = true, .verified = focused == identity, .target = identity });
@@ -1744,7 +1745,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const owner = preferredOwner();
                     const destination = owner orelse windows.items[sourceIndex].display;
                     const workspace = resolveWorkspace(selection, displayIndex(destination).?) catch |err| return failure(@errorName(err));
-                    if (workspace == windows.items[sourceIndex].workspace) return json(.{ .ok = true, .changed = false });
+                    if (workspace == windows.items[sourceIndex].workspace and destination == windows.items[sourceIndex].display) return json(.{ .ok = true, .changed = false });
                     const activation = ownerActivation(owner);
                     if (!commitRouting(.{ .owner = owner, .activate = activation, .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     workspace_owner = owner;
@@ -1760,7 +1761,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const destination_slot = displayIndex(destination).?;
                     const prior = currentWorkspace(destination_slot);
                     const workspace = resolveWorkspace(selection, destination_slot) catch |err| return failure(@errorName(err));
-                    if (workspace == windows.items[sourceIndex].workspace) return json(.{ .ok = true, .changed = false });
+                    if (workspace == windows.items[sourceIndex].workspace and destination == windows.items[sourceIndex].display) return json(.{ .ok = true, .changed = false });
                     const identity = windows.items[sourceIndex].identity;
                     generation += 1;
                     snapshot_presentation = .instant;
