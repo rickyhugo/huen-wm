@@ -126,7 +126,8 @@ Minimized, native fullscreen, stale, and display-less windows are skipped.
 A target on a hidden workspace first switches its display to that workspace.
 That switch reveals and focuses the target instead of the workspace's own candidate.
 Without a candidate, `focus last` returns `NoPreviousWindow`.
-With `workspace_monitors`, a target stranded off the owner display returns `WindowOffOwnerDisplay`.
+With `workspace_monitors`, the target's workspace is shown on its display, and that display is selected.
+A target that routing has not moved yet is routed first.
 
 `cycle next` and `cycle previous` focus through the active display's visible windows.
 `cycle next tiled` and `cycle next floating` restrict the candidates to one kind.
@@ -149,6 +150,74 @@ Focus replies report an accepted native request separately from immediate verifi
 `verified = false` means that activation has not been observed on the target.
 The next command reads actual focus again.
 
+## Monitor focus
+
+See [monitor routing](monitors.md#modes) for the independent, owner, and global modes that these commands depend on.
+
+`focus-monitor MONITOR` selects a display and focuses its candidate window.
+The candidate is the remembered focus of the display's active workspace.
+An empty display is selected without a focus change.
+The command works with and without `workspace_monitors`.
+With `workspace_monitors`, a display that has no workspace placed on it is empty.
+
+| Selector | Target |
+| --- | --- |
+| `left`, `right`, `up`, `down` | The nearest display in that direction from the selected display. |
+| `next`, `previous` | The next or previous display in reading order. The order wraps. |
+| `built-in`, `external` | The display of that class with the lowest identity. |
+| `name:NAME` | The display whose `localizedName` is exactly `NAME`. The name runs to the end of the command and can contain spaces. |
+
+Directions compare the centers of `full_bounds`.
+A candidate must lie strictly in the direction.
+The smallest distance along the direction wins, then the smallest distance across it, then the lowest identity.
+Without a candidate, the command returns `NoMonitorInDirection`. Directions do not wrap.
+Reading order sorts display centers left to right, then top to bottom, then by identity.
+Duplicate names resolve to the lowest identity.
+An unmatched class returns `NoMatchingMonitor`. An unmatched name returns `UnknownMonitorName`.
+Configuration validates selector syntax only. Names resolve when the command runs.
+`monitors` shows each display's `name` and `uuid`.
+
+The reply contains `monitor`, `changed`, `verified`, and `focused`.
+`verified = true` means that the display is selected.
+A candidate whose focus is not confirmed leaves the selection unchanged.
+With `mouse_follows_monitor = true`, a selection change moves the pointer to the display's center if the pointer is outside it.
+
+## Monitor moves
+
+The monitor move commands take the same selectors as `focus-monitor`.
+
+`send-to-monitor MONITOR` moves the focused window to the target display's active workspace.
+Directions and cycles start at the window's display.
+The selected display does not change, and its candidate window gets focus.
+`move-to-monitor MONITOR` does the same send, then focuses the moved window and selects its display.
+Both commands work with and without `workspace_monitors`.
+Neither command changes the previous workspace.
+A target that is the window's own display replies `changed: false`.
+With `workspace_monitors`, a target display that has no workspace placed on it returns `NoWorkspaceOnMonitor`.
+In owner mode, every display except the owner is empty, so a send away from the owner returns `NoWorkspaceOnMonitor`.
+A floating window keeps the proportional position of its center inside the gapped area and stays inside that area.
+The reply contains `monitor` and `workspace`. `move-to-monitor` adds `verified` and `target`.
+
+`move-workspace-to-monitor MONITOR` moves the selected display's active workspace to the target display and shows it there.
+The workspace's runtime home becomes the target display's UUID.
+The source display then shows the previous workspace if it is placed there, else its lowest-numbered remaining workspace, else nothing.
+The selection follows the moved workspace.
+
+`swap-monitor-workspaces MONITOR` swaps the active workspaces of the selected display and the target display.
+Each workspace's home becomes the UUID of its new display.
+The selection follows the selected display's workspace to the target display.
+A target display without a placed workspace returns `NoWorkspaceOnMonitor`.
+
+Both workspace commands need `workspace_monitors` and otherwise return `RequiresGlobalWorkspaces`.
+Owner mode counts as global routing. A move or swap in owner mode splits the workspace set, so `status.workspace_owner` becomes null.
+A selected display that shows no workspace returns `NoWorkspaceOnMonitor`.
+A target that is the selected display replies `changed: false`.
+A display without a UUID returns `MonitorUuidUnavailable`.
+Both commands keep the previous workspace and reply with `monitor`, `verified`, and `focused`.
+Homes survive display disconnection and, with `session = { enabled = true }`, a clean restart.
+A reload clears the homes of workspaces that have a `monitor` field.
+See [runtime homes](monitors.md#runtime-homes), [hotplug](monitors.md#hotplug), and [session restart](monitors.md#session-restart).
+
 ## Workspace selectors
 
 `workspace`, `send-to-workspace`, and `move-to-workspace` take one selector.
@@ -168,12 +237,23 @@ Eligible windows are not minimized, native fullscreen, or stale.
 Configuration rejects a `name:` selector without a matching workspace with `UnknownWorkspaceName`.
 After a reload removes that name, the runtime command returns the same error.
 
-With `workspace_monitors`, selectors resolve against the owner display.
-Otherwise they resolve against the active display and never select another monitor.
+Without `workspace_monitors`, selectors resolve against the active display and never select another monitor.
 Each display has its own previous workspace.
-With `workspace_monitors`, one previous workspace follows the owner across migration.
 The previous workspace changes only after a switch commits.
-A reload maps it to the workspace with the same name, or drops it.
+
+With `workspace_monitors` (global mode), every workspace is on one display:
+
+- Selectors resolve against the whole workspace set. The current workspace is the selected display's active workspace.
+- If the selected display shows no workspace, the current workspace is the active workspace of the most recently selected display that shows one. If no such display exists, it is the lowest-numbered workspace that is visible on any display. In owner mode, this is the owner's active workspace. The rule applies to `+N`, `-N`, `occupied+N`, `occupied-N`, `next-empty`, and the recorded previous workspace.
+- Occupancy counts eligible windows on all displays.
+- `workspace` shows the target on its display and selects that display. A target that is already visible is not switched; its display is selected and its candidate is focused.
+- `send-to-workspace` moves the window to the target workspace's display. The selection does not change.
+- `move-to-workspace` shows the target on its display and focuses the moved window.
+- One previous workspace is shared by all displays. It is the selected display's current workspace before a `workspace`, `move-to-workspace`, or `focus last` that leaves it. A jump to a workspace that is already visible on another display also records it, but only after the jump selects that display.
+
+A reload maps the previous workspace to the workspace with the same name, or drops it.
+
+With `workspace_monitors`, `layout` and `resize RATIO` on a selected display that shows no workspace return `NoWorkspaceOnMonitor` and change no layout.
 
 `previous` without a recorded workspace returns `NoPreviousWorkspace`.
 `empty` and `next-empty` without a match return `NoEmptyWorkspace`.
@@ -183,6 +263,7 @@ Selecting the current workspace replies `changed: false` and focuses its candida
 Set `workspace_back_and_forth = true` to make an index or name selector that matches the current workspace select the previous workspace.
 This applies to all three commands.
 Without a previous workspace, the selection stays on the current workspace.
+With `workspace_monitors`, it does not apply when the selected display shows no workspace, except in owner mode.
 The option defaults to `false`.
 
 `move-to-workspace SELECTOR` sends the focused window and shows the target workspace in one placement commit.
@@ -216,6 +297,8 @@ Verbs reject extra arguments.
 | `swap` | One direction, `next`, or `previous`. |
 | `move` | One direction. |
 | `focus` | `last`, or an optional `--wrap` and one direction. |
+| `focus-monitor`, `send-to-monitor`, `move-to-monitor` | One monitor selector. |
+| `move-workspace-to-monitor`, `swap-monitor-workspaces` | One monitor selector. Need `workspace_monitors`. |
 | `cycle` | `next` or `previous`, then optionally `tiled` or `floating`. |
 | `center` | None. |
 | `move-by`, `resize-by` | Two finite point deltas, each with absolute value at most `10000`. |

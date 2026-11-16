@@ -8,6 +8,7 @@ pub const View = struct {
     current: usize,
     previous: ?usize,
     occupied: Occupancy,
+    back_and_forth: bool,
 };
 
 pub fn resolve(selection: commands.WorkspaceSelector, view: View) !usize {
@@ -34,7 +35,7 @@ pub fn cycleTarget(order: []const u64, current: ?u64, step: commands.Step) ?u64 
 }
 
 fn backAndForth(index: usize, view: View) usize {
-    if (index != view.current or !view.config.workspace_back_and_forth) return index;
+    if (index != view.current or !view.back_and_forth) return index;
     return view.previous orelse index;
 }
 

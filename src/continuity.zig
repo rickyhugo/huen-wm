@@ -67,7 +67,9 @@ fn workspaceIndex(config: *const config_module.ConfigCandidate, name: []const u8
     return null;
 }
 
-pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, scope: session.Scope) !Frozen {
+// `homes` holds each workspace's runtime home display UUID in configuration order. An empty hint
+// means configuration placement.
+pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, homes: []const [128]u8, scope: session.Scope) !Frozen {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const memory = arena.allocator();
@@ -143,12 +145,29 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
             },
         };
     }
-    const snapshot = session.Snapshot{ .version = 1, .clean = true, .scope = .{ .config = try memory.dupe(u8, scope.config), .filter = try memory.dupe(u8, scope.filter), .boot = try memory.dupe(u8, scope.boot) }, .windows = saved_windows, .nodes = nodes[0..node_count], .roots = roots[0..root_count] };
+    const saved_homes = try memory.alloc(session.Home, homes.len);
+    var home_count: usize = 0;
+    for (homes, 0..) |*home, workspace| if (text(home).len > 0) {
+        saved_homes[home_count] = .{ .workspace = try memory.dupe(u8, text(&config.workspaces[workspace].name)), .occurrence = occurrence(config, workspace), .display_hint = try memory.dupe(u8, text(home)) };
+        home_count += 1;
+    };
+    const snapshot = session.Snapshot{ .version = 1, .clean = true, .scope = .{ .config = try memory.dupe(u8, scope.config), .filter = try memory.dupe(u8, scope.filter), .boot = try memory.dupe(u8, scope.boot) }, .windows = saved_windows, .nodes = nodes[0..node_count], .roots = roots[0..root_count], .homes = saved_homes[0..home_count] };
     try session.validate(snapshot);
     return .{ .arena = arena, .snapshot = snapshot };
 }
 
-pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, owner: ?u32) !Imported {
+// Maps saved runtime homes to current workspace indices by name and occurrence. The slices borrow
+// from `snapshot`. Homes of removed workspaces are dropped.
+pub fn savedHomes(snapshot: *const session.Snapshot, config: *const config_module.ConfigCandidate) [10]?[]const u8 {
+    var result: [10]?[]const u8 = @splat(null);
+    for (snapshot.homes) |home| {
+        const workspace = workspaceIndex(config, home.workspace, home.occurrence) orelse continue;
+        result[workspace] = home.display_hint;
+    }
+    return result;
+}
+
+pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, placed: [10]?u32) !Imported {
     var saved_keys: [1024]session.StableKey = undefined;
     var current_keys: [1024]session.StableKey = undefined;
     for (snapshot.windows, 0..) |window, index| saved_keys[index] = window.key;
@@ -192,7 +211,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         const state = if (slot.*) |*state| state else continue;
         const root = snapshot.roots[index];
         const workspace = workspaceIndex(config, root.workspace, root.occurrence);
-        var display = owner;
+        var display = if (workspace) |workspace_index| placed[workspace_index] else null;
         if (display == null) for (screens) |screen| {
             if (std.mem.eql(u8, text(&screen.hint), root.display_hint) and root.display_hint.len != 0) {
                 display = screen.identity;

@@ -104,7 +104,7 @@ Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold
 
 Set `session = { enabled = true }` to save logical layout after clean original-frame restoration. A normal manager restart can restore uniquely identified windows while their applications remain open. Missing or ambiguous public identities remain unmatched. This does not restore arbitrary application relaunches or reboots. See [session continuity](docs/session.md).
 
-`status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. Its tooltip includes the monitor and full workspace name.
+`status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. With `workspace_monitors`, a monitor without a placed workspace shows `—`. Its tooltip includes the monitor and full workspace name.
 
 The menu offers all configured workspaces, **Reload configuration**, and **Quit**. Workspace actions use the active monitor, not the screen containing the menu bar. Pending transitions keep the old title and checkmark until placement completes. Workspace actions are disabled during transitions, without monitors, or after restore. Restore shows **Paused**. Switch failures appear in the tooltip and `status.transition_error`. Placement failures and rejected menu commands also write to stderr.
 
@@ -116,7 +116,7 @@ Set `enabled = false` to remove the item. A successful reload can enable it agai
 
 ## Workspace contract
 
-Monitors select workspaces independently by default. Optional `workspace_monitors = { "external", "built-in" }` routes all workspaces to a preferred owner. `mouse_follows_monitor = true` enables lazy pointer centering after monitor selection. Disconnected-display migration preserves workspace numbers. See [monitor routing](docs/monitors.md) for migration and rollback behavior.
+Monitors select workspaces independently by default. Optional `workspace_monitors = { "external", "built-in" }` routes all workspaces to a preferred owner. A workspace `monitor` field splits workspaces across displays, and `move-workspace-to-monitor` moves one at runtime. `mouse_follows_monitor = true` enables lazy pointer centering after monitor selection. Disconnected-display migration preserves workspace numbers. See [monitor routing](docs/monitors.md) for migration and rollback behavior.
 
 Returning to a workspace restores its last eligible focused window, with managed fullscreen taking priority. Set `workspace_back_and_forth = true` to make selecting the current workspace return to the previous one. Closed, minimized, or unavailable windows do not receive focus.
 

@@ -5,6 +5,7 @@ pub const max_windows = 1024;
 pub const max_nodes = 2047;
 pub const max_roots = 320;
 pub const max_edges = 2046;
+pub const max_homes = 10;
 pub const LogicalIndex = u16;
 pub const Layout = enum { dwindle, master };
 pub const Axis = enum { width, height };
@@ -88,6 +89,13 @@ pub const Root = struct {
     focused: ?LogicalIndex = null,
     fullscreen: ?LogicalIndex = null,
 };
+// A runtime workspace home set by an explicit workspace move. Checkpoints written before homes
+// existed omit the field and restore without homes.
+pub const Home = struct {
+    workspace: []const u8,
+    occurrence: LogicalIndex = 0,
+    display_hint: []const u8,
+};
 pub const Snapshot = struct {
     version: u32,
     clean: bool = false,
@@ -95,6 +103,7 @@ pub const Snapshot = struct {
     windows: []const Window,
     nodes: []const NodeShape,
     roots: []const Root,
+    homes: []const Home = &.{},
 };
 pub const Diagnostic = enum { none, ready, rejected };
 pub const Rejection = enum { storage, schema, scope, unclean };
@@ -213,7 +222,13 @@ pub fn validate(checkpoint: Snapshot) !void {
     if (checkpoint.version != 1) return error.Version;
     try validateScope(checkpoint.scope);
     if (checkpoint.windows.len > max_windows or checkpoint.nodes.len > max_nodes or
-        checkpoint.roots.len > max_roots) return error.Capacity;
+        checkpoint.roots.len > max_roots or checkpoint.homes.len > max_homes) return error.Capacity;
+    for (checkpoint.homes, 0..) |home, home_index| {
+        if (!textValid(home.workspace, 64, false) or !textValid(home.display_hint, 128, false)) return error.InvalidHome;
+        for (checkpoint.homes[0..home_index]) |previous| {
+            if (previous.occurrence == home.occurrence and std.mem.eql(u8, previous.workspace, home.workspace)) return error.DuplicateHome;
+        }
+    }
     for (checkpoint.windows) |window| {
         try validateKey(window.key);
         if (window.root >= checkpoint.roots.len or !textValid(window.display_hint, 128, true)) return error.InvalidWindow;

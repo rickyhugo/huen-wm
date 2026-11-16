@@ -7,7 +7,15 @@ const Layout = commands.Layout;
 const max_source = 256 * 1024;
 const max_response = 128 * 1024;
 
-pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55 };
+pub const WorkspaceMonitors = struct {
+    selectors: [4]commands.MonitorSelector = @splat(.{ .class = .external }),
+    count: usize = 0,
+
+    pub fn slice(self: *const WorkspaceMonitors) []const commands.MonitorSelector {
+        return self.selectors[0..@min(self.count, self.selectors.len)];
+    }
+};
+pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55, monitor: WorkspaceMonitors = .{} };
 pub const Rule = Rules.Rule;
 pub const Session = struct { enabled: bool = false };
 pub const Mouse = struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 };
@@ -128,7 +136,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
     return decode(response[0..used]);
 }
 
-const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64 };
+const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, monitor: ?[]const []const u8 };
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireTitle = struct { kind: @FieldType(Rules.Title, "kind"), pattern: []const u8 };
@@ -151,10 +159,16 @@ const WireConfig = struct {
 
 fn encode(candidate: *const ConfigCandidate) ![]u8 {
     var workspaces: [10]WireWorkspace = undefined;
+    var monitor_text: [10][4][133]u8 = undefined;
+    var monitor_slices: [10][4][]const u8 = undefined;
     var bindings: [8][128]WireBinding = undefined;
     var modes: [8]WireMode = undefined;
     var rules: [64]WireRule = undefined;
-    for (candidate.workspaces[0..candidate.workspace_count], 0..) |*workspace, index| workspaces[index] = .{ .name = text(&workspace.name), .layout = workspace.layout, .ratio = workspace.ratio };
+    for (candidate.workspaces[0..candidate.workspace_count], 0..) |*workspace, index| {
+        const selectors = workspace.monitor.slice();
+        for (selectors, 0..) |*selection, position| monitor_slices[index][position] = try monitorText(selection, &monitor_text[index][position]);
+        workspaces[index] = .{ .name = text(&workspace.name), .layout = workspace.layout, .ratio = workspace.ratio, .monitor = if (selectors.len > 0) monitor_slices[index][0..selectors.len] else null };
+    }
     for (candidate.modes[0..candidate.mode_count], 0..) |*mode, mode_index| {
         for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| bindings[mode_index][index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
         modes[mode_index] = .{ .name = text(&mode.name), .bindings = bindings[mode_index][0..mode.binding_count] };
@@ -207,6 +221,12 @@ fn decode(response: []const u8) !ConfigCandidate {
         try copyText(&candidate.workspaces[index].name, workspace.name);
         candidate.workspaces[index].layout = workspace.layout;
         candidate.workspaces[index].ratio = workspace.ratio;
+        if (workspace.monitor) |selectors| {
+            if (selectors.len == 0) return error.EmptyWorkspaceMonitors;
+            if (selectors.len > 4) return error.TooManyWorkspaceMonitors;
+            candidate.workspaces[index].monitor.count = selectors.len;
+            for (selectors, 0..) |value, position| candidate.workspaces[index].monitor.selectors[position] = try workspaceMonitor(value);
+        }
     }
     for (wire.modes, 0..) |mode, mode_index| {
         if (mode.bindings.len > 128) return error.InvalidCollectionSize;
@@ -233,6 +253,25 @@ fn decode(response: []const u8) !ConfigCandidate {
     return candidate;
 }
 
+fn monitorText(selection: *const commands.MonitorSelector, buffer: []u8) ![]const u8 {
+    return switch (selection.*) {
+        .class => |class| @tagName(class),
+        .name => |*name| std.fmt.bufPrint(buffer, "name:{s}", .{name.text()}),
+        .direction, .step => error.RelativeMonitorSelector,
+    };
+}
+
+fn workspaceMonitor(value: []const u8) !commands.MonitorSelector {
+    const selection = commands.parseMonitorSelector(value) catch |err| return switch (err) {
+        error.InvalidMonitorSelector => error.UnknownMonitor,
+        else => err,
+    };
+    return switch (selection) {
+        .class, .name => selection,
+        .direction, .step => error.RelativeMonitorSelector,
+    };
+}
+
 fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
     if (!std.math.isFinite(number) or number < minimum or number > maximum) return error.NumberOutOfRange;
 }
@@ -250,6 +289,13 @@ fn validate(candidate: *const ConfigCandidate) !void {
     for (candidate.workspaces[0..candidate.workspace_count]) |*workspace| {
         if (text(&workspace.name).len == 0) return error.EmptyWorkspaceName;
         try checkNumber(workspace.ratio, 0.1, 0.9);
+        if (workspace.monitor.count > workspace.monitor.selectors.len) return error.TooManyWorkspaceMonitors;
+        const selectors = workspace.monitor.slice();
+        if (selectors.len > 0 and candidate.workspace_monitors == null) return error.MonitorRequiresGlobalWorkspaces;
+        for (selectors, 0..) |selection, position| {
+            if (selection != .class and selection != .name) return error.RelativeMonitorSelector;
+            for (selectors[0..position]) |previous| if (std.meta.eql(previous, selection)) return error.DuplicateMonitor;
+        }
     }
     if (!std.mem.eql(u8, text(&candidate.modes[0].name), "main")) return error.MainModeRequired;
     var total_bindings: usize = 0;
@@ -529,10 +575,16 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         result.workspace_count = try arrayCount(state, 10);
         if (result.workspace_count == 0) return error.InvalidWorkspaceCount;
         for (0..result.workspace_count) |index| {
-            if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedWorkspaceName;
-            var length: usize = 0;
-            const name = native.lua_tolstring(state, -1, &length);
-            try copyText(&result.workspaces[index].name, name[0..length]);
+            const workspace = &result.workspaces[index];
+            switch (native.lua_rawgeti(state, -1, @intCast(index + 1))) {
+                native.LUA_TSTRING => try copyText(&workspace.name, luaText(state)),
+                native.LUA_TTABLE => {
+                    try checkKeys(state, &.{ "name", "monitor" });
+                    try copyText(&workspace.name, (try fieldString(state, "name")) orelse return error.ExpectedWorkspaceName);
+                    try readWorkspaceMonitors(state, &workspace.monitor);
+                },
+                else => return error.ExpectedWorkspaceName,
+            }
             pop(state);
         }
     }
@@ -607,6 +659,31 @@ fn requiredNumber(state: *native.lua_State, key: [*:0]const u8, minimum: f64, ma
     const number = native.lua_tonumberx(state, -1, null);
     try checkNumber(number, minimum, maximum);
     return number;
+}
+
+fn luaText(state: *native.lua_State) []const u8 {
+    var length: usize = 0;
+    const pointer = native.lua_tolstring(state, -1, &length);
+    return pointer[0..length];
+}
+
+fn readWorkspaceMonitors(state: *native.lua_State, target: *WorkspaceMonitors) !void {
+    const kind = rawField(state, "monitor");
+    defer pop(state);
+    if (kind == native.LUA_TNIL) return;
+    if (kind == native.LUA_TSTRING) {
+        target.selectors[0] = try workspaceMonitor(luaText(state));
+        target.count = 1;
+        return;
+    }
+    const count = arrayCount(state, target.selectors.len) catch |err| return if (err == error.InvalidCollectionSize) error.TooManyWorkspaceMonitors else err;
+    if (count == 0) return error.EmptyWorkspaceMonitors;
+    for (0..count) |index| {
+        if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedString;
+        target.selectors[index] = try workspaceMonitor(luaText(state));
+        pop(state);
+    }
+    target.count = count;
 }
 
 fn readBindings(state: *native.lua_State, mode: *Mode) !void {
