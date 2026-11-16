@@ -8,13 +8,14 @@ const pointer = @import("pointer.zig");
 const interaction = @import("interaction.zig");
 const session = @import("session.zig");
 const continuity = @import("continuity.zig");
+const selector = @import("selector.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
 const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
-const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0 };
+const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
 var layouts: tiling.Store = .{};
@@ -29,6 +30,7 @@ var selected_display: ?u32 = null;
 var last_observed_focus: ?u64 = null;
 var workspace_owner: ?u32 = null;
 var owner_workspace: usize = 0;
+var owner_previous_workspace: ?usize = null;
 var routing_blocked = false;
 var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
@@ -496,8 +498,33 @@ fn applyLayoutDefaults(candidate: *const Config) void {
         }
     };
     for (windows.items) |*window| window.workspace = remap[window.workspace] orelse @min(window.workspace, candidate.workspace_count - 1);
-    for (displays.items) |*display| display.workspace = remap[display.workspace] orelse @min(display.workspace, candidate.workspace_count - 1);
+    for (displays.items) |*display| {
+        display.workspace = remap[display.workspace] orelse @min(display.workspace, candidate.workspace_count - 1);
+        display.previous_workspace = remapPrevious(display.previous_workspace, display.workspace, &remap);
+    }
     owner_workspace = remap[owner_workspace] orelse @min(owner_workspace, candidate.workspace_count - 1);
+    owner_previous_workspace = remapPrevious(owner_previous_workspace, owner_workspace, &remap);
+}
+fn remapPrevious(previous: ?usize, current: usize, remap: []const ?usize) ?usize {
+    const next = remap[previous orelse return null] orelse return null;
+    return if (next == current) null else next;
+}
+fn previousWorkspace(display_slot: usize) *?usize {
+    return if (config.workspace_monitors != null) &owner_previous_workspace else &displays.items[display_slot].previous_workspace;
+}
+fn recordPrevious(display_slot: usize, prior: usize, workspace: usize) void {
+    if (prior != workspace) previousWorkspace(display_slot).* = prior;
+}
+fn currentWorkspace(display_slot: usize) usize {
+    if (config.workspace_monitors == null) return displays.items[display_slot].workspace;
+    if (workspace_owner) |identity| if (displayIndex(identity)) |index| return displays.items[index].workspace;
+    return @min(owner_workspace, config.workspace_count - 1);
+}
+fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) !usize {
+    var occupied: selector.Occupancy = .empty;
+    const display = displays.items[display_slot].identity;
+    for (windows.items) |window| if (externallyEligible(window) and (config.workspace_monitors != null or window.display == display)) occupied.set(window.workspace);
+    return selector.resolve(selection, .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied });
 }
 fn workspaceLayout(display: u32, workspace: usize) *tiling.WorkspaceLayout {
     const defaults = config.workspaces[workspace];
@@ -1113,7 +1140,7 @@ export fn wm_tick() void {
         if (previous) |index| {
             if (!std.meta.eql(displays.items[index].full_bounds, observation.full_bounds) or !std.meta.eql(displays.items[index].frame, observation.frame) or displays.items[index].built_in != observation.built_in) topology_changed = true;
         } else topology_changed = true;
-        updated.append(allocator, .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |index| displays.items[index].workspace else 0 }) catch {
+        updated.append(allocator, .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |index| displays.items[index].workspace else 0, .previous_workspace = if (previous) |index| displays.items[index].previous_workspace else null }) catch {
             updated.deinit(allocator);
             return;
         };
@@ -1311,6 +1338,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         return false;
     };
     defer transaction.deinit();
+    const prior = displays.items[displaySlot].workspace;
     displays.items[displaySlot].workspace = workspace;
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
@@ -1322,6 +1350,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize) bool {
         };
     }
     if (!transaction.commit()) return false;
+    recordPrevious(displaySlot, prior, workspace);
     if (workspace_owner == displayIdentity) owner_workspace = workspace;
     focusWorkspace(displayIdentity);
     transition_error = null;
@@ -1470,11 +1499,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     const display = &displays.items[displaySlot];
     switch (command) {
         .workspace => |selection| {
-            if (selection != .index) return failure("UnsupportedSelector");
-            const workspace = selection.index;
             var destination_slot = displaySlot;
-            if (config.workspace_monitors != null) {
-                const owner = preferredOwner() orelse return failure("NoWorkspaceOwner");
+            const owned = config.workspace_monitors != null;
+            if (owned) destination_slot = displayIndex(preferredOwner() orelse return failure("NoWorkspaceOwner")).?;
+            const prior = currentWorkspace(destination_slot);
+            const workspace = resolveWorkspace(selection, destination_slot) catch |err| return failure(@errorName(err));
+            if (owned) {
+                const owner = displays.items[destination_slot].identity;
                 var migration = workspace_owner != owner;
                 for (windows.items) |window| if (window.display != owner) {
                     migration = true;
@@ -1486,6 +1517,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     workspace_owner = owner;
                     owner_workspace = workspace;
                     routing_blocked = false;
+                    recordPrevious(destination_slot, prior, workspace);
                     focusWorkspace(owner);
                     native.platform_config_changed();
                     return json(.{ .ok = true });
@@ -1495,12 +1527,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     return failure(transition_error orelse "MonitorRoutingFailed");
                 }
                 routing_blocked = false;
-                destination_slot = displayIndex(owner).?;
             }
             const destination = displays.items[destination_slot];
             if (workspace == destination.workspace) {
                 focusWorkspace(destination.identity);
-                return json(.{ .ok = true });
+                return json(.{ .ok = true, .changed = false });
             }
             generation += 1;
             if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
@@ -1605,10 +1636,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     window.floating_frame = window.observation.frame;
                 },
                 .send_to_workspace => |selection| {
-                    if (selection != .index) return failure("UnsupportedSelector");
-                    const workspace = selection.index;
                     const owner = preferredOwner();
                     const destination = owner orelse windows.items[sourceIndex].display;
+                    const workspace = resolveWorkspace(selection, displayIndex(destination).?) catch |err| return failure(@errorName(err));
+                    if (workspace == windows.items[sourceIndex].workspace) return json(.{ .ok = true, .changed = false });
                     const activation = ownerActivation(owner);
                     if (!commitRouting(.{ .owner = owner, .activate = activation, .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     workspace_owner = owner;
