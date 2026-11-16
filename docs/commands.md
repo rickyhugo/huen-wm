@@ -149,6 +149,36 @@ Focus replies report an accepted native request separately from immediate verifi
 `verified = false` means that activation has not been observed on the target.
 The next command reads actual focus again.
 
+## Monitor focus
+
+`focus-monitor MONITOR` selects a display and focuses its candidate window.
+The candidate is the remembered focus of the display's active workspace.
+An empty display is selected without a focus change.
+The command works with and without `workspace_monitors`.
+With `workspace_monitors`, a display other than the owner is empty.
+
+| Selector | Target |
+| --- | --- |
+| `left`, `right`, `up`, `down` | The nearest display in that direction from the selected display. |
+| `next`, `previous` | The next or previous display in reading order. The order wraps. |
+| `built-in`, `external` | The display of that class with the lowest identity. |
+| `name:NAME` | The display whose `localizedName` is exactly `NAME`. The name runs to the end of the command and can contain spaces. |
+
+Directions compare the centers of `full_bounds`.
+A candidate must lie strictly in the direction.
+The smallest distance along the direction wins, then the smallest distance across it, then the lowest identity.
+Without a candidate, the command returns `NoMonitorInDirection`. Directions do not wrap.
+Reading order sorts display centers left to right, then top to bottom, then by identity.
+Duplicate names resolve to the lowest identity.
+An unmatched class returns `NoMatchingMonitor`. An unmatched name returns `UnknownMonitorName`.
+Configuration validates selector syntax only. Names resolve when the command runs.
+`monitors` shows each display's `name` and `uuid`.
+
+The reply contains `monitor`, `changed`, `verified`, and `focused`.
+`verified = true` means that the display is selected.
+A candidate whose focus is not confirmed leaves the selection unchanged.
+With `mouse_follows_monitor = true`, a selection change moves the pointer to the display's center if the pointer is outside it.
+
 ## Workspace selectors
 
 `workspace`, `send-to-workspace`, and `move-to-workspace` take one selector.
@@ -216,6 +246,7 @@ Verbs reject extra arguments.
 | `swap` | One direction, `next`, or `previous`. |
 | `move` | One direction. |
 | `focus` | `last`, or an optional `--wrap` and one direction. |
+| `focus-monitor` | One monitor selector. |
 | `cycle` | `next` or `previous`, then optionally `tiled` or `floating`. |
 | `center` | None. |
 | `move-by`, `resize-by` | Two finite point deltas, each with absolute value at most `10000`. |

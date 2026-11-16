@@ -35,6 +35,13 @@ pub const WorkspaceSelector = union(enum) {
     relative: struct { scope: RelativeScope, offset: i8 },
     empty: EmptySearch,
 };
+pub const MonitorClass = enum { @"built-in", external };
+pub const MonitorSelector = union(enum) {
+    direction: Direction,
+    step: Step,
+    class: MonitorClass,
+    name: Name,
+};
 pub const Launch = struct { bundle: Name, new_instance: bool = false };
 pub const Command = union(enum) {
     status,
@@ -69,6 +76,7 @@ pub const Command = union(enum) {
     workspace: WorkspaceSelector,
     send_to_workspace: WorkspaceSelector,
     move_to_workspace: WorkspaceSelector,
+    focus_monitor: MonitorSelector,
 };
 
 fn pointDelta(value: []const u8) !f64 {
@@ -94,6 +102,14 @@ fn parseSelector(value: []const u8, workspace_count: usize) !WorkspaceSelector {
     return .{ .index = index - 1 };
 }
 
+pub fn parseMonitorSelector(value: []const u8) !MonitorSelector {
+    if (std.mem.startsWith(u8, value, "name:")) return .{ .name = Name.init(value["name:".len..]) catch return error.InvalidMonitorName };
+    if (std.meta.stringToEnum(Direction, value)) |direction| return .{ .direction = direction };
+    if (std.meta.stringToEnum(Step, value)) |step| return .{ .step = step };
+    if (std.meta.stringToEnum(MonitorClass, value)) |class| return .{ .class = class };
+    return error.InvalidMonitorSelector;
+}
+
 pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (input.len > 511 or std.mem.indexOfScalar(u8, input, 0) != null or std.mem.indexOfAny(u8, input, "\r\n") != null or !std.unicode.utf8ValidateSlice(input)) return error.InvalidCommandText;
     var tokens = std.mem.tokenizeAny(u8, input, " \t");
@@ -113,6 +129,15 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (tokens.next() != null) return error.ExtraArgument;
         return @unionInit(Command, verb_tag[1], try parseSelector(value, workspace_count));
     };
+    if (std.mem.eql(u8, verb, "focus-monitor")) {
+        const value = argument orelse return error.MissingArgument;
+        if (std.mem.startsWith(u8, value, "name:")) {
+            const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr);
+            return .{ .focus_monitor = try parseMonitorSelector(std.mem.trimEnd(u8, input[start..], " \t")) };
+        }
+        if (tokens.next() != null) return error.ExtraArgument;
+        return .{ .focus_monitor = try parseMonitorSelector(value) };
+    }
     if (std.mem.eql(u8, verb, "group")) {
         const action = argument orelse return error.MissingArgument;
         if (std.mem.eql(u8, action, "join")) {

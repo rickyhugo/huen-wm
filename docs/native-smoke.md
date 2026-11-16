@@ -76,6 +76,46 @@ The run checks these behaviors in order:
 
 The workflow run does not check selectors on a second display, `workspace_monitors`, `send-to-workspace`, `cycle` kind filters, master layout, or tiled `resize-by`.
 
+## Check two-display owner routing and monitor focus
+
+`--owner` and `--monitors` replace the default checks. They need at least two displays, with at least one built-in and one external display.
+With other hardware, the driver prints `SKIP`, records `skipped` in `result.json`, and exits with code zero before preflight.
+Both use the fixture with `--spread`, a 12-point gap, instant switches, and workspaces One, Two, and Three. They exclude `--scenes` and `--workflow`.
+The driver reads and warps the pointer through public CoreGraphics calls to set a known start position.
+
+```sh
+python3 scripts/native-smoke.py \
+    --app "$HOME/Applications/Huen WM.app" \
+    --output "$PWD/native-owner-result" \
+    --owner
+```
+
+`--owner` (N1) starts with `workspace_monitors = { 'external', 'built-in' }` and `mouse_follows_monitor = false`. It checks these behaviors in order:
+
+- Every window moves to the external owner. `status.workspace_owner` is the owner, and `workspaces` lists only the owner.
+- `workspace 2` parks every window on the owner. `workspace 1` shows them and selects the owner without a pointer warp.
+- `send-to-workspace 2` parks only the sent window. The active workspace, owner, and selected monitor stay the same.
+- `workspace 2` shows and focuses the sent window. `send-to-workspace 1` returns it. `workspace 1` shows every window.
+- A reload to `{ 'built-in', 'external' }` moves every window to the built-in display. Background routing keeps the selected monitor and the pointer. `workspace 1` selects the new owner without a pointer warp.
+- A reload to `{ 'external', 'built-in' }` with mouse follow moves every window back. Background routing does not warp the pointer. `workspace 1` selects the owner and warps the pointer to its center.
+- `restore` returns the original fixture frames.
+
+`--monitors` (N3) needs `focus-monitor`. It starts in independent mode with `mouse_follows_monitor = true`:
+
+- `monitors` reports a 36-character `uuid`, `workspace = 1`, and `selected` for each display.
+- `focus-monitor` runs `built-in`, `name:` with the external display's name, `left`, `right`, `up`, `down`, `next`, `previous`, `external`, `built-in`, and `next`.
+  Before each step, the driver puts the pointer at the selected display's center.
+  The driver computes the expected display from `monitors` geometry. A direction without a display must return `NoMonitorInDirection` and keep the selection and pointer.
+  Otherwise the reply names the expected display, `status.selected_monitor` changes, the pointer moves to the new display's center, and the key window is on that display.
+- An unknown `name:` returns `UnknownMonitorName`.
+- A reload to `{ 'external', 'built-in' }` moves every window to the external owner. `monitors` reports a null `workspace` on the built-in display.
+  `focus-monitor` to the built-in display selects it and warps the pointer without a focus change.
+  `workspace 2` from the built-in display activates workspace 2 on the owner and selects the owner.
+- A reload without mouse follow repeats `built-in`, `external`, `previous`, and `next`. Selection changes, and the pointer stays.
+- `restore` returns the original fixture frames.
+
+Neither mode checks display disconnection, per-workspace monitors, or session restore.
+
 ## Prepare broader native checks
 
 The default run uses only `--spread`. For a separate controlled native run, pass these arguments directly to the fixture executable.

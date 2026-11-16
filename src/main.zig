@@ -10,6 +10,7 @@ const session = @import("session.zig");
 const continuity = @import("continuity.zig");
 const selector = @import("selector.zig");
 const history = @import("history.zig");
+const monitor = @import("monitor.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -592,6 +593,12 @@ fn selectDisplay(identity: u32) void {
     if (!native.platform_pointer(&point)) return;
     if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
     if (!native.platform_warp_pointer(.{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 })) native.platform_error("Mouse warp failed");
+}
+
+fn monitorScreens(output: []monitor.Screen) []monitor.Screen {
+    const count = @min(output.len, displays.items.len);
+    for (displays.items[0..count], output[0..count]) |*display, *screen| screen.* = .{ .identity = display.identity, .full_bounds = display.full_bounds, .built_in = display.built_in, .name = text(&display.name) };
+    return output[0..count];
 }
 
 fn preferredOwner() ?u32 {
@@ -1503,10 +1510,17 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(items.items);
         },
         .monitors => {
-            const Item = struct { id: u32, name: []const u8, frame: Rect, full_bounds: Rect, built_in: bool, workspace: usize, blocked_by_fullscreen: bool };
+            const Item = struct { id: u32, uuid: ?[]const u8, name: []const u8, frame: Rect, full_bounds: Rect, built_in: bool, workspace: ?usize, selected: bool, blocked_by_fullscreen: bool };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
-            for (displays.items) |*display| items.append(allocator, .{ .id = display.identity, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = display.workspace + 1, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
+            var uuids: [monitor.capacity][64]u8 = undefined;
+            const count = @min(displays.items.len, uuids.len);
+            for (displays.items[0..count], uuids[0..count]) |*display, *uuid| {
+                uuid.* = @splat(0);
+                const known = session.huen_session_display_uuid(display.identity, uuid, uuid.len);
+                const placed = config.workspace_monitors == null or workspace_owner == display.identity;
+                items.append(allocator, .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) display.workspace + 1 else null, .selected = selected_display == display.identity, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
+            }
             return json(items.items);
         },
         .workspaces => {
@@ -1603,6 +1617,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 routing_blocked = false;
             }
             return switchWorkspace(destination_slot, workspace, null);
+        },
+        .focus_monitor => |selection| {
+            var screens: [monitor.capacity]monitor.Screen = undefined;
+            const target = monitor.resolve(selection, monitorScreens(&screens), display.identity) catch |err| return failure(@errorName(err));
+            const changed = selected_display != target;
+            focusWorkspace(target, null);
+            return json(.{ .ok = true, .accepted = true, .changed = changed, .monitor = target, .verified = selected_display == target, .focused = focused });
         },
         .cycle => |request| {
             var identities: [1024]u64 = undefined;

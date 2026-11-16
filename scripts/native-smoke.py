@@ -2,6 +2,7 @@
 """Check native fixture observations against the installed manager's CLI."""
 
 import argparse
+import ctypes
 import itertools
 import json
 import os
@@ -72,6 +73,90 @@ def key_title(report):
     )
 
 
+GRAPHICS = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+FOUNDATION = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+
+
+class Skipped(Exception):
+    pass
+
+
+class GraphicsPoint(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_double), ("top", ctypes.c_double)]
+
+
+def graphics():
+    library = ctypes.CDLL(GRAPHICS)
+    library.CGEventCreate.restype = ctypes.c_void_p
+    library.CGEventCreate.argtypes = [ctypes.c_void_p]
+    library.CGEventGetLocation.restype = GraphicsPoint
+    library.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+    library.CGWarpMouseCursorPosition.restype = ctypes.c_int32
+    library.CGWarpMouseCursorPosition.argtypes = [GraphicsPoint]
+    library.CGGetActiveDisplayList.restype = ctypes.c_int32
+    library.CGGetActiveDisplayList.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    library.CGDisplayIsBuiltin.restype = ctypes.c_bool
+    library.CGDisplayIsBuiltin.argtypes = [ctypes.c_uint32]
+    return library
+
+
+def active_displays():
+    library = graphics()
+    identities = (ctypes.c_uint32 * 32)()
+    count = ctypes.c_uint32(0)
+    if library.CGGetActiveDisplayList(32, identities, ctypes.byref(count)):
+        raise RuntimeError("Cannot list active displays")
+    return [
+        {
+            "id": identities[index],
+            "built_in": library.CGDisplayIsBuiltin(identities[index]),
+        }
+        for index in range(count.value)
+    ]
+
+
+def pointer_location():
+    library = graphics()
+    foundation = ctypes.CDLL(FOUNDATION)
+    foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    event = library.CGEventCreate(None)
+    if not event:
+        raise RuntimeError("Cannot read the pointer location")
+    location = library.CGEventGetLocation(event)
+    foundation.CFRelease(event)
+    return {"left": location.left, "top": location.top}
+
+
+def warp_pointer(point):
+    if graphics().CGWarpMouseCursorPosition(GraphicsPoint(point["left"], point["top"])):
+        raise RuntimeError(f"Cannot warp the pointer to {point}")
+
+
+def center(bounds):
+    return {
+        "left": bounds["left"] + bounds["width"] / 2,
+        "top": bounds["top"] + bounds["height"] / 2,
+    }
+
+
+def inside(bounds, point):
+    return (
+        bounds["left"] <= point["left"] < bounds["left"] + bounds["width"]
+        and bounds["top"] <= point["top"] < bounds["top"] + bounds["height"]
+    )
+
+
+def near(first, second, tolerance=2):
+    return (
+        abs(first["left"] - second["left"]) <= tolerance
+        and abs(first["top"] - second["top"]) <= tolerance
+    )
+
+
 def process_ids(name):
     result = subprocess.run(
         ["pgrep", "-x", name], capture_output=True, text=True, check=False
@@ -97,6 +182,8 @@ class NativeSmoke:
             "cleanup_errors": [],
             "scenes": arguments.scenes,
             "workflow": arguments.workflow,
+            "owner": arguments.owner,
+            "monitors": arguments.monitors,
         }
         self.fixture_pid = None
         self.manager_started = False
@@ -105,6 +192,9 @@ class NativeSmoke:
         self.display = None
         self.screen = None
         self.identities = {}
+        self.monitors = {}
+        self.built_in = None
+        self.external = None
 
     def run_command(self, command, required=True):
         completed = subprocess.run(
@@ -999,6 +1089,488 @@ class NativeSmoke:
         )
         self.result["passed"] = True
 
+    def write_config(self, content):
+        replacement = self.config_path.with_suffix(".pending")
+        replacement.write_text(content)
+        replacement.replace(self.config_path)
+
+    def monitor_config(self, owners, follows):
+        routing = (
+            ""
+            if owners is None
+            else "workspace_monitors={"
+            + ",".join(f"'{owner}'" for owner in owners)
+            + "}, "
+        )
+        follow = "true" if follows else "false"
+        self.write_config(
+            f"return {{gap={WORKFLOW_GAP}, motion_duration=0, "
+            f"workspaces={{'One','Two','Three'}}, {routing}"
+            f"mouse_follows_monitor={follow}, bindings={{}}}}\n"
+        )
+
+    def reload_monitors(self, name, owners, follows):
+        before = self.cli("status")["config_reload"]["request_id"]
+        self.monitor_config(owners, follows)
+        self.wait(
+            name,
+            lambda: self.cli("status")["config_reload"],
+            lambda reload: reload["request_id"] > before and reload["state"] == "ready",
+        )
+
+    def start_multi_display(self, owners, follows):
+        found = active_displays()
+        self.result["active_displays"] = found
+        if (
+            len(found) < 2
+            or all(item["built_in"] for item in found)
+            or not any(item["built_in"] for item in found)
+        ):
+            raise Skipped(
+                "Needs at least two displays, one built-in and one external; "
+                f"found {found}"
+            )
+        self.preflight()
+        self.launch_fixture("--spread")
+        original = self.wait(
+            "fixture ready",
+            self.fixture,
+            lambda report: (
+                report.get("ready")
+                and len(report["windows"]) == 3
+                and key_title(report) is not None
+            ),
+            healthy=False,
+        )
+        self.fixture_pid = original["process_id"]
+        self.monitor_config(owners, follows)
+        self.start_manager()
+        managed = self.wait(
+            "fixture-only management",
+            lambda: self.cli("windows"),
+            lambda windows: (
+                len(windows) == 3
+                and all(window["pid"] == self.fixture_pid for window in windows)
+            ),
+        )
+        self.identities = {window["title"]: window["id"] for window in managed}
+        listing = self.cli("monitors")
+        self.result["snapshots"]["monitors"] = listing
+        self.monitors = {monitor["id"]: monitor for monitor in listing}
+        built_in = [
+            identity for identity, item in self.monitors.items() if item["built_in"]
+        ]
+        external = [
+            identity for identity, item in self.monitors.items() if not item["built_in"]
+        ]
+        if not built_in or not external:
+            raise RuntimeError(
+                f"Manager monitors lack a built-in or external display: {listing}"
+            )
+        self.built_in = min(built_in)
+        self.external = min(external)
+        return frames(original)
+
+    def restored(self, original_frames):
+        self.cli("restore")
+        self.wait(
+            "restore original native frames before stop",
+            self.fixture,
+            lambda report: (
+                set(frames(report)) == set(original_frames)
+                and all(
+                    close_frame(frame, original_frames[title], 5)
+                    for title, frame in frames(report).items()
+                )
+            ),
+        )
+
+    def observe_routing(self):
+        return {
+            "status": self.cli("status"),
+            "windows": self.cli("windows"),
+            "workspaces": self.cli("workspaces"),
+            "report": self.fixture(),
+            "pointer": pointer_location(),
+        }
+
+    def routes(self, observation, owner, active, shown, memberships):
+        report = observation["report"]
+        if not report or observation["status"].get("workspace_owner") != owner:
+            return False
+        listing = observation["workspaces"]
+        if not listing or any(item["display"] != owner for item in listing):
+            return False
+        if [item["index"] for item in listing if item["active"]] != [active]:
+            return False
+        managed = {window["title"]: window for window in observation["windows"]}
+        observed = frames(report)
+        if set(managed) != set(self.identities) or set(observed) != set(
+            self.identities
+        ):
+            return False
+        area = self.monitors[owner]["frame"]
+        for title, window in managed.items():
+            if window["display"] != owner:
+                return False
+            if window["workspace"] != memberships.get(title, active):
+                return False
+            if title in shown:
+                if window["parked"] or not contains(
+                    area, observed[title], WORKFLOW_GAP
+                ):
+                    return False
+            elif not window["parked"] or overlaps(area, observed[title]):
+                return False
+        return not any(
+            overlaps(observed[first], observed[second])
+            for first, second in itertools.combinations(sorted(shown), 2)
+        )
+
+    def routed(self, name, owner, active, shown, memberships=None):
+        return self.wait(
+            name,
+            self.observe_routing,
+            lambda observation: self.routes(
+                observation, owner, active, shown, memberships or {}
+            ),
+        )
+
+    def place_pointer(self, display):
+        target = center(self.monitors[display]["full_bounds"])
+        warp_pointer(target)
+        self.wait(
+            f"pointer placed on display {display}",
+            pointer_location,
+            lambda point: near(point, target),
+        )
+        return target
+
+    def selected(self, name, display, pointer=None):
+        return self.wait(
+            name,
+            lambda: {"status": self.cli("status"), "pointer": pointer_location()},
+            lambda observation: (
+                observation["status"].get("selected_monitor") == display
+                and (pointer is None or self.pointer_rests(observation["pointer"], pointer))
+            ),
+        )
+
+    def pointer_rests(self, observed, expected):
+        # A warp lands on a display center; manual pointer drift stays on the expected display.
+        if near(observed, expected):
+            return True
+        home = self.display_at(expected)
+        return (
+            home is not None
+            and self.display_at(observed) == home
+            and not any(
+                near(observed, center(monitor["full_bounds"]))
+                for monitor in self.monitors.values()
+            )
+        )
+
+    def display_at(self, point):
+        for identity, monitor in self.monitors.items():
+            bounds = monitor["full_bounds"]
+            if (
+                bounds["left"] <= point["left"] < bounds["left"] + bounds["width"]
+                and bounds["top"] <= point["top"] < bounds["top"] + bounds["height"]
+            ):
+                return identity
+        return None
+
+    def exercise_owner(self):
+        original_frames = self.start_multi_display(("external", "built-in"), False)
+        owner = self.external
+        other = self.built_in
+        everyone = set(self.identities)
+        self.result["owner_displays"] = {"external": owner, "built_in": other}
+        resting = self.place_pointer(other)
+        self.routed(
+            "owner mode migrates every window to the external owner", owner, 1, everyone
+        )
+        self.cli("workspace", "2")
+        self.routed(
+            "workspace 2 parks every window on the owner",
+            owner,
+            2,
+            set(),
+            {title: 1 for title in everyone},
+        )
+        self.cli("workspace", "1")
+        self.routed("workspace 1 shows every window on the owner", owner, 1, everyone)
+        self.selected(
+            "workspace 1 selects the owner without a pointer warp", owner, resting
+        )
+        sent = key_title(
+            self.wait(
+                "workspace 1 focuses a fixture window",
+                self.fixture,
+                lambda report: key_title(report) in everyone,
+            )
+        )
+        before = self.cli("status")
+        self.reply(
+            "send-to-workspace 2 is accepted",
+            ("send-to-workspace", "2"),
+            lambda response: response.get("ok") is True,
+        )
+        after = self.routed(
+            "send-to-workspace 2 parks only the sent window and keeps workspace 1",
+            owner,
+            1,
+            everyone - {sent},
+            {sent: 2},
+        )
+        self.check(
+            "send-to-workspace keeps the owner and selected monitor",
+            after["status"]["workspace_owner"] == owner
+            and after["status"]["selected_monitor"] == before["selected_monitor"],
+            {"before": before, "after": after["status"]},
+        )
+        self.cli("workspace", "2")
+        self.routed(
+            "workspace 2 shows the sent window",
+            owner,
+            2,
+            {sent},
+            {title: 1 for title in everyone - {sent}},
+        )
+        self.wait(
+            "workspace 2 focuses the sent window",
+            self.fixture,
+            lambda report: key_title(report) == sent,
+        )
+        self.reply(
+            "send-to-workspace 1 is accepted",
+            ("send-to-workspace", "1"),
+            lambda response: response.get("ok") is True,
+        )
+        self.routed(
+            "send-to-workspace 1 returns the window and leaves workspace 2 empty",
+            owner,
+            2,
+            set(),
+            {title: 1 for title in everyone},
+        )
+        self.cli("workspace", "1")
+        self.routed("workspace 1 shows every window again", owner, 1, everyone)
+
+        resting = self.place_pointer(owner)
+        self.reload_monitors(
+            "reload makes the built-in display the owner",
+            ("built-in", "external"),
+            False,
+        )
+        self.routed(
+            "owner change migrates every window to built-in", other, 1, everyone
+        )
+        self.selected("background routing keeps the selected monitor", owner, resting)
+        self.cli("workspace", "1")
+        self.selected(
+            "workspace 1 selects the new owner without a pointer warp", other, resting
+        )
+
+        resting = self.place_pointer(other)
+        self.reload_monitors(
+            "reload restores the external owner with mouse follow",
+            ("external", "built-in"),
+            True,
+        )
+        self.routed(
+            "owner change migrates every window back to external", owner, 1, everyone
+        )
+        self.selected("background routing does not warp the pointer", other, resting)
+        self.cli("workspace", "1")
+        self.selected(
+            "workspace 1 selects the owner and warps the pointer",
+            owner,
+            center(self.monitors[owner]["full_bounds"]),
+        )
+        self.restored(original_frames)
+        self.result["passed"] = True
+
+    def expected_monitor(self, selector, current):
+        screens = list(self.monitors.values())
+        if selector in ("left", "right", "up", "down"):
+            source = center(self.monitors[current]["full_bounds"])
+            best = None
+            for screen in screens:
+                if screen["id"] == current:
+                    continue
+                target = center(screen["full_bounds"])
+                horizontal = target["left"] - source["left"]
+                vertical = target["top"] - source["top"]
+                primary = {
+                    "left": -horizontal,
+                    "right": horizontal,
+                    "up": -vertical,
+                    "down": vertical,
+                }[selector]
+                if primary <= 0:
+                    continue
+                perpendicular = abs(
+                    vertical if selector in ("left", "right") else horizontal
+                )
+                candidate = (primary, perpendicular, screen["id"])
+                if best is None or candidate < best:
+                    best = candidate
+            return None if best is None else best[2]
+        if selector in ("next", "previous"):
+            order = [
+                screen["id"]
+                for screen in sorted(
+                    screens,
+                    key=lambda screen: (
+                        center(screen["full_bounds"])["left"],
+                        center(screen["full_bounds"])["top"],
+                        screen["id"],
+                    ),
+                )
+            ]
+            step = 1 if selector == "next" else -1
+            return order[(order.index(current) + step) % len(order)]
+        if selector in ("built-in", "external"):
+            return min(
+                screen["id"]
+                for screen in screens
+                if screen["built_in"] == (selector == "built-in")
+            )
+        name = selector.removeprefix("name:")
+        return min(screen["id"] for screen in screens if screen["name"] == name)
+
+    def titles_on(self, display):
+        return {
+            window["title"]
+            for window in self.cli("windows")
+            if window["display"] == display and not window["parked"]
+        }
+
+    def focus_monitor(self, label, selector, follows):
+        current = self.cli("status")["selected_monitor"]
+        resting = self.place_pointer(current)
+        before_key = key_title(self.fixture())
+        expected = self.expected_monitor(selector, current)
+        name = f"{label}: focus-monitor {selector}"
+        if expected is None:
+            self.rejected(name, ("focus-monitor", selector), "NoMonitorInDirection")
+            self.selected(f"{name} keeps selection and pointer", current, resting)
+            return current
+        self.reply(
+            name,
+            ("focus-monitor", selector),
+            lambda response: (
+                response.get("ok") is True
+                and response.get("monitor") == expected
+                and response.get("changed") == (expected != current)
+            ),
+        )
+        target = (
+            center(self.monitors[expected]["full_bounds"])
+            if follows and expected != current
+            else resting
+        )
+        self.selected(
+            f"{name} selects {expected} with pointer {target}", expected, target
+        )
+        candidates = self.titles_on(expected) or {before_key}
+        self.wait(
+            f"{name} key window",
+            self.fixture,
+            lambda report: key_title(report) in candidates,
+        )
+        return expected
+
+    def monitor_listing(self, name, workspaces):
+        listing = self.cli("monitors")
+        self.result["snapshots"][name] = listing
+        status = self.cli("status")
+        self.check(
+            name,
+            isinstance(listing, list)
+            and {item["id"] for item in listing} == set(self.monitors)
+            and all(
+                isinstance(item.get("uuid"), str)
+                and len(item["uuid"]) == 36
+                and item.get("workspace") == workspaces[item["id"]]
+                and item.get("selected") == (item["id"] == status["selected_monitor"])
+                for item in listing
+            ),
+            {"monitors": listing, "selected_monitor": status["selected_monitor"]},
+        )
+
+    def exercise_monitors(self):
+        original_frames = self.start_multi_display(None, True)
+        everyone = set(self.identities)
+        self.wait(
+            "independent mode keeps windows on both displays",
+            lambda: self.cli("windows"),
+            lambda windows: (
+                {window["display"] for window in windows}
+                == {self.built_in, self.external}
+                and not any(window["parked"] for window in windows)
+            ),
+        )
+        self.monitor_listing(
+            "monitors reports uuid, workspace, and selection",
+            {identity: 1 for identity in self.monitors},
+        )
+        external_name = self.monitors[self.external]["name"]
+        for selector in (
+            "built-in",
+            f"name:{external_name}",
+            "left",
+            "right",
+            "up",
+            "down",
+            "next",
+            "previous",
+            "external",
+            "built-in",
+            "next",
+        ):
+            self.focus_monitor("independent", selector, True)
+        self.rejected(
+            "focus-monitor name:Missing is unknown",
+            ("focus-monitor", "name:Huen Missing Monitor"),
+            "UnknownMonitorName",
+        )
+
+        self.reload_monitors(
+            "reload enables the external owner", ("external", "built-in"), True
+        )
+        self.routed(
+            "owner mode migrates every window to external", self.external, 1, everyone
+        )
+        self.focus_monitor("owner", "external", True)
+        self.monitor_listing(
+            "owner monitors list only the owner workspace",
+            {self.external: 1, self.built_in: None},
+        )
+        self.focus_monitor("owner", "built-in", True)
+        self.focus_monitor("owner", f"name:{external_name}", True)
+        self.focus_monitor("owner", "next", True)
+        self.cli("workspace", "2")
+        self.routed(
+            "owner workspace 2 from built-in activates on external",
+            self.external,
+            2,
+            set(),
+            {title: 1 for title in everyone},
+        )
+        self.selected("owner workspace 2 selects external", self.external)
+        self.cli("workspace", "1")
+        self.routed("owner workspace 1 shows every window", self.external, 1, everyone)
+
+        self.reload_monitors(
+            "reload disables mouse follow", ("external", "built-in"), False
+        )
+        for selector in ("built-in", "external", "previous", "next"):
+            self.focus_monitor("owner without mouse follow", selector, False)
+        self.restored(original_frames)
+        self.result["passed"] = True
+
     def titles_by_identity(self):
         return {identity: title for title, identity in self.identities.items()}
 
@@ -1102,17 +1674,40 @@ def main():
         action="store_true",
         help="Check keyboard workflow commands on one display instead",
     )
+    parser.add_argument(
+        "--owner",
+        action="store_true",
+        help="Check workspace_monitors owner routing on two displays instead",
+    )
+    parser.add_argument(
+        "--monitors",
+        action="store_true",
+        help="Check focus-monitor selectors on two displays instead",
+    )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
-    if arguments.workflow and arguments.scenes:
-        parser.error("--workflow uses instant switches and excludes --scenes")
+    if sum((arguments.workflow, arguments.owner, arguments.monitors)) > 1:
+        parser.error("--workflow, --owner, and --monitors are exclusive")
+    if arguments.scenes and (
+        arguments.workflow or arguments.owner or arguments.monitors
+    ):
+        parser.error(
+            "--workflow, --owner, and --monitors use instant switches and exclude --scenes"
+        )
     smoke = NativeSmoke(arguments)
     try:
         if arguments.workflow:
             smoke.exercise_workflow()
+        elif arguments.owner:
+            smoke.exercise_owner()
+        elif arguments.monitors:
+            smoke.exercise_monitors()
         else:
             smoke.exercise()
+    except Skipped as reason:
+        smoke.result["skipped"] = str(reason)
+        print(f"SKIP {reason}", flush=True)
     except Exception as error:
         smoke.result["failure"] = str(error)
         smoke.result["traceback"] = traceback.format_exc()
@@ -1126,6 +1721,8 @@ def main():
             json.dumps(smoke.result, indent=2) + "\n"
         )
     print(f"Results: {smoke.output / 'result.json'}")
+    if smoke.result.get("skipped") and not smoke.result["cleanup_errors"]:
+        return 0
     return 0 if smoke.result["passed"] else 1
 
 

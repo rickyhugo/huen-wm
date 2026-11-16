@@ -40,7 +40,9 @@ Routing fails closed when required geometry is unreadable, a window is stale, a 
 
 A valid reload publishes its configuration and resets the binding mode to `main` even if routing fails. The failure is a runtime routing error, not a configuration rejection. `routing_blocked` prevents normal reconciliation while the runtime retries routing.
 
-`status` includes `selected_monitor`, `workspace_owner`, and `routing_blocked`. `monitors` includes `built_in`. With global routing enabled, `workspaces` lists each workspace only under its committed owner. Existing per-window placement errors and the status `transition_error` describe failures.
+`status` includes `selected_monitor`, `workspace_owner`, and `routing_blocked`. `monitors` includes `built_in`, `uuid`, `workspace`, and `selected`. `uuid` is the CoreGraphics display UUID, or null when unavailable. `workspace` is the display's active workspace number. With global routing enabled, it is null on displays other than the owner.
+
+`focus-monitor MONITOR` selects a display in both modes. See [commands](commands.md#monitor-focus). With global routing enabled, a display other than the owner is empty, so the command selects it without a focus change. `workspace N` still activates N on the owner and selects the owner. With global routing enabled, `workspaces` lists each workspace only under its committed owner. Existing per-window placement errors and the status `transition_error` describe failures.
 
 ## Layout integration and verification limits
 

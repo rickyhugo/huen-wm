@@ -21,7 +21,7 @@ def invoke(*arguments, success=True):
     return completed
 
 help_text = invoke("--help").stdout
-assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by"))
+assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor"))
 doctor = json.loads(invoke("doctor").stdout)
 assert doctor["zig"] == "0.17.0" and not doctor["permission_prompted"]
 assert not doctor["screen_capture_required_for_tiling"]
@@ -76,6 +76,12 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { bindings = {{ mods='alt', key='h', command='resize-by 0 20 20' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus --wrap last' }} }",
         "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor builtin' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor name:' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor left 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus-monitor 2' }} }",
         "return {",
     ):
         config.write_text(content)
@@ -95,6 +101,9 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     selectors = ("previous", "+1", "-10", "occupied+1", "occupied-2", "empty", "next-empty", "name:web dev")
     config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}},{{mods='ctrl',key='{key}',command='move-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    monitor_selectors = ("left", "right", "up", "down", "next", "previous", "built-in", "external", "name:DELL U2725QE")
+    config.write_text("return {bindings={" + ",".join(f"{{mods='alt',key='{key}',command='focus-monitor {selector}'}}" for key, selector in zip("asdfghjkl", monitor_selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("warn('@on'); for index=1,1000 do warn(string.rep('x',512)) end; return {}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
