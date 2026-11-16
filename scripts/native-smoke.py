@@ -50,6 +50,18 @@ def overlaps(first, second, tolerance=3):
     )
 
 
+WORKFLOW_GAP = 12
+
+
+def inset(bounds, amount):
+    return {
+        "left": bounds["left"] + amount,
+        "top": bounds["top"] + amount,
+        "width": bounds["width"] - 2 * amount,
+        "height": bounds["height"] - 2 * amount,
+    }
+
+
 def frames(report):
     return {window["title"]: window["frame"] for window in report["windows"]}
 
@@ -84,11 +96,15 @@ class NativeSmoke:
             "snapshots": {},
             "cleanup_errors": [],
             "scenes": arguments.scenes,
+            "workflow": arguments.workflow,
         }
         self.fixture_pid = None
         self.manager_started = False
         self.aerospace_changed = False
         self.aerospace = shutil.which("aerospace")
+        self.display = None
+        self.screen = None
+        self.identities = {}
 
     def run_command(self, command, required=True):
         completed = subprocess.run(
@@ -294,7 +310,7 @@ class NativeSmoke:
             for item in evidence.values()
         )
 
-    def exercise(self):
+    def preflight(self):
         if process_ids("huen-wm") or process_ids("HuenFixture"):
             raise RuntimeError(
                 "Refusing to run while huen-wm or HuenFixture already exists"
@@ -339,14 +355,40 @@ class NativeSmoke:
                 )
                 if ready.stdout.strip() != "huen-smoke-ready":
                     raise RuntimeError("Cannot confirm AeroSpace CLI connection")
+
+    def launch_fixture(self, *arguments):
         self.launch(
             self.arguments.fixture,
             "fixture",
             "--report",
             self.report_path,
-            "--spread",
+            *arguments,
             foreground=True,
         )
+
+    def start_manager(self):
+        self.launch(
+            self.arguments.app,
+            "manager",
+            "start",
+            "--app",
+            "dev.huen-wm.fixture",
+            "--config",
+            self.config_path,
+        )
+        self.manager_started = True
+        self.wait(
+            "filtered manager ready",
+            lambda: self.cli("status", required=False),
+            lambda status: (
+                status.get("running") and status.get("filter") == "dev.huen-wm.fixture"
+            ),
+            healthy=False,
+        )
+
+    def exercise(self):
+        self.preflight()
+        self.launch_fixture("--spread")
         original = self.wait(
             "fixture ready",
             self.fixture,
@@ -368,24 +410,7 @@ class NativeSmoke:
             for title, frame in original_frames.items()
         }
         self.config(12)
-        self.launch(
-            self.arguments.app,
-            "manager",
-            "start",
-            "--app",
-            "dev.huen-wm.fixture",
-            "--config",
-            self.config_path,
-        )
-        self.manager_started = True
-        self.wait(
-            "filtered manager ready",
-            lambda: self.cli("status", required=False),
-            lambda status: (
-                status.get("running") and status.get("filter") == "dev.huen-wm.fixture"
-            ),
-            healthy=False,
-        )
+        self.start_manager()
         self.wait(
             "fixture-only management",
             lambda: self.cli("windows"),
@@ -589,6 +614,394 @@ class NativeSmoke:
         )
         self.result["passed"] = True
 
+    def workflow_config(self):
+        replacement = self.config_path.with_suffix(".pending")
+        replacement.write_text(
+            f"return {{gap={WORKFLOW_GAP}, motion_duration=0, "
+            "workspaces={'One','Two','Three'}, workspace_back_and_forth=true, "
+            "bindings={}}\n"
+        )
+        replacement.replace(self.config_path)
+
+    def check(self, name, passed, evidence):
+        self.result["checks"].append(
+            {"name": name, "passed": passed, "evidence": evidence}
+        )
+        if not passed:
+            raise RuntimeError(f"Check failed: {name}; evidence: {evidence}")
+        print(f"PASS {name}", flush=True)
+
+    def reply(self, name, arguments, predicate):
+        response = self.cli(*arguments, required=False)
+        self.check(
+            name,
+            isinstance(response, dict) and predicate(response),
+            {"argv": list(arguments), "reply": response},
+        )
+        return response
+
+    def rejected(self, name, arguments, error_name):
+        return self.reply(
+            name,
+            arguments,
+            lambda response: (
+                response.get("error") is True
+                and response.get("err_message") == error_name
+            ),
+        )
+
+    def targets(self, name, arguments, title):
+        return self.reply(
+            name,
+            arguments,
+            lambda response: (
+                response.get("ok") is True
+                and response.get("target") == self.identities[title]
+            ),
+        )
+
+    def observe(self):
+        listing = self.cli("workspaces")
+        return {
+            "report": self.fixture(),
+            "windows": self.cli("windows"),
+            "active": next(
+                (
+                    item["index"]
+                    for item in listing
+                    if item["display"] == self.display and item["active"]
+                ),
+                None,
+            ),
+        }
+
+    def parked(self, frame):
+        contact = min(
+            self.screen["left"] + self.screen["width"],
+            frame["left"] + frame["width"],
+        ) - max(self.screen["left"], frame["left"])
+        return contact <= 3
+
+    def shows(self, observation, workspace, titles, key):
+        report = observation["report"]
+        if not report or observation["active"] != workspace:
+            return False
+        observed = frames(report)
+        managed = {window["title"]: window for window in observation["windows"]}
+        if set(observed) != set(self.identities) or set(managed) != set(
+            self.identities
+        ):
+            return False
+        for title in self.identities:
+            window = managed[title]
+            if title in titles:
+                if (
+                    window["workspace"] != workspace
+                    or window["parked"]
+                    or not contains(self.screen, observed[title], WORKFLOW_GAP)
+                ):
+                    return False
+            elif not window["parked"] or not self.parked(observed[title]):
+                return False
+        return key is None or key_title(report) == key
+
+    def view(self, name, workspace, titles, key=None):
+        return self.wait(
+            name,
+            self.observe,
+            lambda observation: self.shows(observation, workspace, titles, key),
+        )
+
+    def switch(self, name, selector, workspace, titles, key=None):
+        self.cli("workspace", selector)
+        return self.view(name, workspace, titles, key)
+
+    def focused(self, observation, candidates):
+        title = key_title(observation["report"])
+        if title not in candidates:
+            raise RuntimeError(f"Expected native focus within {candidates}: {title}")
+        return title
+
+    def framed(self, name, expected, key=None):
+        return self.wait(
+            name,
+            self.fixture,
+            lambda report: (
+                all(
+                    close_frame(frames(report)[title], frame)
+                    for title, frame in expected.items()
+                )
+                and (key is None or key_title(report) == key)
+            ),
+        )
+
+    def cycle_step(self, name, step, order, current):
+        expected = order[(order.index(current) + step) % len(order)]
+        direction = "next" if step > 0 else "previous"
+        self.targets(f"{name} targets {expected}", ("cycle", direction), expected)
+        self.view(f"{name} focuses {expected}", 1, set(order), expected)
+        return expected
+
+    def exercise_workflow(self):
+        self.preflight()
+        self.launch_fixture("--windows", "3")
+        original = self.wait(
+            "fixture ready",
+            self.fixture,
+            lambda report: (
+                report.get("ready")
+                and len(report["windows"]) == 3
+                and key_title(report) is not None
+            ),
+            healthy=False,
+        )
+        self.fixture_pid = original["process_id"]
+        original_frames = frames(original)
+        self.workflow_config()
+        self.start_manager()
+        managed = self.wait(
+            "fixture-only management on one display",
+            lambda: self.cli("windows"),
+            lambda windows: (
+                len(windows) == 3
+                and all(window["pid"] == self.fixture_pid for window in windows)
+                and len({window["display"] for window in windows}) == 1
+            ),
+        )
+        self.display = managed[0]["display"]
+        self.identities = {window["title"]: window["id"] for window in managed}
+        everyone = set(self.identities)
+        tiled = self.wait(
+            "native tiling on one display",
+            self.fixture,
+            lambda report: (
+                self.tiled(report, WORKFLOW_GAP)
+                and any(
+                    all(
+                        contains(screen["visible_frame"], frame, WORKFLOW_GAP)
+                        for frame in frames(report).values()
+                    )
+                    for screen in report["screens"]
+                )
+            ),
+        )
+        self.screen = next(
+            screen["visible_frame"]
+            for screen in tiled["screens"]
+            if all(
+                contains(screen["visible_frame"], frame, WORKFLOW_GAP)
+                for frame in frames(tiled).values()
+            )
+        )
+        self.result["snapshots"]["monitors"] = self.cli("monitors")
+        self.result["snapshots"]["workspaces"] = self.cli("workspaces")
+        self.view("all windows shown on workspace 1", 1, everyone)
+
+        self.rejected(
+            "workspace previous before any switch",
+            ("workspace", "previous"),
+            "NoPreviousWorkspace",
+        )
+        self.reply(
+            "workspace occupied+1 alone replies unchanged",
+            ("workspace", "occupied+1"),
+            lambda response: (
+                response.get("ok") is True and response.get("changed") is False
+            ),
+        )
+        self.view("workspace occupied+1 alone stays on 1", 1, everyone)
+        self.switch("workspace -1 wraps from 1 to 3", "-1", 3, set())
+        self.switch("workspace +1 wraps from 3 to 1", "+1", 1, everyone)
+        self.switch("workspace 2 parks every window", "2", 2, set())
+        self.switch("workspace previous returns to 1", "previous", 1, everyone)
+        self.switch("workspace 2 again", "2", 2, set())
+        self.switch(
+            "workspace 2 on 2 returns to previous with back-and-forth",
+            "2",
+            1,
+            everyone,
+        )
+        self.switch("workspace name:Two resolves to 2", "name:Two", 2, set())
+        self.rejected(
+            "workspace name:Missing is unknown",
+            ("workspace", "name:Missing"),
+            "UnknownWorkspaceName",
+        )
+        self.switch("workspace name:One resolves to 1", "name:One", 1, everyone)
+        self.switch("workspace empty selects first empty 2", "empty", 2, set())
+        self.switch("workspace next-empty from 2 selects 3", "next-empty", 3, set())
+        returned = self.switch("workspace 1 before focus history", "1", 1, everyone)
+
+        first = self.focused(returned, everyone)
+        second = self.titles_by_identity()[self.cli("cycle", "next")["target"]]
+        self.view("cycle next prepares focus history", 1, everyone, second)
+        self.cli("focus", "last")
+        self.view("focus last returns to previous window", 1, everyone, first)
+        self.cli("focus", "last")
+        self.view("focus last toggles back", 1, everyone, second)
+        self.targets(
+            "move-to-workspace 3 targets the focused window",
+            ("move-to-workspace", "3"),
+            second,
+        )
+        self.view(
+            "move-to-workspace 3 shows and focuses moved window on 3",
+            3,
+            {second},
+            second,
+        )
+        self.cli("focus", "last")
+        self.view("focus last switches to workspace 1", 1, everyone - {second}, first)
+        self.cli("focus", "last")
+        self.view("focus last switches back to workspace 3", 3, {second}, second)
+        self.targets("cycle next with one window targets it", ("cycle", "next"), second)
+        self.view("cycle next with one window keeps focus", 3, {second}, second)
+        self.switch(
+            "workspace occupied+1 wraps from 3 to 1",
+            "occupied+1",
+            1,
+            everyone - {second},
+        )
+        self.switch("workspace occupied+1 skips empty 2", "occupied+1", 3, {second})
+
+        remaining = self.switch(
+            "workspace 1 before filling 2", "1", 1, everyone - {second}
+        )
+        third = self.focused(remaining, everyone - {second})
+        self.cli("move-to-workspace", "2")
+        self.view("move-to-workspace 2 fills every workspace", 2, {third}, third)
+        self.rejected(
+            "workspace empty with every workspace occupied",
+            ("workspace", "empty"),
+            "NoEmptyWorkspace",
+        )
+        self.rejected(
+            "workspace next-empty with every workspace occupied",
+            ("workspace", "next-empty"),
+            "NoEmptyWorkspace",
+        )
+        self.cli("move-to-workspace", "1")
+        self.view("move-to-workspace 1 regroups", 1, everyone - {second}, third)
+        self.switch("workspace 3 before regrouping", "3", 3, {second}, second)
+        self.cli("move-to-workspace", "1")
+        self.view("all windows regrouped on 1", 1, everyone, second)
+
+        settled = self.wait(
+            "regrouped dwindle tiles settle",
+            self.observe,
+            lambda observation: (
+                self.shows(observation, 1, everyone, None)
+                and self.tiled(observation["report"], WORKFLOW_GAP)
+            ),
+        )
+        tile_frames = frames(settled["report"])
+        order = sorted(
+            everyone,
+            key=lambda title: (
+                round(tile_frames[title]["top"]),
+                round(tile_frames[title]["left"]),
+                self.identities[title],
+            ),
+        )
+        self.result["workflow_reading_order"] = order
+        current = self.focused(settled, everyone)
+        for count in range(1, 4):
+            current = self.cycle_step(f"cycle next {count}", 1, order, current)
+        for count in range(1, 4):
+            current = self.cycle_step(f"cycle previous {count}", -1, order, current)
+
+        source = current
+        neighbor = order[(order.index(source) + 1) % len(order)]
+        swapped = dict(
+            tile_frames,
+            **{source: tile_frames[neighbor], neighbor: tile_frames[source]},
+        )
+        self.cli("swap", "next")
+        self.framed(
+            "swap next exchanges reading-order neighbor frames", swapped, source
+        )
+        self.cli("swap", "previous")
+        self.framed("swap previous restores tile frames", tile_frames, source)
+
+        self.cli("toggle-floating")
+        self.wait(
+            "focused window floats",
+            lambda: self.cli("windows"),
+            lambda windows: any(
+                window["title"] == source and window["floating"] for window in windows
+            ),
+        )
+        self.rejected(
+            "swap next on floating window", ("swap", "next"), "WindowNotTiled"
+        )
+        area = inset(self.screen, WORKFLOW_GAP)
+        floating = frames(self.fixture())[source]
+        corner = dict(
+            floating,
+            left=area["left"] + area["width"] - floating["width"],
+            top=area["top"] + area["height"] - floating["height"],
+        )
+        self.cli("move-by", "10000", "10000")
+        self.framed(
+            "move-by stays inside the bottom-right of the visible area",
+            {source: corner},
+        )
+        self.cli("move-by", "-10000", "-10000")
+        self.framed(
+            "move-by stays inside the top-left of the visible area",
+            {source: dict(floating, left=area["left"], top=area["top"])},
+        )
+        centered = dict(
+            floating,
+            left=area["left"] + (area["width"] - floating["width"]) / 2,
+            top=area["top"] + (area["height"] - floating["height"]) / 2,
+        )
+        self.cli("center")
+        self.framed("center centers in the visible area", {source: centered})
+        shrunk = dict(
+            centered,
+            width=centered["width"] - 100,
+            height=centered["height"] - 60,
+        )
+        self.cli("resize-by", "-100", "-60")
+        self.framed("resize-by shrinks and keeps top-left", {source: shrunk})
+        self.cli("resize-by", "10000", "10000")
+        self.framed(
+            "resize-by grows to the visible edge and keeps top-left",
+            {
+                source: dict(
+                    shrunk,
+                    width=area["left"] + area["width"] - shrunk["left"],
+                    height=area["top"] + area["height"] - shrunk["top"],
+                )
+            },
+        )
+        tiled_peer = self.titles_by_identity()[
+            self.cli("cycle", "next", "tiled")["target"]
+        ]
+        self.framed("cycle next tiled leaves the floating window", {}, tiled_peer)
+        self.rejected("center on tiled window", ("center",), "WindowNotFloating")
+        self.rejected(
+            "move-by on tiled window", ("move-by", "10", "10"), "WindowNotFloating"
+        )
+
+        self.cli("restore")
+        self.wait(
+            "restore original native frames before stop",
+            self.fixture,
+            lambda report: (
+                set(frames(report)) == set(original_frames)
+                and all(
+                    close_frame(frame, original_frames[title], 5)
+                    for title, frame in frames(report).items()
+                )
+            ),
+        )
+        self.result["passed"] = True
+
+    def titles_by_identity(self):
+        return {identity: title for title, identity in self.identities.items()}
+
     def cleanup(self):
         manager_stopped = not self.manager_started
         if self.manager_started:
@@ -684,12 +1097,22 @@ def main():
         action="store_true",
         help="Require captured snapshots with 0.12-second scenes; not visual proof",
     )
+    parser.add_argument(
+        "--workflow",
+        action="store_true",
+        help="Check keyboard workflow commands on one display instead",
+    )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
+    if arguments.workflow and arguments.scenes:
+        parser.error("--workflow uses instant switches and excludes --scenes")
     smoke = NativeSmoke(arguments)
     try:
-        smoke.exercise()
+        if arguments.workflow:
+            smoke.exercise_workflow()
+        else:
+            smoke.exercise()
     except Exception as error:
         smoke.result["failure"] = str(error)
         smoke.result["traceback"] = traceback.format_exc()

@@ -32,14 +32,53 @@ Parking checks preserve size, require a one-point vertical strip with two-point 
 On two displays, it also checks that workspace changes leave the other display's fixture frames unchanged.
 `multi_display_covered` records whether that check included windows on another display.
 
-The driver does not check swap, send-to-workspace, hotkeys, borders, minimize or fullscreen behavior, display disconnection, crash recovery, or visual scene output.
+Without `--workflow`, the driver does not check swap, send-to-workspace, hotkeys, borders, minimize or fullscreen behavior, display disconnection, crash recovery, or visual scene output.
 It checks layout and resize together because two windows can have identical geometry in both layouts.
 It does not independently observe unrelated applications' geometry.
 The fixture also records its activation state and the frontmost application's identity to diagnose focus loss during desktop interaction.
 
+## Check keyboard workflow commands
+
+Add `--workflow` to replace the default checks with keyboard workflow checks on one display.
+It uses the same preflight, AeroSpace pause, cleanup, and restoration as the default run. It excludes `--scenes`.
+
+```sh
+python3 scripts/native-smoke.py \
+    --app "$HOME/Applications/Huen WM.app" \
+    --output "$PWD/native-workflow-result" \
+    --workflow
+```
+
+The fixture starts three windows without `--spread`, so all windows open on the primary display.
+The generated configuration has three workspaces named One, Two, and Three, a 12-point gap, instant switches, and `workspace_back_and_forth = true`.
+Each step checks the fixture report and the `windows` and `workspaces` JSON, not only the command reply.
+A shown window must be unparked and inside the gapped visible frame. A hidden window must be parked to a strip of at most three points.
+
+The run checks these behaviors in order:
+
+- `workspace previous` before a switch returns `NoPreviousWorkspace`. `occupied+1` with one occupied workspace replies `changed: false`.
+- `-1` and `+1` wrap. `previous` returns to workspace 1. `workspace 2` on workspace 2 returns to workspace 1.
+- `name:Two` and `name:One` resolve. An unknown name returns `UnknownWorkspaceName`.
+- `empty` selects workspace 2. `next-empty` from workspace 2 selects workspace 3.
+- `focus last` toggles between two windows on one workspace.
+- `move-to-workspace 3` shows workspace 3 with the moved window focused and parks the source windows.
+- `focus last` switches to workspace 1 and back to workspace 3.
+- `cycle next` with one window keeps it focused. `occupied+1` wraps and skips the empty workspace 2.
+- With every workspace occupied, `empty` and `next-empty` return `NoEmptyWorkspace`.
+- With three dwindle tiles, three `cycle next` and three `cycle previous` steps follow reading order and wrap.
+  The driver derives the order from fixture frames, top then left. `result.json` records it as `workflow_reading_order`.
+- `swap next` exchanges the frames of the focused tile and its reading-order neighbor. `swap previous` restores them.
+- On a floating window, `swap next` returns `WindowNotTiled`.
+- `move-by 10000 10000` and `move-by -10000 -10000` stop at the gapped visible frame's corners. `center` centers the window.
+- `resize-by -100 -60` and `resize-by 10000 10000` keep the top-left corner. The second stops at the gapped visible edge.
+- On a tiled window, `center` and `move-by` return `WindowNotFloating`.
+- `restore` returns the original fixture frames.
+
+The workflow run does not check selectors on a second display, `workspace_monitors`, `send-to-workspace`, `cycle` kind filters, master layout, or tiled `resize-by`.
+
 ## Prepare broader native checks
 
-Keep the smoke driver unchanged. For a separate controlled native run, pass these arguments directly to the fixture executable.
+The default run uses only `--spread`. For a separate controlled native run, pass these arguments directly to the fixture executable.
 The defaults retain the three Alpha, Beta, and Gamma windows, their frames, and their titles.
 
 - `--windows N` creates 1 through 8 windows. The default is 3. Additional names are Delta, Epsilon, Zeta, Eta, and Theta.
