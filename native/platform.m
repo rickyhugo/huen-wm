@@ -99,6 +99,20 @@ static BOOL canMove(WindowRecord *record) {
     return minimized && fullscreen && ![minimized boolValue] && ![fullscreen boolValue];
 }
 
+static NSUInteger largestScreen(WMRect frame) {
+    double primaryHeight = CGDisplayBounds(CGMainDisplayID()).size.height;
+    NSArray<NSScreen *> *screens = NSScreen.screens;
+    NSUInteger largest = NSNotFound;
+    double largestArea = 0;
+    for (NSUInteger index = 0; index < screens.count; index++) {
+        NSRect full = screens[index].frame;
+        CGRect overlap = CGRectIntersection(CGRectMake(full.origin.x, primaryHeight - NSMaxY(full), full.size.width, full.size.height), CGRectMake(frame.left, frame.top, frame.width, frame.height));
+        double area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
+        if (area > largestArea) { largestArea = area; largest = index; }
+    }
+    return largest;
+}
+
 static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     if (!canMove(record)) return NO;
     WMRect current = {0};
@@ -114,6 +128,15 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     BOOL applied = initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
+    if (applied && resizeNeeded && priorReadable && largestScreen(current) != largestScreen(frame)) {
+        // AppKit sizes against the previous screen until the app handles the move, so rewrite once it settles.
+        WMRect settled;
+        for (NSUInteger attempt = 0; attempt < 10 && readFrame(record.element, &settled) && (fabs(settled.width - frame.width) > 1 || fabs(settled.height - frame.height) > 1); attempt++) {
+            usleep(10000);
+            AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size);
+            AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
+        }
+    }
     if (applied) record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
     CFRelease(position); CFRelease(size);
     return applied;
