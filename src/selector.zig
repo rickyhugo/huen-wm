@@ -12,8 +12,8 @@ pub const View = struct {
 
 pub fn resolve(selection: commands.WorkspaceSelector, view: View) !usize {
     return switch (selection) {
-        .index => |index| index,
-        .name => |name| view.config.workspaceIndex(name.text()) orelse error.UnknownWorkspaceName,
+        .index => |index| backAndForth(index, view),
+        .name => |name| backAndForth(view.config.workspaceIndex(name.text()) orelse return error.UnknownWorkspaceName, view),
         .previous => view.previous orelse error.NoPreviousWorkspace,
         .relative => |relative| switch (relative.scope) {
             .all => wrap(view.current, relative.offset, view.config.workspace_count),
@@ -21,6 +21,11 @@ pub fn resolve(selection: commands.WorkspaceSelector, view: View) !usize {
         },
         .empty => |search| emptyWorkspace(view, search) orelse error.NoEmptyWorkspace,
     };
+}
+
+fn backAndForth(index: usize, view: View) usize {
+    if (index != view.current or !view.config.workspace_back_and_forth) return index;
+    return view.previous orelse index;
 }
 
 fn wrap(position: usize, offset: i8, count: usize) usize {

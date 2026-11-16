@@ -60,11 +60,12 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return {rules={setmetatable({}, {__index=function() error('bad rule') end})}}",
         "return { gap = string.rep('x', 100000000) }",
         "return os.execute('true')",
+        "return { workspace_back_and_forth = 'yes' }",
         "return {",
     ):
         config.write_text(content)
         invoke("validate", "--config", str(config), success=False)
-    config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0 }; return settings")
+    config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0, workspace_back_and_forth = true }; return settings")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     invoke("validate", "--config", str(config) + ".missing", success=False)
     config.write_text("print('user output is not the response'); return {}")
