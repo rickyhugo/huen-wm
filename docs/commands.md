@@ -244,7 +244,7 @@ The previous workspace changes only after a switch commits.
 With `workspace_monitors` (global mode), every workspace is on one display:
 
 - Selectors resolve against the whole workspace set. The current workspace is the selected display's active workspace.
-- If the selected display shows no workspace, the current workspace is the lowest-numbered workspace that is visible on any display. In owner mode, this is the owner's active workspace.
+- If the selected display shows no workspace, the current workspace is the active workspace of the most recently selected display that shows one. If no such display exists, it is the lowest-numbered workspace that is visible on any display. In owner mode, this is the owner's active workspace. The rule applies to `+N`, `-N`, `occupied+N`, `occupied-N`, `next-empty`, and the recorded previous workspace.
 - Occupancy counts eligible windows on all displays.
 - `workspace` shows the target on its display and selects that display. A target that is already visible is not switched; its display is selected and its candidate is focused.
 - `send-to-workspace` moves the window to the target workspace's display. The selection does not change.
@@ -252,6 +252,8 @@ With `workspace_monitors` (global mode), every workspace is on one display:
 - One previous workspace is shared by all displays. It is the selected display's current workspace before a `workspace`, `move-to-workspace`, or `focus last` that leaves it. A jump to a workspace that is already visible on another display also records it, but only after the jump selects that display.
 
 A reload maps the previous workspace to the workspace with the same name, or drops it.
+
+With `workspace_monitors`, `layout` and `resize RATIO` on a selected display that shows no workspace return `NoWorkspaceOnMonitor` and change no layout.
 
 `previous` without a recorded workspace returns `NoPreviousWorkspace`.
 `empty` and `next-empty` without a match return `NoEmptyWorkspace`.
@@ -261,6 +263,7 @@ Selecting the current workspace replies `changed: false` and focuses its candida
 Set `workspace_back_and_forth = true` to make an index or name selector that matches the current workspace select the previous workspace.
 This applies to all three commands.
 Without a previous workspace, the selection stays on the current workspace.
+With `workspace_monitors`, it does not apply when the selected display shows no workspace, except in owner mode.
 The option defaults to `false`.
 
 `move-to-workspace SELECTOR` sends the focused window and shows the target workspace in one placement commit.

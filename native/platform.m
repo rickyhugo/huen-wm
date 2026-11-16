@@ -113,7 +113,11 @@ static NSUInteger largestScreen(WMRect frame) {
     return largest;
 }
 
-static BOOL writeFrame(WindowRecord *record, WMRect frame) {
+// Shared by every cross-display settle in one run-loop tick or command, so moving many windows cannot stall it.
+static double settleBudgetDeadline = 0;
+void platform_settle_budget_begin(void) { settleBudgetDeadline = CACurrentMediaTime() + 0.1; }
+
+static BOOL writeFrame(WindowRecord *record, WMRect frame, BOOL settle) {
     if (!canMove(record)) return NO;
     WMRect current = {0};
     BOOL priorReadable = readFrame(record.element, &current);
@@ -128,13 +132,20 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame) {
     AXError sizeResult = resizeNeeded ? AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size) : kAXErrorSuccess;
     AXError positionResult = AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
     BOOL applied = initialPositionResult == kAXErrorSuccess && sizeResult == kAXErrorSuccess && positionResult == kAXErrorSuccess;
-    if (applied && resizeNeeded && priorReadable && largestScreen(current) != largestScreen(frame)) {
+    if (applied && settle && resizeNeeded && priorReadable && largestScreen(current) != largestScreen(frame)) {
         // AppKit sizes against the previous screen until the app handles the move, so rewrite once it settles.
-        WMRect settled;
-        for (NSUInteger attempt = 0; attempt < 10 && readFrame(record.element, &settled) && (fabs(settled.width - frame.width) > 1 || fabs(settled.height - frame.height) > 1); attempt++) {
+        // Stop when the size is near the target, a rewrite does not change it (cell snapping, minimum size),
+        // or the tick's settle budget is spent.
+        WMRect settled, previous = {0};
+        BOOL rewritten = NO;
+        for (NSUInteger attempt = 0; attempt < 10 && CACurrentMediaTime() < settleBudgetDeadline && readFrame(record.element, &settled); attempt++) {
+            if (fabs(settled.width - frame.width) <= 1 && fabs(settled.height - frame.height) <= 1) break;
+            if (rewritten && fabs(settled.width - previous.width) <= 0.5 && fabs(settled.height - previous.height) <= 0.5) break;
+            previous = settled;
             usleep(10000);
             AXUIElementSetAttributeValue(record.element, kAXSizeAttribute, size);
             AXUIElementSetAttributeValue(record.element, kAXPositionAttribute, position);
+            rewritten = YES;
         }
     }
     if (applied) record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
@@ -381,7 +392,7 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
         }
         record.motion = WMMotionIdle;
         record.target = frame; record.changed = YES;
-        if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame); }
+        if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame, YES); }
         record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration; record.motion = WMMotionAnimating;
         return true;
     }
@@ -531,6 +542,7 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     if (stopping || !self.item.menu || sender.target != self || !sender.enabled || sender.menu != self.item.menu ||
         [self.item.menu indexOfItem:sender] < 0) return;
     NSString *command = [sender.representedObject copy];
+    platform_settle_budget_begin();
     const char *reply = wm_command(command.UTF8String);
     NSData *data = [NSData dataWithBytes:reply length:strlen(reply)];
     NSError *parseError = nil;
@@ -582,7 +594,7 @@ void platform_status_present(const WMStatusPresentation *presentation) {
 static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
     (void)next; (void)context;
     EventHotKeyID identity;
-    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) wm_command(currentBindings[identity.id].command);
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_command(currentBindings[identity.id].command); }
     return noErr;
 }
 
@@ -613,7 +625,7 @@ size_t platform_restore(void) {
         WMRect actual;
         BOOL restored = NO;
         if (canMove(record)) {
-            writeFrame(record, record.original);
+            writeFrame(record, record.original, YES);
             restored = readFrame(record.element, &actual) && framesNear(actual, record.original, 2);
         }
         if (restored) record.changed = NO;
@@ -726,6 +738,7 @@ int platform_main(int argc, char **argv) {
         __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
+            platform_settle_budget_begin();
             wm_config_poll();
             if (interrupted) platform_quit();
             wm_input_poll();
@@ -749,7 +762,7 @@ int platform_main(int argc, char **argv) {
                 if (record.observation.stale || !record.observation.onscreen || record.observation.minimized || record.observation.fullscreen) { record.animationDuration = 0; record.motion = WMMotionIdle; continue; }
                 double progress = MIN(1, (now - record.animationTime) / record.animationDuration); double eased = 1 - pow(1 - progress, 3);
                 WMRect start = record.animationStart, target = record.target;
-                BOOL applied = writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased});
+                BOOL applied = writeFrame(record, (WMRect){start.left + (target.left - start.left) * eased, start.top + (target.top - start.top) * eased, start.width + (target.width - start.width) * eased, start.height + (target.height - start.height) * eased}, progress >= 1);
                 if (!applied || progress >= 1) {
                     WMRect actual;
                     record.motion = !applied || !readFrame(record.element, &actual) || !framesNear(actual, target, 2) ? WMMotionRejected : WMMotionIdle;
@@ -777,6 +790,7 @@ int platform_main(int argc, char **argv) {
                     }
                     command[used] = 0; char *newline = strchr(command, '\n'); if (newline) *newline = 0;
                     double commandStarted = CACurrentMediaTime();
+                    platform_settle_budget_begin();
                     const char *reply = complete ? wm_command(command) : "{\"error\":\"incomplete or oversized command\"}\n";
                     deadline += CACurrentMediaTime() - commandStarted;
                     size_t remaining = strlen(reply);

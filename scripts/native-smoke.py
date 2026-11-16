@@ -2120,6 +2120,16 @@ class NativeSmoke:
             ("move-workspace-to-monitor", "external"),
             "NoWorkspaceOnMonitor",
         )
+        self.rejected(
+            "an empty selected display has no layout to change",
+            ("layout", "master"),
+            "NoWorkspaceOnMonitor",
+        )
+        self.rejected(
+            "an empty selected display has no ratio to resize",
+            ("resize", "0.05"),
+            "NoWorkspaceOnMonitor",
+        )
 
         self.reload_monitors("reload to independent mode", None, False)
         self.check(

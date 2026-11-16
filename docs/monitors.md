@@ -70,6 +70,10 @@ With global routing enabled, `workspace N` activates workspace N on its display,
 
 `send-to-workspace N` moves the window's display and workspace membership together. It does not activate an inactive destination workspace or change the selected monitor. If the send changes a workspace's display, that display retains its active workspace, not the send destination workspace. Window rules with a workspace use the same placement.
 
+If the selected display is empty, the current workspace for selectors such as `+1` and `next-empty`, and for the previous workspace, is the active workspace of the most recently selected display that shows one. If no such display exists, it is the lowest-numbered visible workspace. On an empty selected display, `workspace_back_and_forth` does not apply, except in owner mode. `layout` and `resize RATIO` on an empty selected display return `NoWorkspaceOnMonitor`.
+
+A new window that opens on an empty display joins the current workspace and moves to that workspace's display. A window rule with a workspace takes precedence.
+
 `focus-monitor MONITOR` selects a display in all modes. With global routing enabled, a display that has no workspace placed on it is empty, so the command selects it without a focus change. See [monitor focus](commands.md#monitor-focus).
 
 `send-to-monitor` and `move-to-monitor` move the focused window to the target display's active workspace in all modes. With global routing enabled, an empty target display returns `NoWorkspaceOnMonitor`. `move-workspace-to-monitor` and `swap-monitor-workspaces` move whole workspaces and need global routing. See [monitor moves](commands.md#monitor-moves).
@@ -112,7 +116,7 @@ Owner changes migrate window membership without changing workspace numbers or re
 
 Routing snapshots window membership, geometry, parking state, floating geometry, active workspaces, and monitor selection before placement writes. Placement uses frame readback and the existing visibility and parking mechanisms. A rejected placement restores the prior state and attempts verified geometry rollback, including the failed write. A failed rollback retains recovery ownership and reports an error.
 
-Routing fails closed when required geometry is unreadable, a window is stale, a destination is blocked by native fullscreen, or a window cannot move safely while unavailable. The current implementation snapshots and verifies all eligible managed windows, so an unrelated stale window can block routing. Failed background routing blocks normal reconciliation until routing can succeed. Minimized windows that need a different display wait until they are available.
+Routing fails closed when required geometry is unreadable, a window is stale, a destination is blocked by native fullscreen, or a window cannot move safely while unavailable. The current implementation snapshots and verifies all eligible managed windows, so an unrelated stale window can block routing. Failed background routing blocks normal reconciliation until routing can succeed. A minimized window that must change displays cannot move, so it blocks the whole routing commit and sets `routing_blocked` until it is restored. This is a known limitation.
 
 A valid reload publishes its configuration and resets the binding mode to `main` even if routing fails. The failure is a runtime routing error, not a configuration rejection. `routing_blocked` prevents normal reconciliation while the runtime retries routing. Existing per-window placement errors and the status `transition_error` describe failures.
 

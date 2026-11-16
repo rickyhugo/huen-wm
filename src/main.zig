@@ -37,6 +37,9 @@ var last_observed_focus: ?u64 = null;
 const Placement = struct { display: ?u32 = null, home: [128]u8 = @splat(0), shown: bool = false, shown_when_lost: bool = false };
 var placements: [10]Placement = @splat(.{});
 var global_previous: ?usize = null;
+// The most recently selected display that had a placed workspace. With global routing, an empty
+// selected display resolves "current workspace" from this display.
+var current_display: ?u32 = null;
 var routing_blocked = false;
 var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
@@ -545,18 +548,28 @@ fn previousWorkspace(display_slot: usize) *?usize {
 fn recordPrevious(display_slot: usize, from: usize, workspace: usize) void {
     if (from != workspace) previousWorkspace(display_slot).* = from;
 }
+// With global routing, an empty display uses the active workspace of the most recently selected
+// display that had one, else the lowest shown workspace.
 fn currentWorkspace(display_slot: usize) usize {
     const display = displays.items[display_slot];
-    if (config.workspace_monitors == null) return display.workspace;
-    if (placements[display.workspace].display == display.identity) return display.workspace;
+    if (placedWorkspace(display)) |workspace| return workspace;
+    if (current_display) |identity| if (displayIndex(identity)) |index| if (placedWorkspace(displays.items[index])) |workspace| return workspace;
     for (0..config.workspace_count) |workspace| if (shownWorkspace(workspace)) return workspace;
     return @min(display.workspace, config.workspace_count - 1);
 }
+fn trackCurrentDisplay() void {
+    const identity = selected_display orelse return;
+    const index = displayIndex(identity) orelse return;
+    if (placedWorkspace(displays.items[index]) != null) current_display = identity;
+}
 fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) !usize {
     var occupied: selector.Occupancy = .empty;
-    const display = displays.items[display_slot].identity;
-    for (windows.items) |window| if (externallyEligible(window) and (config.workspace_monitors != null or window.display == display)) occupied.set(window.workspace);
-    return selector.resolve(selection, .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied });
+    const display = displays.items[display_slot];
+    for (windows.items) |window| if (externallyEligible(window) and (config.workspace_monitors != null or window.display == display.identity)) occupied.set(window.workspace);
+    // `workspace N` from an empty display does not flip to the previous workspace, except in owner
+    // mode, where the owner's workspace is the current one for every display.
+    const back_and_forth = config.workspace_back_and_forth and (placedWorkspace(display) != null or workspaceOwner() != null);
+    return selector.resolve(selection, .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied, .back_and_forth = back_and_forth });
 }
 fn selectionSlot(window_index: usize, display_slot: usize) usize {
     if (config.workspace_monitors != null) return display_slot;
@@ -619,6 +632,7 @@ fn activeDisplay() usize {
 fn selectDisplay(identity: u32) void {
     if (selected_display == identity) return;
     selected_display = identity;
+    trackCurrentDisplay();
     if (!config.mouse_follows_monitor) return;
     const index = displayIndex(identity) orelse return;
     const bounds = displays.items[index].full_bounds;
@@ -1305,7 +1319,9 @@ export fn wm_tick() void {
             if (windows.items.len == 1024) continue;
             const display = nearestDisplay(observation.frame);
             const displaySlot = displayIndex(display).?;
-            var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = displays.items[displaySlot].workspace, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
+            // With global routing, a window on an empty display joins the current workspace.
+            const joined = placedWorkspace(displays.items[displaySlot]) orelse currentWorkspace(displaySlot);
+            var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
             const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
             window.floating = decision.floating orelse false;
             if (decision.workspace) |workspace| window.workspace = workspace;
@@ -1347,6 +1363,7 @@ export fn wm_tick() void {
         focused = null;
     };
     if (selected_display == null or displayIndex(selected_display.?) == null) selected_display = displays.items[0].identity;
+    trackCurrentDisplay();
     reconcile();
     if (session_focus_pending) {
         session_focus_pending = false;
@@ -1546,6 +1563,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const pending = transition orelse return;
     if (callbackGeneration != pending.generation) return;
     defer publishStatus();
+    native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
     const slot = displayIndex(pending.display);
     if (slot) |displaySlot| {
@@ -1812,6 +1830,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             if (displayIndex(windows.items[index].display) != null) selectDisplay(windows.items[index].display);
         };
     }
+    trackCurrentDisplay();
     const displaySlot = activeDisplay();
     const display = &displays.items[displaySlot];
     switch (command) {
@@ -1855,6 +1874,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .verified = focused == identity, .target = identity });
         },
         .layout => |layout| {
+            if (placedWorkspace(display.*) == null) return failure("NoWorkspaceOnMonitor");
             const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));
             defer transaction.deinit();
             workspaceLayout(display.identity, display.workspace).layout = layout;
@@ -1862,7 +1882,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             native.platform_config_changed();
             return json(.{ .ok = true });
         },
-        .resize => |delta| layouts.adjustRatio(workspaceLayout(display.identity, display.workspace), delta),
+        .resize => |delta| {
+            if (placedWorkspace(display.*) == null) return failure("NoWorkspaceOnMonitor");
+            layouts.adjustRatio(workspaceLayout(display.identity, display.workspace), delta);
+        },
         else => {
             const sourceIndex = windowIndex(focused orelse return failure("NoFocusedWindow")) orelse return failure("NoFocusedWindow");
             const source = &windows.items[sourceIndex];

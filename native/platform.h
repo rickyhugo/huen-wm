@@ -46,6 +46,8 @@ bool platform_bindings(const WMBinding *bindings, size_t count);
 void platform_border(uint64_t identity, double width, uint32_t color);
 void platform_quit(void);
 size_t platform_restore(void);
+// Starts the shared time budget for cross-display size retries in one tick or command.
+void platform_settle_budget_begin(void);
 const char *platform_config_path(void);
 const char *platform_filter(void);
 void platform_config_changed(void);
