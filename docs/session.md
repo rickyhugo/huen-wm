@@ -24,7 +24,7 @@ Fixture-filter state therefore cannot replace normal unfiltered state.
 
 ## Logical shapes
 
-`Snapshot` contains version 1, a clean marker, scope, windows, nodes, and roots.
+`Snapshot` contains version 1, a clean marker, scope, windows, nodes, roots, and homes.
 All indices are zero-based logical array indices, never layout-pool handles.
 `Window.root` is a root index.
 Each window contains a `StableKey`, display hint, floating flag, and optional display-local floating frame.
@@ -45,6 +45,11 @@ The defaults fingerprint is supplied by the caller.
 The caller compares it with current defaults before importing topology.
 An absent display hint is an empty string, not permission to guess from geometry.
 At most one root per display hint is active.
+
+`Home` records a runtime workspace home: a workspace name, its duplicate-name occurrence, and a nonempty display UUID hint.
+`homes` holds at most 10 entries, one per workspace occurrence.
+Checkpoints written before homes existed omit the field and load with no homes, so the version stays 1.
+An older binary rejects a checkpoint that contains `homes` as a schema error.
 
 `validate` rejects unknown versions, invalid UTF-8, embedded NUL bytes, out-of-range references, and nonfinite numbers.
 It rejects cycles, duplicate parents, shared roots, unreachable nodes, duplicate leaves, and floating leaves.
@@ -178,6 +183,8 @@ Its conversion storage and temporary stores are heap allocated.
 Startup matching runs after the first window snapshot, before discovery placement.
 Unavailable metadata is omitted on both sides of matching.
 Matched records remap workspace names by occurrence and displays by current monitor policy.
+With `workspace_monitors`, saved homes are seeded by workspace name and occurrence before placement, even when no window matches.
+A moved workspace therefore restores on its home display. See [monitor routing](monitors.md#session-restart).
 Unmatched leaves disappear and singleton containers collapse.
 Unmatched current windows keep current rules and join through normal discovery.
 No imported record grants parking or original-frame recovery ownership.

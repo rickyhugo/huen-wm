@@ -156,7 +156,43 @@ Window checks compare each window's display, workspace, and parking with the fix
 - A reload to the owner configuration routes every workspace to the external display. `send-to-monitor built-in` and `swap-monitor-workspaces built-in` return `NoWorkspaceOnMonitor`. `move-workspace-to-monitor built-in` splits One onto the built-in display, and a reload keeps that home. Moving One back leaves the built-in display empty. From the empty display, `move-workspace-to-monitor` returns `NoWorkspaceOnMonitor`.
 - A reload to independent mode clears every home. `restore` returns the original fixture frames.
 
-None of these modes checks display disconnection or session restore.
+`--global-restart` (N6) checks that a runtime home survives a clean restart. It uses the split configuration of `--global` with `session = { enabled = true }` and a random `border_color`. The color gives each run its own configuration hash, so a run never reads an earlier run's checkpoint. Each run leaves one small checkpoint file in `~/Library/Application Support/HuenWM`. The fixture starts with `--identifiers unique`, so session matching can identify its windows.
+
+```sh
+python3 scripts/native-smoke.py \
+    --app "$HOME/Applications/Huen WM.app" \
+    --output "$PWD/native-global-restart-result" \
+    --global-restart
+```
+
+The checks run in this order:
+
+- `status.session.load` is `none`. Every window starts in One on the external display.
+- `focus-monitor external`, then `move-workspace-to-monitor built-in`, shows One on the built-in display with the built-in UUID as `home`. The external display shows Two.
+- `stop` exits the manager cleanly and restores the original fixture frames.
+- A new manager with the same configuration reports `session.load = restored`, matches all three windows, and has no session errors.
+- One and its windows are on the built-in display, Two is on the external display, and `status.placements` shows One's home again.
+- `restore` returns the original fixture frames.
+
+No mode checks display disconnection. Use the manual checklist.
+
+## Manual hotplug checklist
+
+Use the MacBook and the external display. Start the manager with the split configuration of `--global` (or your own config with `workspace_monitors` and a `monitor` field), and open a few windows in each workspace.
+
+1. Record `huen-wm status` (`placements`) and `huen-wm monitors`.
+2. With a workspace from the external display shown, unplug the external display. Within a few seconds:
+   - `placements` lists every external workspace on the built-in display. `home` values do not change.
+   - The built-in display keeps its active workspace. Windows of the moved workspaces are parked, not lost. `routing_blocked` is false.
+   - `selected_monitor` is the built-in display. The menu-bar title is a workspace, not `—`.
+3. Run `huen-wm workspace N` for a moved workspace. It shows on the built-in display.
+4. Replug the external display. Within a few seconds:
+   - The moved workspaces and their windows return to the external display.
+   - The external display shows the workspace it showed before step 2, or the one you showed in step 3.
+   - The built-in display shows one of its own workspaces. `routing_blocked` is false, and no window has a `placement_error`.
+5. Run `huen-wm move-workspace-to-monitor built-in` from the external display, then repeat steps 2 to 4. The moved workspace stays on the built-in display throughout, and its `home` stays the built-in UUID.
+6. With a workspace homed on the external display (`swap-monitor-workspaces`), repeat steps 2 to 4. It falls back while unplugged and returns to the external display.
+7. Select the empty display in owner mode and confirm the menu-bar title is `—`.
 
 ## Prepare broader native checks
 

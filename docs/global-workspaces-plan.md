@@ -1,7 +1,26 @@
 # Global workspaces plan
 
-Status: accepted 2026-11-16. Design A. Hyprland-style multi-monitor behavior in
-huen's own command style.
+Status: implemented 2026-11-16 (units 0–9). Design A. Hyprland-style
+multi-monitor behavior in huen's own command style. User documentation:
+[monitor routing](monitors.md) and [commands](commands.md).
+
+## Deviations from this plan
+
+- `Placement` also has `shown` (was the workspace active on its display at the
+  start of the tick, for a display that just vanished) and `shown_when_lost`
+  (kept while a workspace waits on a fallback display, so a reconnected display
+  shows the workspace it showed before).
+- Config `monitor` lists reject `left|right|up|down|next|previous` with
+  `RelativeMonitorSelector`.
+- Session homes are not derived from root hints. Root hints cannot tell a
+  runtime home from configuration placement, and an empty workspace can lack a
+  root. The checkpoint gains an optional `homes` array (workspace name,
+  occurrence, display UUID). Schema stays v1: old checkpoints load without
+  homes. An older binary rejects a checkpoint with `homes` as a schema error.
+  Homes restore even when no window matches.
+- The menu-bar title shows `—` on an empty display with global routing.
+- Display disconnection is verified only by a manual checklist
+  (`docs/native-smoke.md`).
 
 ## Decisions
 
@@ -81,7 +100,7 @@ workspaces = {
 - Disconnect: the workspace moves to its fallback display and keeps its home.
 - Reconnect: it returns home.
 - Session: `Root.display_hint` and `active` exist; schema stays v1. Restore
-  seeds `placements[i].home` from saved root hints before
+  seeds `placements[i].home` from the saved `homes` array before
   `resolvePlacements()`. `continuity.restore(…, owner)` takes per-workspace
   destinations. Mode switches change the config hash, so old checkpoints are
   rejected cleanly.

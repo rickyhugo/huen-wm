@@ -6,6 +6,7 @@ import ctypes
 import itertools
 import json
 import os
+import secrets
 from pathlib import Path
 import shutil
 import signal
@@ -186,6 +187,7 @@ class NativeSmoke:
             "monitors": arguments.monitors,
             "global": arguments.global_routing,
             "monitor_moves": arguments.monitor_moves,
+            "global_restart": arguments.global_restart,
         }
         self.fixture_pid = None
         self.manager_started = False
@@ -1096,7 +1098,7 @@ class NativeSmoke:
         replacement.write_text(content)
         replacement.replace(self.config_path)
 
-    def monitor_config(self, owners, follows, split=False):
+    def monitor_config(self, owners, follows, split=False, session_token=None):
         routing = (
             ""
             if owners is None
@@ -1111,9 +1113,16 @@ class NativeSmoke:
             if split
             else "{'One','Two','Three'}"
         )
+        # The token changes the configuration hash, so each restart run reads only its own
+        # checkpoint.
+        session = (
+            ""
+            if session_token is None
+            else f"session={{enabled=true}}, border_color='#{session_token:06x}', "
+        )
         self.write_config(
             f"return {{gap={WORKFLOW_GAP}, motion_duration=0, "
-            f"workspaces={workspaces}, {routing}"
+            f"workspaces={workspaces}, {routing}{session}"
             f"mouse_follows_monitor={follow}, bindings={{}}}}\n"
         )
 
@@ -1126,7 +1135,7 @@ class NativeSmoke:
             lambda reload: reload["request_id"] > before and reload["state"] == "ready",
         )
 
-    def start_multi_display(self, owners, follows, split=False):
+    def start_multi_display(self, owners, follows, split=False, session_token=None):
         found = active_displays()
         self.result["active_displays"] = found
         if (
@@ -1139,7 +1148,8 @@ class NativeSmoke:
                 f"found {found}"
             )
         self.preflight()
-        self.launch_fixture("--spread")
+        identifiers = () if session_token is None else ("--identifiers", "unique")
+        self.launch_fixture("--spread", *identifiers)
         original = self.wait(
             "fixture ready",
             self.fixture,
@@ -1151,7 +1161,7 @@ class NativeSmoke:
             healthy=False,
         )
         self.fixture_pid = original["process_id"]
-        self.monitor_config(owners, follows, split)
+        self.monitor_config(owners, follows, split, session_token)
         self.start_manager()
         managed = self.wait(
             "fixture-only management",
@@ -2120,6 +2130,86 @@ class NativeSmoke:
         self.restored(original_frames)
         self.result["passed"] = True
 
+    def exercise_global_restart(self):
+        owners = ("external", "built-in")
+        token = secrets.randbelow(0x1000000)
+        self.result["session_border_color"] = token
+        original_frames = self.start_multi_display(
+            owners, False, split=True, session_token=token
+        )
+        external = self.external
+        built_in = self.built_in
+        everyone = set(self.identities)
+        self.result["global_restart_displays"] = {
+            "external": external,
+            "built_in": built_in,
+        }
+        self.wait(
+            "a fresh configuration hash has no checkpoint",
+            lambda: self.cli("status")["session"],
+            lambda session: session["load"] == "none",
+        )
+        split = {1: external, 2: external, 3: built_in}
+        self.placement(
+            "split config routes every window to One on external",
+            split,
+            {external: 1, built_in: 3},
+        )
+        self.focus_monitor("restart", "external", False)
+        self.monitor_reply(
+            "move-workspace-to-monitor built-in is accepted",
+            ("move-workspace-to-monitor", "built-in"),
+            built_in,
+        )
+        moved = {1: built_in, 2: external, 3: built_in}
+        self.placement(
+            "One moves to built-in with a runtime home",
+            moved,
+            {external: 2, built_in: 1},
+            homes={1: built_in},
+        )
+        self.keyed("the move focuses a One window", everyone)
+
+        self.cli("stop")
+        self.wait(
+            "manager stops cleanly",
+            lambda: process_ids("huen-wm"),
+            lambda identities: not identities,
+            healthy=False,
+        )
+        self.manager_started = False
+        self.wait(
+            "stop restores original native frames",
+            self.fixture,
+            lambda report: (
+                set(frames(report)) == set(original_frames)
+                and all(
+                    close_frame(frame, original_frames[title], 5)
+                    for title, frame in frames(report).items()
+                )
+            ),
+            healthy=False,
+        )
+
+        self.start_manager()
+        self.wait(
+            "restart restores the checkpoint",
+            lambda: self.cli("status")["session"],
+            lambda session: (
+                session["load"] == "restored"
+                and session["matched"] == len(self.identities)
+                and session["errors"] == 0
+            ),
+        )
+        self.placement(
+            "restart shows One and its windows on its home built-in",
+            moved,
+            {external: 2, built_in: 1},
+            homes={1: built_in},
+        )
+        self.restored(original_frames)
+        self.result["passed"] = True
+
     def titles_by_identity(self):
         return {identity: title for title, identity in self.identities.items()}
 
@@ -2245,6 +2335,12 @@ def main():
         action="store_true",
         help="Check window and workspace moves between two displays instead",
     )
+    parser.add_argument(
+        "--global-restart",
+        dest="global_restart",
+        action="store_true",
+        help="Check that a moved workspace returns to its home after a restart",
+    )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
@@ -2254,16 +2350,17 @@ def main():
         arguments.monitors,
         arguments.global_routing,
         arguments.monitor_moves,
+        arguments.global_restart,
     )
     if sum(exclusive) > 1:
         parser.error(
-            "--workflow, --owner, --monitors, --global, and --monitor-moves "
-            "are exclusive"
+            "--workflow, --owner, --monitors, --global, --monitor-moves, and "
+            "--global-restart are exclusive"
         )
     if arguments.scenes and any(exclusive):
         parser.error(
-            "--workflow, --owner, --monitors, --global, and --monitor-moves "
-            "use instant switches and exclude --scenes"
+            "--workflow, --owner, --monitors, --global, --monitor-moves, and "
+            "--global-restart use instant switches and exclude --scenes"
         )
     smoke = NativeSmoke(arguments)
     try:
@@ -2277,6 +2374,8 @@ def main():
             smoke.exercise_global()
         elif arguments.monitor_moves:
             smoke.exercise_monitor_moves()
+        elif arguments.global_restart:
+            smoke.exercise_global_restart()
         else:
             smoke.exercise()
     except Skipped as reason:

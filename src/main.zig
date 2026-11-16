@@ -31,7 +31,10 @@ var pending_close: ?PendingClose = null;
 var close_state: enum { idle, pending, closed, termination_requested, termination_rejected, expired, cancelled } = .idle;
 var selected_display: ?u32 = null;
 var last_observed_focus: ?u64 = null;
-const Placement = struct { display: ?u32 = null, home: [128]u8 = @splat(0), shown: bool = false };
+// `shown` caches whether the workspace was active on its display at the start of the tick, so a
+// workspace on a display that just vanished keeps that fact until routing moves it. `shown_when_lost`
+// keeps it while the workspace waits on a fallback display, so a reconnect shows it again.
+const Placement = struct { display: ?u32 = null, home: [128]u8 = @splat(0), shown: bool = false, shown_when_lost: bool = false };
 var placements: [10]Placement = @splat(.{});
 var global_previous: ?usize = null;
 var routing_blocked = false;
@@ -138,6 +141,11 @@ fn loadSession() void {
     };
     defer allocator.free(current);
     var screens: [32]continuity.Screen = undefined;
+    // Saved runtime homes are seeded before placement so moved workspaces restore on their homes.
+    if (config.workspace_monitors != null) for (continuity.savedHomes(checkpoint, &config), &placements) |saved, *placement| if (saved) |hint| {
+        placement.home = @splat(0);
+        @memcpy(placement.home[0..hint.len], hint);
+    };
     const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), &config, resolvePlacements()) catch |err| {
         sessionError(@errorName(err));
         session_status.load = .failed;
@@ -177,7 +185,9 @@ fn freezeSession() void {
     };
     defer allocator.free(current);
     var screens: [32]continuity.Screen = undefined;
-    session_frozen = continuity.freeze(&layouts, current, sessionScreens(&screens), &config, sessionScope()) catch |err| {
+    var homes: [10][128]u8 = undefined;
+    for (&homes, placements) |*home, placement| home.* = placement.home;
+    session_frozen = continuity.freeze(&layouts, current, sessionScreens(&screens), &config, homes[0..config.workspace_count], sessionScope()) catch |err| {
         sessionError(@errorName(err));
         session_status.save = .failed;
         return;
@@ -318,12 +328,14 @@ fn deriveStatus() StatusPresentation {
     if (!config.status_bar.enabled) return .disabled;
     var presentation = std.mem.zeroes(native.WMStatusPresentation);
     const display: ?Display = if (displays.items.len > 0) displays.items[activeDisplay()] else null;
-    const workspace_index = if (display) |current| current.workspace else 0;
-    const name = text(&config.workspaces[workspace_index].name);
+    // With global routing, a display that has no workspace placed on it shows a dash.
+    const placed: ?usize = if (display) |current| placedWorkspace(current) else null;
+    const workspace_index = placed orelse 0;
+    const name = if (placed != null) text(&config.workspaces[workspace_index].name) else "No workspace";
     var index_buffer: [8]u8 = undefined;
     const index_text = std.fmt.bufPrint(&index_buffer, "{d}", .{workspace_index + 1}) catch unreachable;
     var label_buffer: [80]u8 = undefined;
-    const label = if (suspended) "Paused" else if (display == null) "Huen WM" else switch (config.status_bar.label) {
+    const label = if (suspended) "Paused" else if (display == null) "Huen WM" else if (placed == null) "—" else switch (config.status_bar.label) {
         .name => name,
         .index => index_text,
         .index_and_name => if (std.mem.eql(u8, name, index_text)) name else std.fmt.bufPrint(&label_buffer, "{s}  {s}", .{ index_text, name }) catch unreachable,
@@ -347,7 +359,7 @@ fn deriveStatus() StatusPresentation {
         statusText(&row.title, title, 79);
         const command = std.fmt.bufPrint(&row.command, "workspace {d}", .{index + 1}) catch unreachable;
         row.command[command.len] = 0;
-        row.checked = display != null and workspace_index == index;
+        row.checked = placed == index;
         row.enabled = display != null and !suspended and transition == null;
     }
     const reload = &presentation.rows[config.workspace_count];
@@ -628,6 +640,12 @@ fn workspaceOwner() ?u32 {
     return first;
 }
 
+// The display's active workspace, or null when global routing places no workspace on it.
+fn placedWorkspace(display: Display) ?usize {
+    if (config.workspace_monitors == null or placements[display.workspace].display == display.identity) return display.workspace;
+    return null;
+}
+
 fn shownWorkspace(workspace: usize) bool {
     const identity = placements[workspace].display orelse return false;
     if (displayIndex(identity)) |index| return displays.items[index].workspace == workspace;
@@ -666,7 +684,13 @@ fn resolvePlacements() [10]?u32 {
 }
 
 fn commitPlacements(resolved: [10]?u32) void {
-    for (&placements, resolved) |*placement, destination| placement.display = destination;
+    for (&placements, resolved) |*placement, destination| {
+        if (destination != placement.display) {
+            const lost = if (placement.display) |identity| displayIndex(identity) == null else false;
+            placement.shown_when_lost = lost and (placement.shown or placement.shown_when_lost);
+        }
+        placement.display = destination;
+    }
 }
 
 fn displayUuid(identity: u32, home: *[128]u8) bool {
@@ -703,6 +727,11 @@ fn placementActivations(resolved: [10]?u32, forced: []const Routing.Activation, 
         var choice: ?usize = null;
         if (placements[current].display == identity and resolved[current] == identity) choice = current;
         if (choice == null) for (0..workspace_count) |workspace| if (resolved[workspace] == identity and placements[workspace].display != identity and shownWorkspace(workspace)) {
+            choice = workspace;
+            break;
+        };
+        // A reconnected display shows the workspace it showed when it disconnected.
+        if (choice == null) for (0..workspace_count) |workspace| if (resolved[workspace] == identity and placements[workspace].display != identity and placements[workspace].shown_when_lost) {
             choice = workspace;
             break;
         };
@@ -1718,8 +1747,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             for (displays.items[0..count], uuids[0..count]) |*display, *uuid| {
                 uuid.* = @splat(0);
                 const known = session.huen_session_display_uuid(display.identity, uuid, uuid.len);
-                const placed = config.workspace_monitors == null or placements[display.workspace].display == display.identity;
-                items.append(allocator, .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) display.workspace + 1 else null, .selected = selected_display == display.identity, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
+                const placed = placedWorkspace(display.*);
+                items.append(allocator, .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = selected_display == display.identity, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
             }
             return json(items.items);
         },

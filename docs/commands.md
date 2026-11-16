@@ -152,6 +152,8 @@ The next command reads actual focus again.
 
 ## Monitor focus
 
+See [monitor routing](monitors.md#modes) for the independent, owner, and global modes that these commands depend on.
+
 `focus-monitor MONITOR` selects a display and focuses its candidate window.
 The candidate is the remembered focus of the display's active workspace.
 An empty display is selected without a focus change.
@@ -212,7 +214,9 @@ A selected display that shows no workspace returns `NoWorkspaceOnMonitor`.
 A target that is the selected display replies `changed: false`.
 A display without a UUID returns `MonitorUuidUnavailable`.
 Both commands keep the previous workspace and reply with `monitor`, `verified`, and `focused`.
-See [monitor routing](monitors.md#runtime-homes) for how homes interact with reloads and hotplug.
+Homes survive display disconnection and, with `session = { enabled = true }`, a clean restart.
+A reload clears the homes of workspaces that have a `monitor` field.
+See [runtime homes](monitors.md#runtime-homes), [hotplug](monitors.md#hotplug), and [session restart](monitors.md#session-restart).
 
 ## Workspace selectors
 
