@@ -1220,6 +1220,49 @@ export fn wm_tick() void {
         focusWorkspace(displays.items[activeDisplay()].identity, null);
     }
 }
+fn readingOrder(display: u32, kind: ?commands.WindowKind, output: []u64) []u64 {
+    const Entry = struct {
+        floating: bool,
+        frame: Rect,
+        identity: u64,
+
+        fn lessThan(_: void, first: @This(), second: @This()) bool {
+            if (first.floating != second.floating) return !first.floating;
+            if (first.frame.top != second.frame.top) return first.frame.top < second.frame.top;
+            if (first.frame.left != second.frame.left) return first.frame.left < second.frame.left;
+            return first.identity < second.identity;
+        }
+    };
+    var entries: [1024]Entry = undefined;
+    var count: usize = 0;
+    for (windows.items) |window| {
+        if (window.display != display or !visible(window) or window.parked) continue;
+        if (kind) |wanted| if ((wanted == .floating) != window.floating) continue;
+        entries[count] = .{ .floating = window.floating, .frame = targetFrame(window), .identity = window.identity };
+        count += 1;
+    }
+    std.mem.sort(Entry, entries[0..count], {}, Entry.lessThan);
+    for (entries[0..count], 0..) |entry, index| output[index] = entry.identity;
+    return output[0..count];
+}
+fn swapWindows(source_index: usize, target_index: usize) [*:0]const u8 {
+    const identity = windows.items[source_index].identity;
+    const transaction = PlacementTransaction.begin(.{ .pair = .{ windows.items[source_index].display, windows.items[target_index].display } }) catch |err| return failure(@errorName(err));
+    defer transaction.deinit();
+    layouts.swap(windows.items[source_index].identity, windows.items[target_index].identity);
+    if (managedFullscreen(windows.items[source_index])) workspaceLayout(windows.items[source_index].display, windows.items[source_index].workspace).fullscreen = null;
+    if (managedFullscreen(windows.items[target_index])) workspaceLayout(windows.items[target_index].display, windows.items[target_index].workspace).fullscreen = null;
+    const source_display = windows.items[source_index].display;
+    const source_workspace = windows.items[source_index].workspace;
+    windows.items[source_index].display = windows.items[target_index].display;
+    windows.items[source_index].workspace = windows.items[target_index].workspace;
+    windows.items[target_index].display = source_display;
+    windows.items[target_index].workspace = source_workspace;
+    std.mem.swap(Window, &windows.items[source_index], &windows.items[target_index]);
+    if (!transaction.commit()) return failure(transition_error orelse "SwapPlacementFailed");
+    const verified = focusVerified(identity);
+    return json(.{ .ok = true, .verified = verified });
+}
 fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     const source = windows.items[sourceIndex];
     const sourceFrame = if (source.floating) source.floating_frame else source.goal;
@@ -1556,6 +1599,12 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             }
             return switchWorkspace(destination_slot, workspace, null);
         },
+        .cycle => |request| {
+            var identities: [1024]u64 = undefined;
+            const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return failure("NoWindowToCycle");
+            const verified = focusVerified(target);
+            return json(.{ .ok = true, .accepted = true, .verified = verified, .target = target });
+        },
         .focus_last => {
             const identity = focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow");
             const window = windows.items[windowIndex(identity).?];
@@ -1694,24 +1743,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const verified = focusVerified(identity);
                     return json(.{ .ok = true, .accepted = true, .verified = verified, .target = identity });
                 },
-                .swap => |direction| {
-                    const target = neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection");
-                    const identity = source.identity;
-                    const transaction = PlacementTransaction.begin(.{ .pair = .{ source.display, windows.items[target].display } }) catch |err| return failure(@errorName(err));
-                    defer transaction.deinit();
-                    layouts.swap(windows.items[sourceIndex].identity, windows.items[target].identity);
-                    if (managedFullscreen(windows.items[sourceIndex])) workspaceLayout(windows.items[sourceIndex].display, windows.items[sourceIndex].workspace).fullscreen = null;
-                    if (managedFullscreen(windows.items[target])) workspaceLayout(windows.items[target].display, windows.items[target].workspace).fullscreen = null;
-                    const sourceDisplay = windows.items[sourceIndex].display;
-                    const sourceWorkspace = windows.items[sourceIndex].workspace;
-                    windows.items[sourceIndex].display = windows.items[target].display;
-                    windows.items[sourceIndex].workspace = windows.items[target].workspace;
-                    windows.items[target].display = sourceDisplay;
-                    windows.items[target].workspace = sourceWorkspace;
-                    std.mem.swap(Window, &windows.items[sourceIndex], &windows.items[target]);
-                    if (!transaction.commit()) return failure(transition_error orelse "SwapPlacementFailed");
-                    const verified = focusVerified(identity);
-                    return json(.{ .ok = true, .verified = verified });
+                .swap => |direction| return swapWindows(sourceIndex, neighbor(sourceIndex, direction) orelse return failure("NoWindowInDirection")),
+                .swap_cycle => |step| {
+                    if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
+                    var identities: [1024]u64 = undefined;
+                    const target = selector.cycleTarget(readingOrder(source.display, .tiled, &identities), source.identity, step).?;
+                    if (target == source.identity) return json(.{ .ok = true, .changed = false });
+                    return swapWindows(sourceIndex, windowIndex(target).?);
                 },
                 .move => |direction| {
                     if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");

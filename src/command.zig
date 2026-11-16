@@ -22,6 +22,9 @@ pub const Name = struct {
     }
 };
 pub const Focus = struct { direction: Direction, wrap: bool = false };
+pub const Step = enum { next, previous };
+pub const WindowKind = enum { tiled, floating };
+pub const Cycle = struct { step: Step, kind: ?WindowKind = null };
 pub const RelativeScope = enum { all, occupied };
 pub const EmptySearch = enum { first, next };
 pub const WorkspaceSelector = union(enum) {
@@ -42,11 +45,13 @@ pub const Command = union(enum) {
     restore,
     focus: Focus,
     focus_last,
+    cycle: Cycle,
     mode: Name,
     launch: Launch,
     exec_and_forget: []const u8,
     close: bool,
     swap: Direction,
+    swap_cycle: Step,
     move: Direction,
     tilemove: Direction,
     select: Selection,
@@ -145,6 +150,12 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (tokens.next() != null) return error.ExtraArgument;
         return .{ .focus = .{ .direction = direction, .wrap = wrap } };
     }
+    if (std.mem.eql(u8, verb, "cycle")) {
+        const step = std.meta.stringToEnum(Step, argument orelse return error.MissingArgument) orelse return error.InvalidStep;
+        const kind = if (tokens.next()) |value| std.meta.stringToEnum(WindowKind, value) orelse return error.InvalidWindowKind else null;
+        if (tokens.next() != null) return error.ExtraArgument;
+        return .{ .cycle = .{ .step = step, .kind = kind } };
+    }
     if (tokens.next() != null) return error.ExtraArgument;
     if (std.mem.eql(u8, verb, "mode")) return .{ .mode = try Name.init(argument orelse return error.MissingArgument) };
     if (std.mem.eql(u8, verb, "close")) {
@@ -170,6 +181,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .toggle_floating;
     }
     const value = argument orelse return error.MissingArgument;
+    if (std.mem.eql(u8, verb, "swap")) if (std.meta.stringToEnum(Step, value)) |step| return .{ .swap_cycle = step };
     inline for (.{ "swap", "move", "tilemove" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);
     if (std.mem.eql(u8, verb, "select")) return .{ .select = std.meta.stringToEnum(Selection, value) orelse return error.InvalidSelection };
     if (std.mem.eql(u8, verb, "layout")) return .{ .layout = std.meta.stringToEnum(Layout, value) orelse return error.InvalidLayout };

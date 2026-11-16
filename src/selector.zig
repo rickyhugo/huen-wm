@@ -23,6 +23,16 @@ pub fn resolve(selection: commands.WorkspaceSelector, view: View) !usize {
     };
 }
 
+pub fn cycleTarget(order: []const u64, current: ?u64, step: commands.Step) ?u64 {
+    if (order.len == 0) return null;
+    const found = if (current) |identity| std.mem.indexOfScalar(u64, order, identity) else null;
+    const position = found orelse return if (step == .next) order[0] else order[order.len - 1];
+    return switch (step) {
+        .next => order[(position + 1) % order.len],
+        .previous => order[(position + order.len - 1) % order.len],
+    };
+}
+
 fn backAndForth(index: usize, view: View) usize {
     if (index != view.current or !view.config.workspace_back_and_forth) return index;
     return view.previous orelse index;
