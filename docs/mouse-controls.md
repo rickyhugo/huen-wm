@@ -90,6 +90,7 @@ The bridge does not move foreign windows during a gesture.
 Modifier loss, Escape, tap disable, permission loss, reconfiguration, publication invalidation, and shutdown cancel an active gesture.
 Cancellation emits one cancel event and enters release draining.
 The owned drag stream and matching up remain consumed after cancellation.
+Draining ends without that up when a tap disable, invalid tap, or permission loss finds the owned button already released, or when the owned button goes down again.
 Other buttons and unrelated events pass through.
 Escape is consumed only when it cancels an active gesture.
 Timeout and user-disabled tap notifications cancel, then reenable the tap if permission still allows it and input or a release drain needs it.

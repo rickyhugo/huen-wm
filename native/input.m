@@ -30,6 +30,7 @@ static struct {
     size_t queue_count;
     struct {
         HuenDragPhase phase;
+        CGEventType down_type;
         CGEventType drag_type;
         CGEventType up_type;
         HuenInteractionEvent sample;
@@ -64,6 +65,13 @@ static void cancel_drag(HuenCancelReason reason) {
     input.drag.sample.monotonic_ns = monotonic_ns();
     enqueue(input.drag.sample);
     input.drag.phase = HuenDragDraining;
+}
+
+static void cancel_unobserved_drag(HuenCancelReason reason) {
+    cancel_drag(reason);
+    CGMouseButton button = input.drag.down_type == kCGEventLeftMouseDown ? kCGMouseButtonLeft : kCGMouseButtonRight;
+    if (input.drag.phase == HuenDragDraining &&
+        !CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, button)) input.drag.phase = HuenDragIdle;
 }
 
 static uint32_t carbon_modifiers(CGEventFlags flags) {
@@ -141,7 +149,7 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
     (void)proxy;
     (void)context;
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-        cancel_drag(HuenCancelTapDisabled);
+        cancel_unobserved_drag(HuenCancelTapDisabled);
         if ((input.enabled || input.drag.phase != HuenDragIdle) && permissions_allowed() && input.tap) {
             CGEventTapEnable(input.tap, true);
             input.availability = input.stopping ? HuenInputStopping : HuenInputAvailable;
@@ -151,6 +159,7 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
         }
         return event;
     }
+    if (input.drag.phase == HuenDragDraining && type == input.drag.down_type) input.drag.phase = HuenDragIdle;
     if (input.drag.phase != HuenDragIdle) {
         if (type == input.drag.up_type) {
             if (input.drag.phase == HuenDragActive) {
@@ -195,6 +204,7 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
     const HuenHitRegion *hit = hit_for_down(type, point);
     if (!hit) return event;
     input.drag.phase = HuenDragActive;
+    input.drag.down_type = type;
     input.drag.drag_type = type == kCGEventLeftMouseDown ? kCGEventLeftMouseDragged : kCGEventRightMouseDragged;
     input.drag.up_type = type == kCGEventLeftMouseDown ? kCGEventLeftMouseUp : kCGEventRightMouseUp;
     input.next_gesture++;
@@ -255,19 +265,19 @@ HuenInputAvailability huen_input_configure(bool enabled, uint32_t modifiers) {
 
 HuenInputAvailability huen_input_status(void) {
     require_main_thread();
-    if (input.tap && !CFMachPortIsValid(input.tap)) cancel_drag(HuenCancelTapDisabled);
+    if (input.tap && !CFMachPortIsValid(input.tap)) cancel_unobserved_drag(HuenCancelTapDisabled);
     if (!input.enabled && input.drag.phase == HuenDragIdle) {
         if (input.tap) CGEventTapEnable(input.tap, false);
         input.availability = input.stopping ? HuenInputStopping : HuenInputDisabled;
     } else if (!permissions_allowed()) {
-        cancel_drag(HuenCancelPermission);
+        cancel_unobserved_drag(HuenCancelPermission);
         input.availability = HuenInputPermissionDenied;
     } else if (!install_tap()) {
-        cancel_drag(HuenCancelTapDisabled);
+        cancel_unobserved_drag(HuenCancelTapDisabled);
         input.availability = HuenInputTapUnavailable;
     } else {
         if (!CGEventTapIsEnabled(input.tap)) {
-            cancel_drag(HuenCancelTapDisabled);
+            cancel_unobserved_drag(HuenCancelTapDisabled);
             CGEventTapEnable(input.tap, true);
         }
         input.availability = input.stopping ? HuenInputStopping :
