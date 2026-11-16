@@ -38,7 +38,7 @@ var routing_blocked = false;
 var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
 var suspended = false;
-const Transition = struct { display: u32, workspace: usize, generation: u64, focus_target: ?u64 };
+const Transition = struct { display: u32, workspace: usize, from: usize, generation: u64, focus_target: ?u64 };
 const SnapshotPresentation = enum { idle, pending, instant, captured, fallback };
 var transition: ?Transition = null;
 var generation: u64 = 0;
@@ -525,8 +525,8 @@ fn remapPrevious(previous: ?usize, current: usize, remap: []const ?usize) ?usize
 fn previousWorkspace(display_slot: usize) *?usize {
     return if (config.workspace_monitors != null) &global_previous else &displays.items[display_slot].previous_workspace;
 }
-fn recordPrevious(display_slot: usize, prior: usize, workspace: usize) void {
-    if (prior != workspace) previousWorkspace(display_slot).* = prior;
+fn recordPrevious(display_slot: usize, from: usize, workspace: usize) void {
+    if (from != workspace) previousWorkspace(display_slot).* = from;
 }
 fn currentWorkspace(display_slot: usize) usize {
     const display = displays.items[display_slot];
@@ -1469,7 +1469,7 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     selectDisplay(displayIdentity);
 }
 
-fn commitWorkspace(displaySlot: usize, workspace: usize, focus_target: ?u64) bool {
+fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_target: ?u64) bool {
     const displayIdentity = displays.items[displaySlot].identity;
     if (displayBlocked(displayIdentity)) {
         transition_error = "Native fullscreen window blocks this display";
@@ -1480,7 +1480,6 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, focus_target: ?u64) boo
         return false;
     };
     defer transaction.deinit();
-    const prior = displays.items[displaySlot].workspace;
     displays.items[displaySlot].workspace = workspace;
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
@@ -1492,7 +1491,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, focus_target: ?u64) boo
         };
     }
     if (!transaction.commit()) return false;
-    recordPrevious(displaySlot, prior, workspace);
+    recordPrevious(displaySlot, from, workspace);
     focusWorkspace(displayIdentity, focus_target);
     transition_error = null;
     native.platform_config_changed();
@@ -1507,12 +1506,12 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     snapshot_presentation = if (covered) .captured else .fallback;
     const slot = displayIndex(pending.display);
     if (slot) |displaySlot| {
-        _ = commitWorkspace(displaySlot, pending.workspace, pending.focus_target);
+        _ = commitWorkspace(displaySlot, pending.workspace, pending.from, pending.focus_target);
     } else transition_error = "Display disconnected during workspace capture";
     transition = null;
     if (covered) native.huen_scene_finish(pending.generation);
 }
-fn switchWorkspace(display_slot: usize, workspace: usize, focus_target: ?u64) [*:0]const u8 {
+fn switchWorkspace(display_slot: usize, workspace: usize, from: usize, focus_target: ?u64) [*:0]const u8 {
     const destination = displays.items[display_slot];
     if (workspace == destination.workspace) {
         focusWorkspace(destination.identity, focus_target);
@@ -1521,13 +1520,49 @@ fn switchWorkspace(display_slot: usize, workspace: usize, focus_target: ?u64) [*
     generation += 1;
     if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
         snapshot_presentation = .instant;
-        if (!commitWorkspace(display_slot, workspace, focus_target)) return failure(transition_error orelse "WorkspacePlacementFailed");
+        if (!commitWorkspace(display_slot, workspace, from, focus_target)) return failure(transition_error orelse "WorkspacePlacementFailed");
         return json(.{ .ok = true });
     }
     snapshot_presentation = .pending;
-    transition = .{ .display = destination.identity, .workspace = workspace, .generation = generation, .focus_target = focus_target };
+    transition = .{ .display = destination.identity, .workspace = workspace, .from = from, .generation = generation, .focus_target = focus_target };
     native.huen_scene_begin(destination.identity, generation, config.duration, sceneReady, @ptrFromInt(generation));
     return json(.{ .ok = true, .accepted = true, .generation = generation });
+}
+// Global mode: show `workspace` on its display and select that display. `from` is the
+// selected display's workspace and becomes the global previous workspace.
+fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u8 {
+    const resolved = resolvePlacements();
+    const owner = resolved[workspace] orelse return failure("NoWorkspaceOwner");
+    const destination_slot = displayIndex(owner).?;
+    var migration = false;
+    for (resolved[0..config.workspace_count], placements[0..config.workspace_count]) |destination, placement| if (destination != placement.display) {
+        migration = true;
+    };
+    for (windows.items) |window| if (window.display != resolved[window.workspace].?) {
+        migration = true;
+    };
+    if (migration) {
+        generation += 1;
+        snapshot_presentation = .instant;
+        var activations: [11]Routing.Activation = undefined;
+        if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, .{ .display = owner, .workspace = workspace }, &activations) })) return failure(transition_error orelse "MonitorRoutingFailed");
+        commitPlacements(resolved);
+        routing_blocked = false;
+        recordPrevious(destination_slot, from, workspace);
+        focusWorkspace(owner, focus_target);
+        native.platform_config_changed();
+        return json(.{ .ok = true, .monitor = owner, .verified = selected_display == owner, .target = focus_target });
+    }
+    if (!routeMembership()) {
+        routing_blocked = true;
+        return failure(transition_error orelse "MonitorRoutingFailed");
+    }
+    routing_blocked = false;
+    if (displays.items[destination_slot].workspace != workspace) return switchWorkspace(destination_slot, workspace, from, focus_target);
+    focusWorkspace(owner, focus_target);
+    const verified = selected_display == owner and (focus_target == null or focused == focus_target);
+    if (verified) recordPrevious(destination_slot, from, workspace);
+    return json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
@@ -1536,6 +1571,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     switch (command) {
         .status => {
             const launch = native.platform_launch_status();
+            const Placed = struct { index: usize, name: []const u8, display: ?u32, home: []const u8 };
+            var placed: [10]Placed = undefined;
+            for (config.workspaces[0..config.workspace_count], placements[0..config.workspace_count], placed[0..config.workspace_count], 0..) |*workspace, *placement, *item, index| {
+                item.* = .{ .index = index + 1, .name = text(&workspace.name), .display = placement.display, .home = text(&placement.home) };
+            }
             return json(.{
                 .running = true,
                 .suspended = suspended,
@@ -1546,6 +1586,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .display_count = displays.items.len,
                 .selected_monitor = selected_display,
                 .workspace_owner = workspaceOwner(),
+                .placements = placed[0..config.workspace_count],
                 .routing_blocked = routing_blocked,
                 .workspace_backend = "corner-parking",
                 .filter = std.mem.span(native.platform_filter()),
@@ -1665,36 +1706,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     switch (command) {
         .workspace => |selection| {
             const workspace = resolveWorkspace(selection, displaySlot) catch |err| return failure(@errorName(err));
-            if (config.workspace_monitors == null) return switchWorkspace(displaySlot, workspace, null);
-            const resolved = resolvePlacements();
-            const owner = resolved[workspace] orelse return failure("NoWorkspaceOwner");
-            const destination_slot = displayIndex(owner).?;
-            const prior = currentWorkspace(destination_slot);
-            var migration = false;
-            for (resolved[0..config.workspace_count], placements[0..config.workspace_count]) |destination, placement| if (destination != placement.display) {
-                migration = true;
-            };
-            for (windows.items) |window| if (window.display != resolved[window.workspace].?) {
-                migration = true;
-            };
-            if (migration) {
-                generation += 1;
-                snapshot_presentation = .instant;
-                var activations: [11]Routing.Activation = undefined;
-                if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, .{ .display = owner, .workspace = workspace }, &activations) })) return failure(transition_error orelse "MonitorRoutingFailed");
-                commitPlacements(resolved);
-                routing_blocked = false;
-                recordPrevious(destination_slot, prior, workspace);
-                focusWorkspace(owner, null);
-                native.platform_config_changed();
-                return json(.{ .ok = true });
-            }
-            if (!routeMembership()) {
-                routing_blocked = true;
-                return failure(transition_error orelse "MonitorRoutingFailed");
-            }
-            routing_blocked = false;
-            return switchWorkspace(destination_slot, workspace, null);
+            if (config.workspace_monitors == null) return switchWorkspace(displaySlot, workspace, display.workspace, null);
+            return showWorkspace(workspace, currentWorkspace(displaySlot), null);
         },
         .focus_monitor => |selection| {
             var screens: [monitor.capacity]monitor.Screen = undefined;
@@ -1712,9 +1725,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
         .focus_last => {
             const identity = focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow");
             const window = windows.items[windowIndex(identity).?];
+            if (config.workspace_monitors != null) return showWorkspace(window.workspace, currentWorkspace(displaySlot), identity);
             const slot = displayIndex(window.display).?;
-            if (resolvePlacements()[window.workspace]) |owner| if (window.display != owner) return failure("WindowOffOwnerDisplay");
-            if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, identity);
+            if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, displays.items[slot].workspace, identity);
             focusWorkspace(window.display, identity);
             return json(.{ .ok = true, .verified = focused == identity, .target = identity });
         },
@@ -1858,7 +1871,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const workspace = resolveWorkspace(selection, selectionSlot(sourceIndex, displaySlot)) catch |err| return failure(@errorName(err));
                     const destination = resolved[workspace] orelse windows.items[sourceIndex].display;
                     const destination_slot = displayIndex(destination).?;
-                    const prior = currentWorkspace(destination_slot);
+                    const from = currentWorkspace(if (config.workspace_monitors != null) displaySlot else destination_slot);
                     if (workspace == windows.items[sourceIndex].workspace and destination == windows.items[sourceIndex].display) return json(.{ .ok = true, .changed = false });
                     const identity = windows.items[sourceIndex].identity;
                     generation += 1;
@@ -1867,7 +1880,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, .{ .display = destination, .workspace = workspace }, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
                     commitPlacements(resolved);
                     routing_blocked = false;
-                    recordPrevious(destination_slot, prior, workspace);
+                    recordPrevious(destination_slot, from, workspace);
                     const verified = focusVerified(identity);
                     native.platform_config_changed();
                     return json(.{ .ok = true, .verified = verified, .target = identity });

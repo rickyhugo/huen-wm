@@ -78,9 +78,9 @@ The workflow run does not check selectors on a second display, `workspace_monito
 
 ## Check two-display owner routing and monitor focus
 
-`--owner` and `--monitors` replace the default checks. They need at least two displays, with at least one built-in and one external display.
+`--owner`, `--monitors`, and `--global` replace the default checks. They need at least two displays, with at least one built-in and one external display.
 With other hardware, the driver prints `SKIP`, records `skipped` in `result.json`, and exits with code zero before preflight.
-Both use the fixture with `--spread`, a 12-point gap, instant switches, and workspaces One, Two, and Three. They exclude `--scenes` and `--workflow`.
+Both use the fixture with `--spread`, a 12-point gap, instant switches, and workspaces One, Two, and Three. They exclude `--scenes`, `--workflow`, and each other.
 The driver reads and warps the pointer through public CoreGraphics calls to set a known start position.
 
 ```sh
@@ -114,7 +114,29 @@ python3 scripts/native-smoke.py \
 - A reload without mouse follow repeats `built-in`, `external`, `previous`, and `next`. Selection changes, and the pointer stays.
 - `restore` returns the original fixture frames.
 
-Neither mode checks display disconnection, per-workspace monitors, or session restore.
+`--global` (N2) checks per-workspace monitors. It starts with `workspace_monitors = { 'external', 'built-in' }`, `mouse_follows_monitor = false`, workspaces One and Two on `external`, and Three on `built-in`.
+
+```sh
+python3 scripts/native-smoke.py \
+    --app "$HOME/Applications/Huen WM.app" \
+    --output "$PWD/native-global-result" \
+    --global
+```
+
+Each placement check reads `status`, `windows`, `workspaces`, and `monitors`. `status.workspace_owner` must be null, `routing_blocked` false, and `status.placements` must list One and Two on the external display and Three on the built-in display with an empty `home`. Every window must be on its workspace's display, shown windows inside the gapped frame, and hidden windows parked. The pointer stays at the built-in display's center until mouse follow is enabled. The checks run in this order:
+
+- Every window starts in One on the external display. The built-in display shows Three.
+- `workspace 1` selects the external display. `send-to-workspace 3` moves the key window to the built-in display and keeps the external display selected.
+- `workspace 3` selects the built-in display and focuses the sent window, and the external display keeps One visible. `workspace previous` selects the external display again.
+- `occupied+1` jumps to Three on the built-in display. `occupied+1` again wraps to One on the external display.
+- `+1` shows Two on the external display. `previous` shows One again.
+- From Three, `focus last` targets a window in One and selects the external display.
+- With Two on the external display and Three selected, `focus last` shows One on the external display, selects it, and focuses the window.
+- A reload with mouse follow keeps the placement. `workspace 3` and `workspace previous` warp the pointer to each display's center.
+- A reload to the owner configuration (no `monitor` fields) routes every window to the external display, with the sent window parked in Three. A reload back to the split configuration returns Three to the built-in display. Neither reload leaves routing blocked.
+- `restore` returns the original fixture frames.
+
+None of these modes checks display disconnection or session restore.
 
 ## Prepare broader native checks
 

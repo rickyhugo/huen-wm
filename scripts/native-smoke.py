@@ -184,6 +184,7 @@ class NativeSmoke:
             "workflow": arguments.workflow,
             "owner": arguments.owner,
             "monitors": arguments.monitors,
+            "global": arguments.global_routing,
         }
         self.fixture_pid = None
         self.manager_started = False
@@ -1094,7 +1095,7 @@ class NativeSmoke:
         replacement.write_text(content)
         replacement.replace(self.config_path)
 
-    def monitor_config(self, owners, follows):
+    def monitor_config(self, owners, follows, split=False):
         routing = (
             ""
             if owners is None
@@ -1103,22 +1104,28 @@ class NativeSmoke:
             + "}, "
         )
         follow = "true" if follows else "false"
+        workspaces = (
+            "{{name='One',monitor='external'},{name='Two',monitor='external'},"
+            "{name='Three',monitor='built-in'}}"
+            if split
+            else "{'One','Two','Three'}"
+        )
         self.write_config(
             f"return {{gap={WORKFLOW_GAP}, motion_duration=0, "
-            f"workspaces={{'One','Two','Three'}}, {routing}"
+            f"workspaces={workspaces}, {routing}"
             f"mouse_follows_monitor={follow}, bindings={{}}}}\n"
         )
 
-    def reload_monitors(self, name, owners, follows):
+    def reload_monitors(self, name, owners, follows, split=False):
         before = self.cli("status")["config_reload"]["request_id"]
-        self.monitor_config(owners, follows)
+        self.monitor_config(owners, follows, split)
         self.wait(
             name,
             lambda: self.cli("status")["config_reload"],
             lambda reload: reload["request_id"] > before and reload["state"] == "ready",
         )
 
-    def start_multi_display(self, owners, follows):
+    def start_multi_display(self, owners, follows, split=False):
         found = active_displays()
         self.result["active_displays"] = found
         if (
@@ -1143,7 +1150,7 @@ class NativeSmoke:
             healthy=False,
         )
         self.fixture_pid = original["process_id"]
-        self.monitor_config(owners, follows)
+        self.monitor_config(owners, follows, split)
         self.start_manager()
         managed = self.wait(
             "fixture-only management",
@@ -1388,6 +1395,198 @@ class NativeSmoke:
             owner,
             center(self.monitors[owner]["full_bounds"]),
         )
+        self.restored(original_frames)
+        self.result["passed"] = True
+
+    def global_homes(self):
+        return {1: self.external, 2: self.external, 3: self.built_in}
+
+    def observe_spread(self):
+        observation = self.observe_routing()
+        observation["monitors"] = self.cli("monitors")
+        return observation
+
+    def spreads(self, observation, active, memberships):
+        homes = self.global_homes()
+        status = observation["status"]
+        report = observation["report"]
+        if (
+            not report
+            or status.get("workspace_owner") is not None
+            or status.get("routing_blocked")
+        ):
+            return False
+        expected = [
+            {"index": index, "name": name, "display": homes[index], "home": ""}
+            for index, name in ((1, "One"), (2, "Two"), (3, "Three"))
+        ]
+        if status.get("placements") != expected:
+            return False
+        listing = observation["workspaces"]
+        if sorted((item["index"], item["display"]) for item in listing) != sorted(
+            homes.items()
+        ):
+            return False
+        if {
+            item["display"]: item["index"] for item in listing if item["active"]
+        } != active:
+            return False
+        if {
+            item["id"]: item["workspace"] for item in observation["monitors"]
+        } != active:
+            return False
+        managed = {window["title"]: window for window in observation["windows"]}
+        observed = frames(report)
+        if set(managed) != set(self.identities) or set(observed) != set(
+            self.identities
+        ):
+            return False
+        shown = set()
+        for title, window in managed.items():
+            workspace = memberships.get(title, 1)
+            display = homes[workspace]
+            area = self.monitors[display]["frame"]
+            if window["display"] != display or window["workspace"] != workspace:
+                return False
+            if active[display] == workspace:
+                shown.add(title)
+                if window["parked"] or not contains(
+                    area, observed[title], WORKFLOW_GAP
+                ):
+                    return False
+            elif not window["parked"] or overlaps(area, observed[title]):
+                return False
+        return not any(
+            overlaps(observed[first], observed[second])
+            for first, second in itertools.combinations(sorted(shown), 2)
+        )
+
+    def spread(self, name, active, memberships=None):
+        return self.wait(
+            name,
+            self.observe_spread,
+            lambda observation: self.spreads(observation, active, memberships or {}),
+        )
+
+    def keyed(self, name, candidates):
+        return key_title(
+            self.wait(
+                name, self.fixture, lambda report: key_title(report) in candidates
+            )
+        )
+
+    def accepted(self, name, *arguments):
+        return self.reply(name, arguments, lambda response: response.get("ok") is True)
+
+    def exercise_global(self):
+        owners = ("external", "built-in")
+        original_frames = self.start_multi_display(owners, False, split=True)
+        external = self.external
+        built_in = self.built_in
+        everyone = set(self.identities)
+        both = {external: 1, built_in: 3}
+        self.result["global_displays"] = {"external": external, "built_in": built_in}
+        resting = self.place_pointer(built_in)
+        self.spread("split config routes workspace One to external", both)
+
+        self.accepted("workspace 1 is accepted", "workspace", "1")
+        self.selected(
+            "workspace 1 selects external without a pointer warp", external, resting
+        )
+        sent = self.keyed("workspace 1 focuses a fixture window", everyone)
+        stay = everyone - {sent}
+        moved = {sent: 3}
+        self.accepted(
+            "send-to-workspace 3 from external is accepted", "send-to-workspace", "3"
+        )
+        self.spread("send-to-workspace 3 moves the window to built-in", both, moved)
+        self.selected("send-to-workspace keeps external selected", external, resting)
+
+        self.accepted("workspace 3 is accepted", "workspace", "3")
+        self.spread("workspace 3 keeps workspace One visible on external", both, moved)
+        self.selected(
+            "workspace 3 selects built-in without a pointer warp", built_in, resting
+        )
+        self.keyed("workspace 3 focuses the sent window", {sent})
+        self.accepted("workspace previous is accepted", "workspace", "previous")
+        self.selected("workspace previous returns to external", external, resting)
+        self.keyed("workspace previous focuses a workspace One window", stay)
+
+        self.accepted("occupied+1 from external is accepted", "workspace", "occupied+1")
+        self.selected(
+            "occupied+1 jumps to workspace Three on built-in", built_in, resting
+        )
+        self.keyed("occupied+1 focuses the sent window", {sent})
+        self.accepted("occupied+1 from built-in is accepted", "workspace", "occupied+1")
+        self.selected(
+            "occupied+1 wraps to workspace One on external", external, resting
+        )
+        self.keyed("occupied+1 focuses a workspace One window", stay)
+
+        self.accepted("+1 from external is accepted", "workspace", "+1")
+        self.spread(
+            "+1 shows workspace Two on external", {external: 2, built_in: 3}, moved
+        )
+        self.selected("+1 keeps external selected", external, resting)
+        self.accepted("previous from Two is accepted", "workspace", "previous")
+        self.spread("previous shows workspace One on external", both, moved)
+        last = self.keyed("previous focuses a workspace One window", stay)
+
+        self.accepted("workspace 3 before focus last is accepted", "workspace", "3")
+        self.keyed("workspace 3 focuses the sent window again", {sent})
+        self.targets("focus last targets the external window", ("focus", "last"), last)
+        self.selected("focus last selects external", external, resting)
+        self.keyed("focus last focuses the external window", {last})
+
+        self.accepted(
+            "workspace 2 before hidden focus last is accepted", "workspace", "2"
+        )
+        self.spread(
+            "workspace 2 parks workspace One", {external: 2, built_in: 3}, moved
+        )
+        self.accepted(
+            "workspace 3 before hidden focus last is accepted", "workspace", "3"
+        )
+        self.keyed(
+            "workspace 3 focuses the sent window before hidden focus last", {sent}
+        )
+        self.selected(
+            "workspace 3 selects built-in before hidden focus last", built_in, resting
+        )
+        self.accepted("focus last to a hidden workspace is accepted", "focus", "last")
+        self.spread("focus last shows workspace One on external", both, moved)
+        self.selected(
+            "focus last to a hidden workspace selects external", external, resting
+        )
+        self.keyed("focus last focuses the hidden window", {last})
+
+        self.reload_monitors("reload enables mouse follow", owners, True, split=True)
+        self.spread("reload keeps the split placement", both, moved)
+        self.place_pointer(external)
+        self.accepted("workspace 3 with mouse follow is accepted", "workspace", "3")
+        self.selected(
+            "workspace 3 warps the pointer to built-in",
+            built_in,
+            center(self.monitors[built_in]["full_bounds"]),
+        )
+        self.accepted("previous with mouse follow is accepted", "workspace", "previous")
+        self.selected(
+            "workspace previous warps the pointer to external",
+            external,
+            center(self.monitors[external]["full_bounds"]),
+        )
+
+        self.reload_monitors("reload to owner config", owners, False)
+        self.routed(
+            "owner config routes every window to external", external, 1, stay, moved
+        )
+        self.check(
+            "owner config does not block routing",
+            self.cli("status").get("routing_blocked") is False,
+            self.cli("status"),
+        )
+        self.reload_monitors("reload back to split config", owners, False, split=True)
+        self.spread("split config returns workspace Three to built-in", both, moved)
         self.restored(original_frames)
         self.result["passed"] = True
 
@@ -1684,16 +1883,27 @@ def main():
         action="store_true",
         help="Check focus-monitor selectors on two displays instead",
     )
+    parser.add_argument(
+        "--global",
+        dest="global_routing",
+        action="store_true",
+        help="Check per-workspace monitor placement on two displays instead",
+    )
     arguments = parser.parse_args()
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
-    if sum((arguments.workflow, arguments.owner, arguments.monitors)) > 1:
-        parser.error("--workflow, --owner, and --monitors are exclusive")
-    if arguments.scenes and (
-        arguments.workflow or arguments.owner or arguments.monitors
-    ):
+    exclusive = (
+        arguments.workflow,
+        arguments.owner,
+        arguments.monitors,
+        arguments.global_routing,
+    )
+    if sum(exclusive) > 1:
+        parser.error("--workflow, --owner, --monitors, and --global are exclusive")
+    if arguments.scenes and any(exclusive):
         parser.error(
-            "--workflow, --owner, and --monitors use instant switches and exclude --scenes"
+            "--workflow, --owner, --monitors, and --global use instant switches "
+            "and exclude --scenes"
         )
     smoke = NativeSmoke(arguments)
     try:
@@ -1703,6 +1913,8 @@ def main():
             smoke.exercise_owner()
         elif arguments.monitors:
             smoke.exercise_monitors()
+        elif arguments.global_routing:
+            smoke.exercise_global()
         else:
             smoke.exercise()
     except Skipped as reason:

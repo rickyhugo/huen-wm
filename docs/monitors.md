@@ -44,15 +44,15 @@ Directional and cyclic selectors (`left`, `right`, `up`, `down`, `next`, `previo
 | `UnknownMonitor` | An unknown class, for example `builtin`. |
 | `InvalidMonitorName` | `name:` without a name, or a name longer than 127 bytes. |
 
-Command behavior across split displays (`workspace N` jumps, global `previous`) is not complete yet. See [the plan](global-workspaces-plan.md).
+Split placement is global mode. See [workspace selectors](commands.md#workspace-selectors) for command behavior across displays.
 
 `mouse_follows_monitor` accepts a boolean and defaults to `false`. The built-in classification comes from `CGDisplayIsBuiltin`, not the display name.
 
 ## Commands and focus
 
-With global routing enabled, `workspace N` activates workspace N on its owner, even if keyboard focus is on another monitor. After placement succeeds, the command selects the destination monitor when it is empty or AX confirms focus on its target window. Selecting an already visible workspace uses the same focus confirmation. An empty workspace retains that selection independently of the last focused window and does not invent a focus change.
+With global routing enabled, `workspace N` activates workspace N on its display, even if keyboard focus is on another monitor. When N is already visible on another display, the command does not move it: it selects that display (a jump), and the other displays keep their workspaces. After placement succeeds, the command selects the destination monitor when it is empty or AX confirms focus on its target window. Selecting an already visible workspace uses the same focus confirmation. An empty workspace retains that selection independently of the last focused window and does not invent a focus change. `workspace previous`, relative selectors, and `focus last` jump across displays in the same way.
 
-`send-to-workspace N` moves the window's display and workspace membership together. It does not activate an inactive destination workspace or change the selected monitor. If the send changes the owner monitor, the new owner retains the old owner's active workspace, not the send destination workspace. Window rules with a workspace use the same owner.
+`send-to-workspace N` moves the window's display and workspace membership together. It does not activate an inactive destination workspace or change the selected monitor. If the send changes a workspace's display, that display retains its active workspace, not the send destination workspace. Window rules with a workspace use the same placement.
 
 A genuine observed focus change updates the selected monitor. Repeated observations of the old focused window do not undo an explicit empty-workspace selection. Directional focus selects the target's monitor only after AX confirms focus on that target. An accepted but unverified focus request leaves monitor selection and pointer position unchanged until a genuine observed focus change.
 
@@ -70,9 +70,9 @@ Routing fails closed when required geometry is unreadable, a window is stale, a 
 
 A valid reload publishes its configuration and resets the binding mode to `main` even if routing fails. The failure is a runtime routing error, not a configuration rejection. `routing_blocked` prevents normal reconciliation while the runtime retries routing.
 
-`status` includes `selected_monitor`, `workspace_owner`, and `routing_blocked`. `monitors` includes `built_in`, `uuid`, `workspace`, and `selected`. `uuid` is the CoreGraphics display UUID, or null when unavailable. `workspace` is the display's active workspace number. With global routing enabled, it is null on displays other than the owner.
+`status` includes `selected_monitor`, `workspace_owner`, `placements`, and `routing_blocked`. `workspace_owner` is the shared display in owner mode and null when workspaces are split or global routing is off. `placements` lists each workspace's `index`, `name`, `display` (null without global routing or displays), and `home` (a display UUID hint, or an empty string when placement comes from configuration). `monitors` includes `built_in`, `uuid`, `workspace`, and `selected`. `uuid` is the CoreGraphics display UUID, or null when unavailable. `workspace` is the display's active workspace number. With global routing enabled, it is null on a display that has no workspace placed on it.
 
-`focus-monitor MONITOR` selects a display in both modes. See [commands](commands.md#monitor-focus). With global routing enabled, a display other than the owner is empty, so the command selects it without a focus change. `workspace N` still activates N on the owner and selects the owner. With global routing enabled, `workspaces` lists each workspace only under its committed owner. Existing per-window placement errors and the status `transition_error` describe failures.
+`focus-monitor MONITOR` selects a display in both modes. See [commands](commands.md#monitor-focus). With global routing enabled, a display that has no workspace placed on it is empty, so the command selects it without a focus change. `workspace N` activates N on its display and selects that display. With global routing enabled, `workspaces` lists each workspace only under its committed display. Existing per-window placement errors and the status `transition_error` describe failures.
 
 ## Layout integration and verification limits
 

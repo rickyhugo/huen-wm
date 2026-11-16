@@ -126,7 +126,8 @@ Minimized, native fullscreen, stale, and display-less windows are skipped.
 A target on a hidden workspace first switches its display to that workspace.
 That switch reveals and focuses the target instead of the workspace's own candidate.
 Without a candidate, `focus last` returns `NoPreviousWindow`.
-With `workspace_monitors`, a target stranded off the owner display returns `WindowOffOwnerDisplay`.
+With `workspace_monitors`, the target's workspace is shown on its display, and that display is selected.
+A target that routing has not moved yet is routed first.
 
 `cycle next` and `cycle previous` focus through the active display's visible windows.
 `cycle next tiled` and `cycle next floating` restrict the candidates to one kind.
@@ -155,7 +156,7 @@ The next command reads actual focus again.
 The candidate is the remembered focus of the display's active workspace.
 An empty display is selected without a focus change.
 The command works with and without `workspace_monitors`.
-With `workspace_monitors`, a display other than the owner is empty.
+With `workspace_monitors`, a display that has no workspace placed on it is empty.
 
 | Selector | Target |
 | --- | --- |
@@ -198,12 +199,21 @@ Eligible windows are not minimized, native fullscreen, or stale.
 Configuration rejects a `name:` selector without a matching workspace with `UnknownWorkspaceName`.
 After a reload removes that name, the runtime command returns the same error.
 
-With `workspace_monitors`, selectors resolve against the owner display.
-Otherwise they resolve against the active display and never select another monitor.
+Without `workspace_monitors`, selectors resolve against the active display and never select another monitor.
 Each display has its own previous workspace.
-With `workspace_monitors`, one previous workspace follows the owner across migration.
 The previous workspace changes only after a switch commits.
-A reload maps it to the workspace with the same name, or drops it.
+
+With `workspace_monitors` (global mode), every workspace is on one display:
+
+- Selectors resolve against the whole workspace set. The current workspace is the selected display's active workspace.
+- If the selected display shows no workspace, the current workspace is the lowest-numbered workspace that is visible on any display. In owner mode, this is the owner's active workspace.
+- Occupancy counts eligible windows on all displays.
+- `workspace` shows the target on its display and selects that display. A target that is already visible is not switched; its display is selected and its candidate is focused.
+- `send-to-workspace` moves the window to the target workspace's display. The selection does not change.
+- `move-to-workspace` shows the target on its display and focuses the moved window.
+- One previous workspace is shared by all displays. It is the selected display's current workspace before a `workspace`, `move-to-workspace`, or `focus last` that leaves it. A jump to a workspace that is already visible on another display also records it, but only after the jump selects that display.
+
+A reload maps the previous workspace to the workspace with the same name, or drops it.
 
 `previous` without a recorded workspace returns `NoPreviousWorkspace`.
 `empty` and `next-empty` without a match return `NoEmptyWorkspace`.
