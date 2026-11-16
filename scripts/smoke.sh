@@ -68,13 +68,18 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { bindings = {{ mods='alt', key='h', command='cycle next both' }} }",
         "return { bindings = {{ mods='alt', key='h', command='cycle next tiled 1' }} }",
         "return { bindings = {{ mods='alt', key='h', command='swap next 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='center now' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-by 40' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-by nan 0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='resize-by 10001 0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='resize-by 0 20 20' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus --wrap last' }} }",
         "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
         "return {",
     ):
         config.write_text(content)
         invoke("validate", "--config", str(config), success=False)
-    config.write_text("return {bindings={{mods='alt',key='tab',command='focus last'},{mods='alt',key='n',command='cycle next'},{mods='alt+shift',key='n',command='cycle previous floating'},{mods='ctrl',key='n',command='cycle next tiled'},{mods='alt',key='j',command='swap next'},{mods='alt',key='k',command='swap previous'}}}")
+    config.write_text("return {bindings={{mods='alt',key='tab',command='focus last'},{mods='alt',key='n',command='cycle next'},{mods='alt+shift',key='n',command='cycle previous floating'},{mods='ctrl',key='n',command='cycle next tiled'},{mods='alt',key='j',command='swap next'},{mods='alt',key='k',command='swap previous'},{mods='alt',key='c',command='center'},{mods='alt',key='left',command='move-by -40 0'},{mods='alt',key='right',command='resize-by 40 -20.5'}}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0, workspace_back_and_forth = true }; return settings")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]

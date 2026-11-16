@@ -564,6 +564,11 @@ fn resizeMaster(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     state.ratio = next / available;
     return (next - previous) * sign;
 }
+fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
+    const source = windows.items[source_index];
+    if (workspaceLayout(source.display, source.workspace).layout == .dwindle) return layouts.resizePoints(source.identity, axis, delta, config.gap);
+    return resizeMaster(source_index, axis, delta);
+}
 fn displayIndex(identity: u32) ?usize {
     for (displays.items, 0..) |display, index| if (display.identity == identity) return index;
     return null;
@@ -1664,14 +1669,45 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .resize_points => |resize| {
                     if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
                     if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
-                    const state = workspaceLayout(source.display, source.workspace);
-                    const applied = if (state.layout == .dwindle)
-                        layouts.resizePoints(source.identity, resize.axis, resize.delta, config.gap) catch |err| return failure(@errorName(err))
-                    else
-                        resizeMaster(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
+                    const applied = resizeTiled(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
                     reconcile();
                     native.platform_config_changed();
                     return json(.{ .ok = true, .applied_delta = applied });
+                },
+                .resize_by => |offset| {
+                    if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
+                    if (!source.floating) {
+                        if (offset.vertical != 0 and workspaceLayout(source.display, source.workspace).layout == .master) return failure("MasterHeightResizeUnsupported");
+                        if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                        const width = if (offset.horizontal != 0) resizeTiled(sourceIndex, .width, offset.horizontal) catch |err| return failure(@errorName(err)) else 0;
+                        const height = if (offset.vertical != 0) resizeTiled(sourceIndex, .height, offset.vertical) catch |err| return failure(@errorName(err)) else 0;
+                        reconcile();
+                        native.platform_config_changed();
+                        return json(.{ .ok = true, .applied = .{ .width = width, .height = height } });
+                    }
+                    const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
+                    var frame = source.floating_frame;
+                    frame.width = std.math.clamp(frame.width + offset.horizontal, 80, @max(80, area.left + area.width - frame.left));
+                    frame.height = std.math.clamp(frame.height + offset.vertical, 80, @max(80, area.top + area.height - frame.top));
+                    source.floating_frame = frame;
+                },
+                .center, .move_by => {
+                    if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
+                    if (!source.floating) return failure("WindowNotFloating");
+                    const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
+                    var frame = source.floating_frame;
+                    switch (command) {
+                        .center => {
+                            frame.left = area.left + (area.width - frame.width) / 2;
+                            frame.top = area.top + (area.height - frame.height) / 2;
+                        },
+                        .move_by => |offset| {
+                            frame.left += offset.horizontal;
+                            frame.top += offset.vertical;
+                        },
+                        else => unreachable,
+                    }
+                    source.floating_frame = boundedFloating(frame, area);
                 },
                 .fullscreen => {
                     const transaction = PlacementTransaction.begin(.{ .display = source.display }) catch |err| return failure(@errorName(err));

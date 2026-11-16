@@ -25,6 +25,7 @@ pub const Focus = struct { direction: Direction, wrap: bool = false };
 pub const Step = enum { next, previous };
 pub const WindowKind = enum { tiled, floating };
 pub const Cycle = struct { step: Step, kind: ?WindowKind = null };
+pub const Offset = struct { horizontal: f64, vertical: f64 };
 pub const RelativeScope = enum { all, occupied };
 pub const EmptySearch = enum { first, next };
 pub const WorkspaceSelector = union(enum) {
@@ -58,6 +59,9 @@ pub const Command = union(enum) {
     group: Group,
     resize: f64,
     resize_points: struct { axis: Axis, delta: f64 },
+    resize_by: Offset,
+    move_by: Offset,
+    center,
     split: Orientation,
     fullscreen,
     toggle_floating,
@@ -66,6 +70,12 @@ pub const Command = union(enum) {
     send_to_workspace: WorkspaceSelector,
     move_to_workspace: WorkspaceSelector,
 };
+
+fn pointDelta(value: []const u8) !f64 {
+    const delta = try std.fmt.parseFloat(f64, value);
+    if (!std.math.isFinite(delta) or @abs(delta) > 10000) return error.InvalidPointDelta;
+    return delta;
+}
 
 fn parseSelector(value: []const u8, workspace_count: usize) !WorkspaceSelector {
     if (std.mem.eql(u8, value, "previous")) return .previous;
@@ -119,10 +129,8 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (std.mem.eql(u8, verb, "resize")) {
         const value = argument orelse return error.MissingArgument;
         if (std.meta.stringToEnum(Axis, value)) |axis| {
-            const amount = tokens.next() orelse return error.MissingArgument;
+            const delta = try pointDelta(tokens.next() orelse return error.MissingArgument);
             if (tokens.next() != null) return error.ExtraArgument;
-            const delta = try std.fmt.parseFloat(f64, amount);
-            if (!std.math.isFinite(delta) or @abs(delta) > 10000) return error.InvalidPointDelta;
             return .{ .resize_points = .{ .axis = axis, .delta = delta } };
         }
         if (tokens.next() != null) return error.ExtraArgument;
@@ -150,6 +158,12 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (tokens.next() != null) return error.ExtraArgument;
         return .{ .focus = .{ .direction = direction, .wrap = wrap } };
     }
+    inline for (.{ .{ "move-by", "move_by" }, .{ "resize-by", "resize_by" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
+        const horizontal = try pointDelta(argument orelse return error.MissingArgument);
+        const vertical = try pointDelta(tokens.next() orelse return error.MissingArgument);
+        if (tokens.next() != null) return error.ExtraArgument;
+        return @unionInit(Command, verb_tag[1], .{ .horizontal = horizontal, .vertical = vertical });
+    };
     if (std.mem.eql(u8, verb, "cycle")) {
         const step = std.meta.stringToEnum(Step, argument orelse return error.MissingArgument) orelse return error.InvalidStep;
         const kind = if (tokens.next()) |value| std.meta.stringToEnum(WindowKind, value) orelse return error.InvalidWindowKind else null;
@@ -164,7 +178,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         }
         return .{ .close = argument != null };
     }
-    inline for (.{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore", "fullscreen" }) |name| if (std.mem.eql(u8, verb, name)) {
+    inline for (.{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore", "fullscreen", "center" }) |name| if (std.mem.eql(u8, verb, name)) {
         if (argument != null) return error.ExtraArgument;
         return @unionInit(Command, name, {});
     };
