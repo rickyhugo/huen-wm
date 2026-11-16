@@ -219,6 +219,10 @@ pub const Controls = struct {
             }
             const hit = target orelse return null;
             const target_ref = try coreReference(if (hit.kind == .header) hit.group else hit.node);
+            if (try encloses(store, target_ref, gesture.source)) {
+                bridge.huen_groups_preview(null);
+                return null;
+            }
             if (!safeSubtree(store, target_ref, windows)) return error.ObscuredTarget;
             if (!unobscured(store, target_ref, windows, coreRect(hit.rect))) return error.ObscuredTarget;
             const placement: layout.Drop = if (hit.kind == .header) .join else dropPlacement(hit.rect, sample.point);
@@ -241,6 +245,12 @@ fn belongs(store: *const layout.Store, node: layout.NodeRef, state: *const layou
     var handle = store.resolve(node) catch return false;
     while (store.nodes[handle].parent) |parent| handle = parent;
     return state.root == handle;
+}
+fn encloses(store: *const layout.Store, ancestor: layout.NodeRef, descendant: layout.NodeRef) !bool {
+    const root = try store.resolve(ancestor);
+    var handle = try store.resolve(descendant);
+    while (handle != root) handle = store.nodes[handle].parent orelse return false;
+    return true;
 }
 fn safeSubtree(store: *const layout.Store, node: layout.NodeRef, windows: []const Window) bool {
     const root = store.resolve(node) catch return false;
