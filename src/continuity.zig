@@ -148,7 +148,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     return .{ .arena = arena, .snapshot = snapshot };
 }
 
-pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, owner: ?u32) !Imported {
+pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, placed: [10]?u32) !Imported {
     var saved_keys: [1024]session.StableKey = undefined;
     var current_keys: [1024]session.StableKey = undefined;
     for (snapshot.windows, 0..) |window, index| saved_keys[index] = window.key;
@@ -192,7 +192,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         const state = if (slot.*) |*state| state else continue;
         const root = snapshot.roots[index];
         const workspace = workspaceIndex(config, root.workspace, root.occurrence);
-        var display = owner;
+        var display = if (workspace) |workspace_index| placed[workspace_index] else null;
         if (display == null) for (screens) |screen| {
             if (std.mem.eql(u8, text(&screen.hint), root.display_hint) and root.display_hint.len != 0) {
                 display = screen.identity;

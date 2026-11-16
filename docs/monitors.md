@@ -12,9 +12,39 @@ return {
 }
 ```
 
-Omitting `workspace_monitors` preserves independent workspaces on each monitor. With the list present, all configured workspaces share one owner monitor. This is a global preference, not a per-workspace mapping.
+Omitting `workspace_monitors` preserves independent workspaces on each monitor. With the list present, workspaces without a `monitor` field share one owner monitor.
 
 The first monitor class with an available display wins. Within that class, the current owner stays the owner if it remains eligible. Otherwise, the display with the lowest numeric identity wins. If neither class matches, a surviving owner remains the owner, or the lowest display identity wins. Display identities are not persistent monitor names.
+
+### Per-workspace monitor
+
+A `workspaces` entry is a name string or a table with `name` and an optional `monitor`. `monitor` is one monitor selector or an ordered list of 1 to 4 selectors. Only `built-in`, `external`, and `name:NAME` are accepted. `name:` matches the display name that `monitors` reports. Duplicate names resolve to the lowest display identity.
+
+```lua
+return {
+	workspace_monitors = { 'external', 'built-in' },
+	workspaces = {
+		{ name = '1', monitor = { 'name:DELL U2725QE', 'external' } },
+		'2',
+		{ name = '6', monitor = 'built-in' },
+	},
+}
+```
+
+Placement for each workspace uses the first available match of its `monitor` list, then `workspace_monitors`, then its current display, then the lowest display identity. Within a matching entry, the current display stays if it still matches. Workspaces without `monitor` therefore share one owner display as before.
+
+Directional and cyclic selectors (`left`, `right`, `up`, `down`, `next`, `previous`) are rejected with `RelativeMonitorSelector`. They are relative to the selected display, so a placement that uses them would change with focus. Other errors:
+
+| Error | Cause |
+|---|---|
+| `MonitorRequiresGlobalWorkspaces` | `monitor` without `workspace_monitors`. |
+| `EmptyWorkspaceMonitors` | `monitor = {}`. |
+| `TooManyWorkspaceMonitors` | More than 4 entries. |
+| `DuplicateMonitor` | The same selector twice. |
+| `UnknownMonitor` | An unknown class, for example `builtin`. |
+| `InvalidMonitorName` | `name:` without a name, or a name longer than 127 bytes. |
+
+Command behavior across split displays (`workspace N` jumps, global `previous`) is not complete yet. See [the plan](global-workspaces-plan.md).
 
 `mouse_follows_monitor` accepts a boolean and defaults to `false`. The built-in classification comes from `CGDisplayIsBuiltin`, not the display name.
 

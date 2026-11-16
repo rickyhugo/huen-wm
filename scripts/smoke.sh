@@ -105,6 +105,26 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     monitor_selectors = ("left", "right", "up", "down", "next", "previous", "built-in", "external", "name:DELL U2725QE")
     config.write_text("return {bindings={" + ",".join(f"{{mods='alt',key='{key}',command='focus-monitor {selector}'}}" for key, selector in zip("asdfghjkl", monitor_selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    for content, expected in (
+        ("return { workspaces = {{ name='1', monitor='built-in' }} }", "MonitorRequiresGlobalWorkspaces"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={} }} }", "EmptyWorkspaceMonitors"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'built-in','external','name:A','name:B','name:C'} }} }", "TooManyWorkspaceMonitors"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'external','external'} }} }", "DuplicateMonitor"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'name:DELL','name:DELL'} }} }", "DuplicateMonitor"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor='builtin' }} }", "UnknownMonitor"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor='left' }} }", "RelativeMonitorSelector"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'external','next'} }} }", "RelativeMonitorSelector"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor='name:' }} }", "InvalidMonitorName"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'external',7} }} }", "ExpectedString"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor={'external',typo='built-in'} }} }", "ExpectedDenseArray"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitors='external' }} }", "UnknownConfigurationField"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ monitor='external' }} }", "ExpectedWorkspaceName"),
+        ("return { workspace_monitors={'external'}, workspaces = {{ name='1', monitor=true }} }", "ExpectedTable"),
+    ):
+        config.write_text(content)
+        assert expected in invoke("validate", "--config", str(config), success=False).stderr, (content, expected)
+    config.write_text("return { workspace_monitors={'external','built-in'}, workspaces = {{ name='1', monitor={'name:DELL U2725QE','external'} }, '2', { name='6', monitor='built-in' }, { name='7' }} }")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("warn('@on'); for index=1,1000 do warn(string.rep('x',512)) end; return {}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("error(string.rep('x',100000))")

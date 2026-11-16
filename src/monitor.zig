@@ -11,8 +11,37 @@ pub fn resolve(selection: commands.MonitorSelector, screens: []const Screen, cur
     return switch (selection) {
         .direction => |direction| directional(screens, current orelse return error.NoSelectedMonitor, direction) orelse error.NoMonitorInDirection,
         .step => |step| stepped(screens, current, step),
-        .class => |class| lowestMatching(screens, class, "") orelse error.NoMatchingMonitor,
-        .name => |name| lowestMatching(screens, null, name.text()) orelse error.UnknownMonitorName,
+        .class => lowestMatching(screens, selection) orelse error.NoMatchingMonitor,
+        .name => lowestMatching(screens, selection) orelse error.UnknownMonitorName,
+    };
+}
+
+pub const Wanted = struct { home: ?u32, monitors: []const commands.MonitorSelector, fallback: []const commands.MonitorSelector, current: ?u32 };
+
+pub fn place(screens: []const Screen, wanted: Wanted) ?u32 {
+    if (screens.len == 0) return null;
+    if (wanted.home) |identity| if (find(screens, identity) != null) return identity;
+    if (preferred(screens, wanted.monitors, wanted.current)) |identity| return identity;
+    if (preferred(screens, wanted.fallback, wanted.current)) |identity| return identity;
+    if (wanted.current) |identity| if (find(screens, identity) != null) return identity;
+    var lowest = screens[0].identity;
+    for (screens) |screen| lowest = @min(lowest, screen.identity);
+    return lowest;
+}
+
+fn preferred(screens: []const Screen, selectors: []const commands.MonitorSelector, current: ?u32) ?u32 {
+    for (selectors) |selection| {
+        if (current) |identity| if (find(screens, identity)) |screen| if (matches(screen, selection)) return identity;
+        if (lowestMatching(screens, selection)) |identity| return identity;
+    }
+    return null;
+}
+
+fn matches(screen: Screen, selection: commands.MonitorSelector) bool {
+    return switch (selection) {
+        .class => |class| screen.built_in == (class == .@"built-in"),
+        .name => |name| std.mem.eql(u8, screen.name, name.text()),
+        .direction, .step => false,
     };
 }
 
@@ -80,12 +109,10 @@ fn stepped(screens: []const Screen, current: ?u32, step: commands.Step) u32 {
     };
 }
 
-fn lowestMatching(screens: []const Screen, class: ?commands.MonitorClass, name: []const u8) ?u32 {
+fn lowestMatching(screens: []const Screen, selection: commands.MonitorSelector) ?u32 {
     var best: ?u32 = null;
     for (screens) |screen| {
-        if (class) |required| {
-            if (screen.built_in != (required == .@"built-in")) continue;
-        } else if (!std.mem.eql(u8, screen.name, name)) continue;
+        if (!matches(screen, selection)) continue;
         if (best == null or screen.identity < best.?) best = screen.identity;
     }
     return best;
