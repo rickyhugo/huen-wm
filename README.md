@@ -52,7 +52,10 @@ huen-wm monitors
 huen-wm workspaces
 huen-wm focus left
 huen-wm focus --wrap right
+huen-wm focus last
+huen-wm cycle next
 huen-wm swap right
+huen-wm swap next
 huen-wm select parent
 huen-wm select child
 huen-wm tilemove right
@@ -62,6 +65,9 @@ huen-wm group stacked
 huen-wm group next
 huen-wm group split
 huen-wm move down
+huen-wm center
+huen-wm move-by -40 0
+huen-wm resize-by 40 0
 huen-wm resize 0.05
 huen-wm resize width 50
 huen-wm split toggle
@@ -69,13 +75,16 @@ huen-wm fullscreen
 huen-wm toggle-floating
 huen-wm layout master
 huen-wm workspace 2
+huen-wm workspace previous
+huen-wm workspace occupied+1
 huen-wm send-to-workspace 3
+huen-wm move-to-workspace name:Browse
 huen-wm reload
 huen-wm restore
 huen-wm stop
 ```
 
-Lists and command results are JSON. Workspace indices start at one. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `restore`, also named `recover`, attempts to restore geometry recorded during this live session and suspends tiling until restart. An incomplete restore returns an error with an `outstanding` count. Unminimize affected windows or leave native fullscreen, then retry `restore`. `stop`, `quit`, SIGINT, and SIGTERM attempt restoration before exiting and log outstanding failures.
+Lists and command results are JSON. Workspace indices start at one. Workspace commands also accept `previous`, signed offsets, occupied offsets, `empty`, `next-empty`, and `name:` selectors. `move-to-workspace` sends the focused window and follows it. `focus last` returns to the previous window, and `cycle` steps through the visible windows. `center`, `move-by`, and `resize-by` adjust floating geometry; `resize-by` also resizes tiles. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `restore`, also named `recover`, attempts to restore geometry recorded during this live session and suspends tiling until restart. An incomplete restore returns an error with an `outstanding` count. Unminimize affected windows or leave native fullscreen, then retry `restore`. `stop`, `quit`, SIGINT, and SIGTERM attempt restoration before exiting and log outstanding failures.
 
 `resize width DELTA` and `resize height DELTA` resize the focused tile in logical points. `split` changes its nearest binary split. Managed `fullscreen` fills the visible display without creating a macOS Space and preserves the underlying layout. See [layout controls](docs/layout.md).
 
@@ -83,7 +92,7 @@ Lists and command results are JSON. Workspace indices start at one. `resize` cha
 
 Named modes replace bindings transactionally. Application commands support bundle-ID launch, explicit shell execution, close, and conditional normal termination. See [commands and modes](docs/commands.md).
 
-The example binds Control+Option+H/J/K/L to directional focus. Names identify physical ANSI key positions, independent of the active input layout. Add Shift to swap. Control+Option+1 through 5 selects workspaces. Add Shift to send the focused window. Control+Option+Space toggles floating. Plus/minus changes the split ratio. Control+Option+R reloads.
+The example binds Control+Option+H/J/K/L to directional focus. Names identify physical ANSI key positions, independent of the active input layout. Add Shift to swap. Control+Option+1 through 5 selects workspaces. Add Shift to send the focused window. Control+Option+[ and ] step through occupied workspaces. Add Shift to move the focused window to the neighboring workspace and follow it. Control+Option+Tab focuses the previous window. Control+Option+C centers a floating window. Control+Option+Space toggles floating. Plus/minus changes the split ratio. Control+Option+R reloads.
 
 ## Configuration
 
@@ -109,7 +118,7 @@ Set `enabled = false` to remove the item. A successful reload can enable it agai
 
 Monitors select workspaces independently by default. Optional `workspace_monitors = { "external", "built-in" }` routes all workspaces to a preferred owner. `mouse_follows_monitor = true` enables lazy pointer centering after monitor selection. Disconnected-display migration preserves workspace numbers. See [monitor routing](docs/monitors.md) for migration and rollback behavior.
 
-Returning to a workspace restores its last eligible focused window, with managed fullscreen taking priority. Closed, minimized, or unavailable windows do not receive focus.
+Returning to a workspace restores its last eligible focused window, with managed fullscreen taking priority. Set `workspace_back_and_forth = true` to make selecting the current workspace return to the previous one. Closed, minimized, or unavailable windows do not receive focus.
 
 Workspaces use reversible corner parking through public Accessibility APIs. macOS requires a narrow edge of parked windows to remain visible. They do not hide applications or minimize windows into the Dock. User-minimized and native-fullscreen windows are not moved. A native fullscreen window conservatively blocks its display.
 

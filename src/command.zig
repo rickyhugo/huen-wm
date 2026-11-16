@@ -22,6 +22,19 @@ pub const Name = struct {
     }
 };
 pub const Focus = struct { direction: Direction, wrap: bool = false };
+pub const Step = enum { next, previous };
+pub const WindowKind = enum { tiled, floating };
+pub const Cycle = struct { step: Step, kind: ?WindowKind = null };
+pub const Offset = struct { horizontal: f64, vertical: f64 };
+pub const RelativeScope = enum { all, occupied };
+pub const EmptySearch = enum { first, next };
+pub const WorkspaceSelector = union(enum) {
+    index: usize,
+    name: Name,
+    previous,
+    relative: struct { scope: RelativeScope, offset: i8 },
+    empty: EmptySearch,
+};
 pub const Launch = struct { bundle: Name, new_instance: bool = false };
 pub const Command = union(enum) {
     status,
@@ -32,24 +45,54 @@ pub const Command = union(enum) {
     quit,
     restore,
     focus: Focus,
+    focus_last,
+    cycle: Cycle,
     mode: Name,
     launch: Launch,
     exec_and_forget: []const u8,
     close: bool,
     swap: Direction,
+    swap_cycle: Step,
     move: Direction,
     tilemove: Direction,
     select: Selection,
     group: Group,
     resize: f64,
     resize_points: struct { axis: Axis, delta: f64 },
+    resize_by: Offset,
+    move_by: Offset,
+    center,
     split: Orientation,
     fullscreen,
     toggle_floating,
     layout: Layout,
-    workspace: usize,
-    send_to_workspace: usize,
+    workspace: WorkspaceSelector,
+    send_to_workspace: WorkspaceSelector,
+    move_to_workspace: WorkspaceSelector,
 };
+
+fn pointDelta(value: []const u8) !f64 {
+    const delta = try std.fmt.parseFloat(f64, value);
+    if (!std.math.isFinite(delta) or @abs(delta) > 10000) return error.InvalidPointDelta;
+    return delta;
+}
+
+fn parseSelector(value: []const u8, workspace_count: usize) !WorkspaceSelector {
+    if (std.mem.eql(u8, value, "previous")) return .previous;
+    if (std.mem.eql(u8, value, "empty")) return .{ .empty = .first };
+    if (std.mem.eql(u8, value, "next-empty")) return .{ .empty = .next };
+    const occupied = std.mem.startsWith(u8, value, "occupied");
+    const offset_text = if (occupied) value["occupied".len..] else value;
+    if (offset_text.len > 0 and (offset_text[0] == '+' or offset_text[0] == '-')) {
+        const offset = std.fmt.parseInt(i8, offset_text, 10) catch return error.InvalidWorkspaceOffset;
+        if (offset == 0 or @abs(offset) > 10) return error.InvalidWorkspaceOffset;
+        return .{ .relative = .{ .scope = if (occupied) .occupied else .all, .offset = offset } };
+    }
+    if (value.len == 0 or !std.ascii.isDigit(value[0])) return error.InvalidWorkspaceSelector;
+    const index = std.fmt.parseInt(usize, value, 10) catch return error.InvalidWorkspaceSelector;
+    if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
+    return .{ .index = index - 1 };
+}
 
 pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (input.len > 511 or std.mem.indexOfScalar(u8, input, 0) != null or std.mem.indexOfAny(u8, input, "\r\n") != null or !std.unicode.utf8ValidateSlice(input)) return error.InvalidCommandText;
@@ -61,6 +104,15 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .exec_and_forget = shell };
     }
     var argument = tokens.next();
+    inline for (.{ .{ "workspace", "workspace" }, .{ "send-to-workspace", "send_to_workspace" }, .{ "move-to-workspace", "move_to_workspace" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
+        const value = argument orelse return error.MissingArgument;
+        if (std.mem.startsWith(u8, value, "name:")) {
+            const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr) + "name:".len;
+            return @unionInit(Command, verb_tag[1], .{ .name = try Name.init(std.mem.trimEnd(u8, input[start..], " \t")) });
+        }
+        if (tokens.next() != null) return error.ExtraArgument;
+        return @unionInit(Command, verb_tag[1], try parseSelector(value, workspace_count));
+    };
     if (std.mem.eql(u8, verb, "group")) {
         const action = argument orelse return error.MissingArgument;
         if (std.mem.eql(u8, action, "join")) {
@@ -77,10 +129,8 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (std.mem.eql(u8, verb, "resize")) {
         const value = argument orelse return error.MissingArgument;
         if (std.meta.stringToEnum(Axis, value)) |axis| {
-            const amount = tokens.next() orelse return error.MissingArgument;
+            const delta = try pointDelta(tokens.next() orelse return error.MissingArgument);
             if (tokens.next() != null) return error.ExtraArgument;
-            const delta = try std.fmt.parseFloat(f64, amount);
-            if (!std.math.isFinite(delta) or @abs(delta) > 10000) return error.InvalidPointDelta;
             return .{ .resize_points = .{ .axis = axis, .delta = delta } };
         }
         if (tokens.next() != null) return error.ExtraArgument;
@@ -98,11 +148,27 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .launch = .{ .bundle = bundle, .new_instance = new_instance } };
     }
     if (std.mem.eql(u8, verb, "focus")) {
+        if (argument != null and std.mem.eql(u8, argument.?, "last")) {
+            if (tokens.next() != null) return error.ExtraArgument;
+            return .focus_last;
+        }
         const wrap = argument != null and std.mem.eql(u8, argument.?, "--wrap");
         if (wrap) argument = tokens.next();
         const direction = std.meta.stringToEnum(Direction, argument orelse return error.MissingArgument) orelse return error.InvalidDirection;
         if (tokens.next() != null) return error.ExtraArgument;
         return .{ .focus = .{ .direction = direction, .wrap = wrap } };
+    }
+    inline for (.{ .{ "move-by", "move_by" }, .{ "resize-by", "resize_by" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
+        const horizontal = try pointDelta(argument orelse return error.MissingArgument);
+        const vertical = try pointDelta(tokens.next() orelse return error.MissingArgument);
+        if (tokens.next() != null) return error.ExtraArgument;
+        return @unionInit(Command, verb_tag[1], .{ .horizontal = horizontal, .vertical = vertical });
+    };
+    if (std.mem.eql(u8, verb, "cycle")) {
+        const step = std.meta.stringToEnum(Step, argument orelse return error.MissingArgument) orelse return error.InvalidStep;
+        const kind = if (tokens.next()) |value| std.meta.stringToEnum(WindowKind, value) orelse return error.InvalidWindowKind else null;
+        if (tokens.next() != null) return error.ExtraArgument;
+        return .{ .cycle = .{ .step = step, .kind = kind } };
     }
     if (tokens.next() != null) return error.ExtraArgument;
     if (std.mem.eql(u8, verb, "mode")) return .{ .mode = try Name.init(argument orelse return error.MissingArgument) };
@@ -112,7 +178,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         }
         return .{ .close = argument != null };
     }
-    inline for (.{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore", "fullscreen" }) |name| if (std.mem.eql(u8, verb, name)) {
+    inline for (.{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore", "fullscreen", "center" }) |name| if (std.mem.eql(u8, verb, name)) {
         if (argument != null) return error.ExtraArgument;
         return @unionInit(Command, name, {});
     };
@@ -129,13 +195,10 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .toggle_floating;
     }
     const value = argument orelse return error.MissingArgument;
+    if (std.mem.eql(u8, verb, "swap")) if (std.meta.stringToEnum(Step, value)) |step| return .{ .swap_cycle = step };
     inline for (.{ "swap", "move", "tilemove" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);
     if (std.mem.eql(u8, verb, "select")) return .{ .select = std.meta.stringToEnum(Selection, value) orelse return error.InvalidSelection };
     if (std.mem.eql(u8, verb, "layout")) return .{ .layout = std.meta.stringToEnum(Layout, value) orelse return error.InvalidLayout };
     if (std.mem.eql(u8, verb, "split")) return .{ .split = std.meta.stringToEnum(Orientation, value) orelse return error.InvalidOrientation };
-    const index = std.fmt.parseInt(usize, value, 10) catch return error.UnknownCommand;
-    if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
-    if (std.mem.eql(u8, verb, "workspace")) return .{ .workspace = index - 1 };
-    if (std.mem.eql(u8, verb, "send-to-workspace")) return .{ .send_to_workspace = index - 1 };
     return error.UnknownCommand;
 }

@@ -20,7 +20,8 @@ def invoke(*arguments, success=True):
         raise RuntimeError(f"{arguments}: {completed.returncode}\n{completed.stdout}{completed.stderr}")
     return completed
 
-assert "send-to-workspace" in invoke("--help").stdout
+help_text = invoke("--help").stdout
+assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by"))
 doctor = json.loads(invoke("doctor").stdout)
 assert doctor["zig"] == "0.17.0" and not doctor["permission_prompted"]
 assert not doctor["screen_capture_required_for_tiling"]
@@ -35,6 +36,13 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { motion_duration = 'fast' }",
         "return { workspaces = {} }",
         "return { bindings = {{ mods='alt', key='h', command='workspace 99' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace +0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace -11' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace occupied' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace 1+' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace previous 2' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='workspace name:' }} }",
+        "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='send-to-workspace name:two' }} }",
         "return {bindings={{mods='+alt++',key='h',command='quit'}}}",
         "return { bindings = {{ mods='alt', key='h', command='quit' }, { mods='alt', key='h', command='quit' }} }",
         "while true do end",
@@ -53,11 +61,28 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return {rules={setmetatable({}, {__index=function() error('bad rule') end})}}",
         "return { gap = string.rep('x', 100000000) }",
         "return os.execute('true')",
+        "return { workspace_back_and_forth = 'yes' }",
+        "return { bindings = {{ mods='alt', key='h', command='move-to-workspace' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus last 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='cycle' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='cycle sideways' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='cycle next both' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='cycle next tiled 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='swap next 1' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='center now' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-by 40' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-by nan 0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='resize-by 10001 0' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='resize-by 0 20 20' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='focus --wrap last' }} }",
+        "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
         "return {",
     ):
         config.write_text(content)
         invoke("validate", "--config", str(config), success=False)
-    config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0 }; return settings")
+    config.write_text("return {bindings={{mods='alt',key='tab',command='focus last'},{mods='alt',key='n',command='cycle next'},{mods='alt+shift',key='n',command='cycle previous floating'},{mods='ctrl',key='n',command='cycle next tiled'},{mods='alt',key='j',command='swap next'},{mods='alt',key='k',command='swap previous'},{mods='alt',key='c',command='center'},{mods='alt',key='left',command='move-by -40 0'},{mods='alt',key='right',command='resize-by 40 -20.5'}}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    config.write_text("local settings = { gap = 9, layout = 'master', motion_duration = 0, workspace_back_and_forth = true }; return settings")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     invoke("validate", "--config", str(config) + ".missing", success=False)
     config.write_text("print('user output is not the response'); return {}")
@@ -67,6 +92,9 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     config.write_bytes(b" " * (256 * 1024 + 1))
     invoke("validate", "--config", str(config), success=False)
     config.write_text("return {bindings={{mods='alt',key='b',command='workspace 1'}},workspaces={'one'}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    selectors = ("previous", "+1", "-10", "occupied+1", "occupied-2", "empty", "next-empty", "name:web dev")
+    config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}},{{mods='ctrl',key='{key}',command='move-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     config.write_text("warn('@on'); for index=1,1000 do warn(string.rep('x',512)) end; return {}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]

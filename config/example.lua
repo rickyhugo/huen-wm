@@ -11,6 +11,12 @@ for index = 1, 5 do
     bind("ctrl+alt", tostring(index), "workspace " .. index)
     bind("ctrl+alt+shift", tostring(index), "send-to-workspace " .. index)
 end
+bind("ctrl+alt", "[", "workspace occupied-1")
+bind("ctrl+alt", "]", "workspace occupied+1")
+bind("ctrl+alt+shift", "[", "move-to-workspace -1")
+bind("ctrl+alt+shift", "]", "move-to-workspace +1")
+bind("ctrl+alt", "tab", "focus last")
+bind("ctrl+alt", "c", "center")
 bind("ctrl+alt", "space", "toggle-floating")
 bind("ctrl+alt", "=", "resize 0.05")
 bind("ctrl+alt", "-", "resize -0.05")
