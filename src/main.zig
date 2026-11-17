@@ -845,6 +845,12 @@ const PlacementTransaction = struct {
             if (self.originals[self.identityIndex(window.identity)] == null) continue;
             const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
             if (outcome == .applied) continue;
+            // An application that rejects its tile size must not block every other window. Float it, as reconcile does,
+            // and derive goals again so later windows do not receive tiles sized around the rejected one.
+            if (outcome == .rolled_back and visible(window.*) and !window.floating) {
+                floatRejectedTile(window);
+                if (window.floating and deriveGoals() and placeVisibility(window, targetFrame(window.*), false) == .applied) continue;
+            }
             self.rollback(index + 1);
             transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
             return false;
