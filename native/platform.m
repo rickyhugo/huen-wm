@@ -36,6 +36,10 @@ static NSMutableDictionary<NSNumber *, NSValue *> *observers;
 static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 static uint64_t nextIdentity = 1;
 static BOOL dirty = YES;
+// A created window can be unready for the first scan (no subrole, frame, or settable position) and posts no later notification.
+// Until this deadline, scans repeat quickly so the window tiles once it is ready instead of at the next periodic scan.
+static double settleScanDeadline = 0;
+static void requestSettleScans(void) { dirty = YES; settleScanDeadline = CACurrentMediaTime() + 1.0; }
 static BOOL stopping;
 static NSString *configPath;
 static NSString *bundleFilter;
@@ -159,8 +163,9 @@ static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
 }
 
 static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
-    (void)observer; (void)element; (void)notification; (void)context;
-    dirty = YES;
+    (void)observer; (void)element; (void)context;
+    if (CFEqual(notification, kAXWindowCreatedNotification) || CFEqual(notification, kAXApplicationShownNotification)) requestSettleScans();
+    else dirty = YES;
 }
 
 static BOOL scanWindowSnapshot(void) {
@@ -186,9 +191,20 @@ static BOOL scanWindowSnapshot(void) {
         if (!observers[process]) {
             AXObserverRef observer;
             if (AXObserverCreate(application.processIdentifier, observationCallback, &observer) == kAXErrorSuccess) {
-                for (NSString *name in @[(__bridge NSString *)kAXWindowCreatedNotification, (__bridge NSString *)kAXFocusedWindowChangedNotification, (__bridge NSString *)kAXApplicationHiddenNotification, (__bridge NSString *)kAXApplicationShownNotification]) AXObserverAddNotification(observer, appElement, (__bridge CFStringRef)name, NULL);
-                CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes);
-                observers[process] = [NSValue valueWithPointer:observer];
+                BOOL registered = YES;
+                for (NSString *name in @[(__bridge NSString *)kAXWindowCreatedNotification, (__bridge NSString *)kAXFocusedWindowChangedNotification, (__bridge NSString *)kAXApplicationHiddenNotification, (__bridge NSString *)kAXApplicationShownNotification]) {
+                    AXError added = AXObserverAddNotification(observer, appElement, (__bridge CFStringRef)name, NULL);
+                    if (added != kAXErrorSuccess && added != kAXErrorNotificationAlreadyRegistered) registered = NO;
+                }
+                if (registered) {
+                    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes);
+                    observers[process] = [NSValue valueWithPointer:observer];
+                } else {
+                    // A launching application can reject registration. Retry soon, or its new windows would wait for periodic scans.
+                    // Applications that keep rejecting it are retried only by periodic scans.
+                    CFRelease(observer);
+                    if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans();
+                }
             }
         }
         CFTypeRef windowValues = NULL;
@@ -750,6 +766,11 @@ int platform_main(int argc, char **argv) {
         fcntl(serverSocket, F_SETFL, O_NONBLOCK);
         signal(SIGINT, signalHandler); signal(SIGTERM, signalHandler); signal(SIGPIPE, SIG_IGN);
         __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
+        // AX observers exist only for applications seen by an earlier scan, so launches need their own signal.
+        NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
+        for (NSNotificationName name in @[NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidUnhideApplicationNotification]) {
+            [workspaceCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(); }];
+        }
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
@@ -757,7 +778,8 @@ int platform_main(int argc, char **argv) {
             if (interrupted) platform_quit();
             wm_input_poll();
             double now = CACurrentMediaTime();
-            if ((dirty && now - lastScan > 0.15) || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
+            BOOL settling = now < settleScanDeadline && now - lastScan > 0.05;
+            if ((dirty && now - lastScan > 0.15) || settling || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;
                 if (stat(configPath.fileSystemRepresentation, &metadata) == 0 && (metadata.st_mtimespec.tv_sec != lastModified.tv_sec || metadata.st_mtimespec.tv_nsec != lastModified.tv_nsec)) {
