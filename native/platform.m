@@ -228,31 +228,33 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
 }
 
 // A nonzero process limits AX reads to that application. Other applications keep their last observations.
-static BOOL scanWindowSnapshot(pid_t onlyProcess) {
-    BOOL unmatched = NO;
-    NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
-    inputWindowOrdering = visibleWindows;
-    NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
-    for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
-        if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
-        if (bundleFilter.length && ![application.bundleIdentifier isEqualToString:bundleFilter]) continue;
-        NSNumber *process = @(application.processIdentifier);
-        NSRunningApplication *previous = applications[process];
-        if (previous && (previous.terminated || (previous.launchDate && application.launchDate && ![previous.launchDate isEqualToDate:application.launchDate]))) {
-            AXObserverRef observer = [observers[process] pointerValue];
-            if (observer) { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
-            NSIndexSet *expired = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return record.observation.pid == application.processIdentifier; }];
-            [records removeObjectsAtIndexes:expired];
-        }
-        applications[process] = application;
-        [livePids addObject:process];
-        if (onlyProcess && application.processIdentifier != onlyProcess) continue;
-        if (!onlyProcess && (scanningForCommand ? timeoutCounts[process] != nil : timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue)) continue;
-        AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
-        AXUIElementSetMessagingTimeout(appElement, 0.08);
-        if (!observers[process]) {
+// AX can reflect our placement before WindowServer publishes the matching CG bounds, so a scan with an unmatched placement retries.
+static void scanWindows(pid_t onlyProcess) {
+    for (NSUInteger attempt = 0; attempt < 3; attempt++) {
+        if (attempt) usleep(10000);
+        BOOL unmatched = NO;
+        NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+        inputWindowOrdering = visibleWindows;
+        NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
+        for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
+            if (application.processIdentifier == getpid() || application.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+            if (bundleFilter.length && ![application.bundleIdentifier isEqualToString:bundleFilter]) continue;
+            NSNumber *process = @(application.processIdentifier);
+            NSRunningApplication *previous = applications[process];
+            if (previous && (previous.terminated || (previous.launchDate && application.launchDate && ![previous.launchDate isEqualToDate:application.launchDate]))) {
+                AXObserverRef observer = [observers[process] pointerValue];
+                if (observer) { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
+                NSIndexSet *expired = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return record.observation.pid == application.processIdentifier; }];
+                [records removeObjectsAtIndexes:expired];
+            }
+            applications[process] = application;
+            [livePids addObject:process];
+            if (onlyProcess && application.processIdentifier != onlyProcess) continue;
+            if (!onlyProcess && (scanningForCommand ? timeoutCounts[process] != nil : timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue)) continue;
+            AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
+            AXUIElementSetMessagingTimeout(appElement, 0.08);
             AXObserverRef observer;
-            if (AXObserverCreate(application.processIdentifier, observationCallback, &observer) == kAXErrorSuccess) {
+            if (!observers[process] && AXObserverCreate(application.processIdentifier, observationCallback, &observer) == kAXErrorSuccess) {
                 BOOL registered = YES;
                 for (NSString *name in @[(__bridge NSString *)kAXWindowCreatedNotification, (__bridge NSString *)kAXFocusedWindowChangedNotification, (__bridge NSString *)kAXApplicationHiddenNotification, (__bridge NSString *)kAXApplicationShownNotification]) {
                     AXError added = AXObserverAddNotification(observer, appElement, (__bridge CFStringRef)name, NULL);
@@ -268,153 +270,138 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
                     if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans(application.processIdentifier);
                 }
             }
-        }
-        CFTypeRef windowValues = NULL;
-        readTimedOut = NO;
-        AXError scanResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windowValues);
-        if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
-            if (windowValues) CFRelease(windowValues);
-            for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
-            if (scanResult == kAXErrorCannotComplete) {
+            CFTypeRef windowValues = NULL;
+            readTimedOut = NO;
+            AXError scanResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windowValues);
+            if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
+                if (windowValues) CFRelease(windowValues);
+                for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+                if (scanResult == kAXErrorCannotComplete) {
+                    NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
+                    timeoutCounts[process] = @(count);
+                    if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
+                }
+                CFRelease(appElement); continue;
+            }
+            forgetTimeouts(application.processIdentifier);
+            NSArray *windows = CFBridgingRelease(windowValues);
+            NSMutableDictionary<NSValue *, NSValue *> *frames = [NSMutableDictionary dictionary];
+            for (id object in windows) {
+                AXUIElementRef element = (__bridge AXUIElementRef)object;
+                AXUIElementSetMessagingTimeout(element, 0.08);
+                WMRect frame;
+                if (readFrame(element, &frame)) frames[[NSValue valueWithPointer:element]] = [NSValue valueWithBytes:&frame objCType:@encode(WMRect)];
+                if (readTimedOut) break;
+            }
+            id focused = readTimedOut ? nil : attribute(appElement, kAXFocusedWindowAttribute);
+            NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
+            for (id object in windows) {
+                if (readTimedOut) break;
+                AXUIElementRef element = (__bridge AXUIElementRef)object;
+                AXUIElementSetMessagingTimeout(element, 0.08);
+                WindowRecord *record = nil;
+                for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier && CFEqual(candidate.element, element)) { record = candidate; break; }
+                NSString *subrole = attribute(element, kAXSubroleAttribute);
+                BOOL standard = [subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole];
+                NSValue *cachedFrame = frames[[NSValue valueWithPointer:element]];
+                if (record && (!subrole || (standard && !cachedFrame))) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; continue; }
+                if (!standard || !cachedFrame) continue;
+                WMRect frame;
+                [cachedFrame getValue:&frame];
+                if (!record) {
+                    if (records.count >= 1024) continue;
+                    Boolean positionSettable = false, sizeSettable = false;
+                    AXUIElementIsAttributeSettable(element, kAXPositionAttribute, &positionSettable);
+                    AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
+                    if (!positionSettable || !sizeSettable) continue;
+                    record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
+                    // WindowServer can publish a new window tens of milliseconds after AX does. A window created after the first scan
+                    // in an application that is not hidden opens on the current Space, so place it at once and let WindowServer
+                    // confirm it within the deadline. Without that confirmation it stops being eligible, as before.
+                    // Other new windows only make the scan retry instead of waiting unplaced for the next scan.
+                    BOOL revealing = revealApplication && revealApplication.processIdentifier == application.processIdentifier;
+                    // WindowServer does not list a hidden application's window, so that window stays assumed until it is shown.
+                    if (initialScanComplete && (!application.hidden || revealing)) record.assumedVisibleDeadline = (revealing ? revealDeadline : CACurrentMediaTime()) + 0.5;
+                    else record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
+                    WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
+                    [records addObject:record];
+                    AXUIElementSetMessagingTimeout(element, 0.08);
+                    observer = [observers[process] pointerValue];
+                    if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, NULL);
+                }
+                WMWindow observation = record.observation;
+                observation.frame = frame; observation.stale = false; observation.public_window_id = 0;
+                NSUInteger matchingAX = 0, matchingCG = 0;
+                NSUInteger matchedOrder = NSNotFound;
+                for (NSValue *candidate in frames.allValues) {
+                    WMRect candidateFrame; [candidate getValue:&candidateFrame];
+                    if (framesNear(frame, candidateFrame, 4)) matchingAX++;
+                }
+                for (NSDictionary *visibleWindow in visibleWindows) {
+                    if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
+                    CGRect bounds;
+                    if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) {
+                        matchingCG++;
+                        matchedOrder = [visibleWindows indexOfObjectIdenticalTo:visibleWindow];
+                        observation.public_window_id = [visibleWindow[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+                    }
+                }
+                BOOL unique = frames.count == windows.count && matchingAX == 1;
+                BOOL assumedVisible = unique && matchingCG == 0 && CACurrentMediaTime() < record.assumedVisibleDeadline;
+                observation.onscreen = unique && (matchingCG == 1 || assumedVisible);
+                if (!observation.onscreen) observation.public_window_id = 0;
+                observation.hit_eligible = observation.public_window_id != 0;
+                for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
+                    NSDictionary *front = visibleWindows[frontIndex];
+                    if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+                    CGRect bounds;
+                    if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds) || CGRectIntersectsRect(CGRectMake(frame.left, frame.top, frame.width, frame.height), bounds)) observation.hit_eligible = false;
+                }
+                observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
+                observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
+                if (!observation.minimized && !observation.fullscreen && unique && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
+                observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
+                copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
+                NSString *title = attribute(element, kAXTitleAttribute);
+                observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
+                record.observation = observation;
+                [seen addObject:@(observation.identity)];
+            }
+            if (readTimedOut) {
+                // The application stopped answering partway, usually while it launches or is busy. Keep its records as they
+                // are: the windows not reached are unknown, not gone.
                 NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
                 timeoutCounts[process] = @(count);
                 if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
+                if (onlyProcess) processScanRetryTime = CACurrentMediaTime() + 0.05;
+                CFRelease(appElement); continue;
             }
-            CFRelease(appElement); continue;
+            NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) {
+                (void)index; (void)stop;
+                if (record.observation.pid != application.processIdentifier || [seen containsObject:@(record.observation.identity)]) return NO;
+                CFTypeRef role = NULL, minimized = NULL;
+                AXError roleResult = AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute, &role);
+                AXError minimizedResult = AXUIElementCopyAttributeValue(record.element, kAXMinimizedAttribute, &minimized);
+                BOOL destroyed = roleResult == kAXErrorInvalidUIElement || minimizedResult == kAXErrorInvalidUIElement;
+                if (roleResult == kAXErrorSuccess && role && !CFEqual(role, kAXWindowRole)) destroyed = YES;
+                WMWindow observation = record.observation;
+                observation.stale = true; observation.onscreen = false; observation.focused = false;
+                if (minimizedResult == kAXErrorSuccess && minimized && CFGetTypeID(minimized) == CFBooleanGetTypeID()) observation.minimized = CFBooleanGetValue(minimized);
+                record.observation = observation;
+                record.animationDuration = 0; record.motion = WMMotionIdle;
+                if (role) CFRelease(role);
+                if (minimized) CFRelease(minimized);
+                return destroyed;
+            }];
+            [records removeObjectsAtIndexes:removed];
+            CFRelease(appElement);
         }
-        forgetTimeouts(application.processIdentifier);
-        NSArray *windows = CFBridgingRelease(windowValues);
-        NSMutableDictionary<NSValue *, NSValue *> *frames = [NSMutableDictionary dictionary];
-        for (id object in windows) {
-            AXUIElementRef element = (__bridge AXUIElementRef)object;
-            AXUIElementSetMessagingTimeout(element, 0.08);
-            WMRect frame;
-            if (readFrame(element, &frame)) frames[[NSValue valueWithPointer:element]] = [NSValue valueWithBytes:&frame objCType:@encode(WMRect)];
-            if (readTimedOut) break;
-        }
-        id focused = readTimedOut ? nil : attribute(appElement, kAXFocusedWindowAttribute);
-        NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
-        for (id object in windows) {
-            if (readTimedOut) break;
-            AXUIElementRef element = (__bridge AXUIElementRef)object;
-            AXUIElementSetMessagingTimeout(element, 0.08);
-            WindowRecord *record = nil;
-            for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier && CFEqual(candidate.element, element)) { record = candidate; break; }
-            NSString *subrole = attribute(element, kAXSubroleAttribute);
-            if (!subrole && record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; continue; }
-            if (![subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole]) continue;
-            WMRect frame;
-            NSValue *cachedFrame = frames[[NSValue valueWithPointer:element]];
-            if (!cachedFrame) {
-                if (record) { [seen addObject:@(record.observation.identity)]; WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
-                continue;
-            }
-            [cachedFrame getValue:&frame];
-            if (!record) {
-                if (records.count >= 1024) continue;
-                Boolean positionSettable = false, sizeSettable = false;
-                AXUIElementIsAttributeSettable(element, kAXPositionAttribute, &positionSettable);
-                AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
-                if (!positionSettable || !sizeSettable) continue;
-                record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
-                // WindowServer can publish a new window tens of milliseconds after AX does. A window created after the first scan
-                // in an application that is not hidden opens on the current Space, so place it at once and let WindowServer
-                // confirm it within the deadline. Without that confirmation it stops being eligible, as before.
-                // Other new windows only make the scan retry instead of waiting unplaced for the next scan.
-                BOOL revealing = revealApplication && revealApplication.processIdentifier == application.processIdentifier;
-                // WindowServer does not list a hidden application's window, so that window stays assumed until it is shown.
-                if (initialScanComplete && (!application.hidden || revealing)) record.assumedVisibleDeadline = (revealing ? revealDeadline : CACurrentMediaTime()) + 0.5;
-                else record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
-                WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
-                [records addObject:record];
-                AXUIElementSetMessagingTimeout(element, 0.08);
-                AXObserverRef observer = [observers[process] pointerValue];
-                if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, NULL);
-            }
-            WMWindow observation = record.observation;
-            observation.frame = frame; observation.stale = false;
-            observation.onscreen = false;
-            observation.public_window_id = 0;
-            observation.hit_eligible = false;
-            NSUInteger matchingAX = 0, matchingCG = 0;
-            NSUInteger matchedOrder = NSNotFound;
-            for (NSValue *candidate in frames.allValues) {
-                WMRect candidateFrame; [candidate getValue:&candidateFrame];
-                if (framesNear(frame, candidateFrame, 4)) matchingAX++;
-            }
-            for (NSDictionary *visibleWindow in visibleWindows) {
-                if ([visibleWindow[(__bridge NSString *)kCGWindowOwnerPID] intValue] != application.processIdentifier || [visibleWindow[(__bridge NSString *)kCGWindowLayer] intValue] != 0) continue;
-                CGRect bounds;
-                if (CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)visibleWindow[(__bridge NSString *)kCGWindowBounds], &bounds) && framesNear(frame, (WMRect){bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height}, 4)) {
-                    matchingCG++;
-                    matchedOrder = [visibleWindows indexOfObjectIdenticalTo:visibleWindow];
-                    observation.public_window_id = [visibleWindow[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
-                }
-            }
-            BOOL assumedVisible = frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.assumedVisibleDeadline;
-            observation.onscreen = frames.count == windows.count && matchingAX == 1 && (matchingCG == 1 || assumedVisible);
-            if (!observation.onscreen) observation.public_window_id = 0;
-            observation.hit_eligible = observation.public_window_id != 0;
-            for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
-                NSDictionary *front = visibleWindows[frontIndex];
-                if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
-                CGRect bounds;
-                if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) { observation.hit_eligible = false; break; }
-                CGRect tile = CGRectMake(frame.left, frame.top, frame.width, frame.height);
-                if (CGRectIntersectsRect(tile, bounds)) observation.hit_eligible = false;
-            }
-            observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
-            observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
-            if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
-            observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
-            copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
-            NSString *title = attribute(element, kAXTitleAttribute);
-            observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
-            record.observation = observation;
-            [seen addObject:@(observation.identity)];
-        }
-        if (readTimedOut) {
-            // The application stopped answering partway, usually while it launches or is busy. Keep its records as they
-            // are: the windows not reached are unknown, not gone.
-            NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
-            timeoutCounts[process] = @(count);
-            if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
-            if (onlyProcess) processScanRetryTime = CACurrentMediaTime() + 0.05;
-            CFRelease(appElement); continue;
-        }
-        NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) {
-            (void)index; (void)stop;
-            if (record.observation.pid != application.processIdentifier || [seen containsObject:@(record.observation.identity)]) return NO;
-            CFTypeRef role = NULL, minimized = NULL;
-            AXError roleResult = AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute, &role);
-            AXError minimizedResult = AXUIElementCopyAttributeValue(record.element, kAXMinimizedAttribute, &minimized);
-            BOOL destroyed = roleResult == kAXErrorInvalidUIElement || minimizedResult == kAXErrorInvalidUIElement;
-            if (roleResult == kAXErrorSuccess && role && !CFEqual(role, kAXWindowRole)) destroyed = YES;
-            WMWindow observation = record.observation;
-            observation.stale = true; observation.onscreen = false; observation.focused = false;
-            if (minimizedResult == kAXErrorSuccess && minimized && CFGetTypeID(minimized) == CFBooleanGetTypeID()) observation.minimized = CFBooleanGetValue(minimized);
-            record.observation = observation;
-            record.animationDuration = 0; record.motion = WMMotionIdle;
-            if (role) CFRelease(role);
-            if (minimized) CFRelease(minimized);
-            return destroyed;
-        }];
-        [records removeObjectsAtIndexes:removed];
-        CFRelease(appElement);
-    }
-    NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
-    [records removeObjectsAtIndexes:dead];
-    for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
-    for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) { [applications removeObjectForKey:process]; forgetTimeouts(process.intValue); }
-    if (!onlyProcess) initialScanComplete = YES;
-    return !unmatched;
-}
-
-static void scanWindows(pid_t onlyProcess) {
-    // AX can reflect our placement before WindowServer publishes the matching CG bounds.
-    for (NSUInteger attempt = 0; attempt < 3; attempt++) {
-        if (attempt) usleep(10000);
-        if (scanWindowSnapshot(onlyProcess)) break;
+        NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
+        [records removeObjectsAtIndexes:dead];
+        for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
+        for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) { [applications removeObjectForKey:process]; forgetTimeouts(process.intValue); }
+        if (!onlyProcess) initialScanComplete = YES;
+        if (!unmatched) break;
     }
 }
 
@@ -426,14 +413,13 @@ bool platform_session_attributes(uint64_t identity, HuenSessionAttributes *outpu
 }
 
 bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame) {
-    if (!window_id || !inputWindowOrdering) return false;
+    if (!window_id) return false;
     CGRect target = CGRectMake(frame.left, frame.top, frame.width, frame.height);
     for (NSDictionary *front in inputWindowOrdering) {
         if ([front[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == window_id) return true;
         if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
         CGRect bounds;
-        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds)) return false;
-        if (CGRectIntersectsRect(target, bounds)) return false;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds) || CGRectIntersectsRect(target, bounds)) return false;
     }
     return false;
 }
@@ -489,11 +475,6 @@ bool platform_warp_pointer(WMPoint point) {
     return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
 
-// A command does not scan again after its own writes, so a window it has just placed keeps its last observation.
-// Windows of one application parked on the same corner are observed as not on screen, because their frames are equal.
-// Mark a placed window as on screen, or it would be ineligible for focus and layout until the next scan.
-static void assumeOnscreen(WindowRecord *record) { WMWindow observation = record.observation; observation.onscreen = true; record.observation = observation; }
-
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
@@ -502,19 +483,16 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
         if (duration > 0 && memcmp(&priorTarget, &frame, sizeof(frame)) == 0 && record.motion == WMMotionAnimating) return true;
         WMRect current;
         if (!readFrame(record.element, &current)) return false;
-        if (framesNear(current, frame, intent == WMFrameIntentVerifiedPlacement ? 0 : 2)) {
+        BOOL near = framesNear(current, frame, intent == WMFrameIntentVerifiedPlacement ? 0 : 2);
+        record.motion = WMMotionIdle; record.target = frame;
+        if (!near) record.changed = YES;
+        if (near || duration <= 0) {
             record.animationDuration = 0;
-            record.motion = WMMotionIdle;
-            record.target = frame;
-            if (intent == WMFrameIntentVerifiedPlacement) assumeOnscreen(record);
-            return true;
-        }
-        record.motion = WMMotionIdle;
-        record.target = frame; record.changed = YES;
-        if (duration <= 0) {
-            record.animationDuration = 0;
-            BOOL applied = writeFrame(record, frame, YES);
-            if (applied && intent == WMFrameIntentVerifiedPlacement) assumeOnscreen(record);
+            BOOL applied = near || writeFrame(record, frame, YES);
+            // A command does not scan again after its own writes, so a window it has just placed keeps its last observation.
+            // Windows of one application parked on the same corner are observed as not on screen, because their frames are equal.
+            // Mark a placed window as on screen, or it would be ineligible for focus and layout until the next scan.
+            if (applied && intent == WMFrameIntentVerifiedPlacement) { WMWindow observation = record.observation; observation.onscreen = true; record.observation = observation; }
             return applied;
         }
         record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration; record.motion = WMMotionAnimating;
@@ -606,12 +584,7 @@ static WMLaunchStatus launchStatus;
 uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden) {
     NSString *identifier = [NSString stringWithUTF8String:bundle];
     NSURL *url = nil;
-    for (NSRunningApplication *application in [NSRunningApplication runningApplicationsWithBundleIdentifier:identifier]) {
-        if (!application.terminated && application.bundleURL && [NSFileManager.defaultManager fileExistsAtPath:application.bundleURL.path]) {
-            url = application.bundleURL;
-            break;
-        }
-    }
+    for (NSRunningApplication *application in [NSRunningApplication runningApplicationsWithBundleIdentifier:identifier]) if (!application.terminated && application.bundleURL && [NSFileManager.defaultManager fileExistsAtPath:application.bundleURL.path]) { url = application.bundleURL; break; }
     // Hiding applies to a new process only. It must not hide an application that already shows windows.
     BOOL hide = hidden && (new_instance || !url);
     if (!url) url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
@@ -647,8 +620,7 @@ bool platform_exec(const char *shell) {
     task.standardInput = NSFileHandle.fileHandleWithNullDevice;
     task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
     task.standardError = NSFileHandle.fileHandleWithNullDevice;
-    NSError *error = nil;
-    return [task launchAndReturnError:&error];
+    return [task launchAndReturnError:NULL];
 }
 
 static WindowRecord *closingRecord;
@@ -661,7 +633,7 @@ bool platform_close(uint64_t identity, bool track, double *process_token) {
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.stale && !record.observation.minimized && !record.observation.fullscreen) {
         NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:record.observation.pid];
         double token = application.launchDate.timeIntervalSinceReferenceDate;
-        if (track && (!application.launchDate || token == 0)) return false;
+        if (track && token == 0) return false;
         id button = attribute(record.element, kAXCloseButtonAttribute);
         if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID()) return false;
         if (AXUIElementPerformAction((__bridge AXUIElementRef)button, kAXPressAction) != kAXErrorSuccess) return false;
@@ -675,7 +647,7 @@ bool platform_close(uint64_t identity, bool track, double *process_token) {
 int platform_close_state(uint64_t identity, int pid, double process_token) {
     if (!closingRecord || closingRecord.observation.identity != identity || closingRecord.observation.pid != pid || closingProcessToken != process_token) return -1;
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-    if (!application || application.terminated || !application.launchDate || application.launchDate.timeIntervalSinceReferenceDate != process_token) return -1;
+    if (application.terminated || application.launchDate.timeIntervalSinceReferenceDate != process_token) return -1;
     AXUIElementRef appElement = AXUIElementCreateApplication(pid);
     AXUIElementSetMessagingTimeout(appElement, 0.08);
     CFTypeRef value = NULL;
@@ -693,8 +665,7 @@ int platform_close_state(uint64_t identity, int pid, double process_token) {
 bool platform_terminate_if_empty(uint64_t identity, int pid, double process_token) {
     if (platform_close_state(identity, pid, process_token) != 2) return false;
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-    if (!application.launchDate || application.launchDate.timeIntervalSinceReferenceDate != process_token) return false;
-    return [application terminate];
+    return application.launchDate.timeIntervalSinceReferenceDate == process_token && [application terminate];
 }
 
 static void scanAndTick(pid_t process) {
@@ -704,19 +675,6 @@ static void scanAndTick(pid_t process) {
     scanWindows(process);
     wm_tick();
     revealWhenPlaced();
-}
-
-static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
-// macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
-// 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
-static double windowCornerRadius(WindowRecord *record, WMRect frame) {
-    if (record.cornerRadius > 0) return record.cornerRadius;
-    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) return record.cornerRadius = 10;
-    id button = attribute(record.element, kAXCloseButtonAttribute);
-    WMRect bounds;
-    if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds)) return 16;
-    double offset = MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left);
-    return record.cornerRadius = MIN(MAX(offset, 10), 26);
 }
 
 void platform_border(uint64_t identity, double width, uint32_t color) {
@@ -730,10 +688,20 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
         borderPanel.contentView.wantsLayer = YES;
     }
     WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
-    [borderPanel setFrame:NSInsetRect(cocoaRect(frame), -width, -width) display:YES];
+    [borderPanel setFrame:NSInsetRect(NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height), -width, -width) display:YES];
     borderPanel.contentView.layer.borderWidth = width;
+    // macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
+    // 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
+    double radius = focused.cornerRadius;
+    if (radius <= 0 && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) radius = focused.cornerRadius = 10;
+    else if (radius <= 0) {
+        id button = attribute(focused.element, kAXCloseButtonAttribute);
+        WMRect bounds;
+        if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds)) radius = 16;
+        else radius = focused.cornerRadius = MIN(MAX(MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left), 10), 26);
+    }
     // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
-    borderPanel.contentView.layer.cornerRadius = windowCornerRadius(focused, frame) + width;
+    borderPanel.contentView.layer.cornerRadius = radius + width;
     borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
     [borderPanel orderFrontRegardless];
 }
@@ -751,9 +719,8 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     platform_settle_budget_begin();
     const char *reply = wm_command(command.UTF8String);
     NSData *data = [NSData dataWithBytes:reply length:strlen(reply)];
-    NSError *parseError = nil;
-    id response = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseError];
-    if (parseError || ![response isKindOfClass:NSDictionary.class]) {
+    id response = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if (![response isKindOfClass:NSDictionary.class]) {
         platform_error("Status menu command returned invalid JSON");
     } else if (response[@"error"]) {
         NSString *message = response[@"err_message"];
@@ -765,22 +732,21 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
 static StatusItemOwner *statusOwner;
 
 void platform_status_present(const WMStatusPresentation *presentation) {
-    if (!presentation || stopping) {
-        if (!statusOwner) return;
-        [statusOwner.item.menu cancelTracking];
-        for (NSMenuItem *entry in statusOwner.item.menu.itemArray) entry.target = nil;
-        statusOwner.item.menu = nil;
-        [NSStatusBar.systemStatusBar removeStatusItem:statusOwner.item];
-        statusOwner = nil;
-        return;
-    }
-    if (presentation->row_count > 12) { platform_error("Status menu exceeds row limit"); return; }
+    BOOL removing = !presentation || stopping;
+    if (!removing && presentation->row_count > 12) { platform_error("Status menu exceeds row limit"); return; }
     if (!statusOwner) {
+        if (removing) return;
         statusOwner = [StatusItemOwner new];
         statusOwner.item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     }
     [statusOwner.item.menu cancelTracking];
     for (NSMenuItem *entry in statusOwner.item.menu.itemArray) entry.target = nil;
+    if (removing) {
+        statusOwner.item.menu = nil;
+        [NSStatusBar.systemStatusBar removeStatusItem:statusOwner.item];
+        statusOwner = nil;
+        return;
+    }
     NSMenu *menu = [NSMenu new];
     menu.autoenablesItems = NO;
     for (size_t index = 0; index < presentation->row_count; index++) {
@@ -826,19 +792,16 @@ bool platform_bindings(const WMBinding *bindings, size_t count) {
 
 size_t platform_restore(void) {
     size_t outstanding = 0;
-    for (WindowRecord *record in records) { record.animationDuration = 0; record.motion = WMMotionIdle; }
-    for (WindowRecord *record in records) if (record.changed) {
+    for (WindowRecord *record in records) {
+        record.animationDuration = 0; record.motion = WMMotionIdle;
+        if (!record.changed) continue;
         WMRect actual;
-        BOOL restored = NO;
         if (canMove(record)) {
             writeFrame(record, record.original, YES);
-            restored = readFrame(record.element, &actual) && framesNear(actual, record.original, 2);
+            if (readFrame(record.element, &actual) && framesNear(actual, record.original, 2)) { record.changed = NO; continue; }
         }
-        if (restored) record.changed = NO;
-        else {
-            outstanding++;
-            fprintf(stderr, "restore incomplete for window %llu\n", (unsigned long long)record.observation.identity);
-        }
+        outstanding++;
+        fprintf(stderr, "restore incomplete for window %llu\n", (unsigned long long)record.observation.identity);
     }
     return outstanding;
 }
@@ -847,18 +810,6 @@ const char *platform_config_path(void) { return configPath.fileSystemRepresentat
 const char *platform_filter(void) { return bundleFilter.UTF8String ?: ""; }
 void platform_config_changed(void) { markChanged(); }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
-
-static int connectSocket(void) {
-    struct stat metadata;
-    if (lstat(socketPath.fileSystemRepresentation, &metadata) != 0 || metadata.st_uid != getuid() || !S_ISSOCK(metadata.st_mode)) return -1;
-    int descriptor = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (descriptor < 0) return -1;
-    struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
-    strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
-    struct timeval timeout = {2, 0}; setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    if (connect(descriptor, (struct sockaddr *)&address, sizeof(address)) != 0) { close(descriptor); return -1; }
-    return descriptor;
-}
 
 int platform_main(int argc, char **argv) {
     @autoreleasepool {
@@ -896,7 +847,15 @@ int platform_main(int argc, char **argv) {
             if ([operands rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n"]].location != NSNotFound) { fputs("command must be one line\n", stderr); return 1; }
             NSString *command = [operands stringByAppendingString:@"\n"];
             if ([command lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 511) { fputs("command too long\n", stderr); return 1; }
-            int descriptor = connectSocket(); if (descriptor < 0) { fprintf(stderr, "huen-wm is not running for this user\n"); return 1; }
+            struct stat metadata;
+            int descriptor = lstat(socketPath.fileSystemRepresentation, &metadata) == 0 && metadata.st_uid == getuid() && S_ISSOCK(metadata.st_mode) ? socket(AF_UNIX, SOCK_STREAM, 0) : -1;
+            if (descriptor >= 0) {
+                struct sockaddr_un address = {0}; address.sun_family = AF_UNIX;
+                strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
+                struct timeval timeout = {2, 0}; setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+                if (connect(descriptor, (struct sockaddr *)&address, sizeof(address)) != 0) { close(descriptor); descriptor = -1; }
+            }
+            if (descriptor < 0) { fprintf(stderr, "huen-wm is not running for this user\n"); return 1; }
             int noSignal = 1;
             setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
             const char *commandBytes = command.UTF8String;
@@ -918,9 +877,8 @@ int platform_main(int argc, char **argv) {
                 [reply appendBytes:buffer length:(NSUInteger)received];
             }
             close(descriptor); if (!reply.length) { fputs("runtime did not respond\n", stderr); return 1; }
-            NSError *parseError = nil;
-            id parsed = [NSJSONSerialization JSONObjectWithData:reply options:0 error:&parseError];
-            if (!parsed || parseError || (![parsed isKindOfClass:NSDictionary.class] && ![parsed isKindOfClass:NSArray.class])) { fputs("runtime returned invalid JSON\n", stderr); return 1; }
+            id parsed = [NSJSONSerialization JSONObjectWithData:reply options:0 error:NULL];
+            if (![parsed isKindOfClass:NSDictionary.class] && ![parsed isKindOfClass:NSArray.class]) { fputs("runtime returned invalid JSON\n", stderr); return 1; }
             if (fwrite(reply.bytes, 1, reply.length, stdout) != reply.length || fflush(stdout) != 0) { perror("reply output"); return 1; }
             return [parsed isKindOfClass:NSDictionary.class] && parsed[@"error"] ? 1 : 0;
         }
