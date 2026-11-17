@@ -134,89 +134,11 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
             else => error.ConfigWorkerFailed,
         };
     }
-    return decode(response[0..used]);
-}
-
-const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, monitor: ?[]const []const u8 };
-const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
-const WireMode = struct { name: []const u8, bindings: []const WireBinding };
-const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
-const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
-const WireConfig = struct {
-    workspace_monitors: ?[]const Monitor,
-    mouse_follows_monitor: bool,
-    workspace_back_and_forth: bool,
-    status_bar: StatusBar,
-    session: Session,
-    mouse: Mouse,
-    gap: f64,
-    border_width: f64,
-    border_color: u32,
-    border_single_window: bool,
-    duration: f64,
-    workspaces: []const WireWorkspace,
-    modes: []const WireMode,
-    rules: []const WireRule,
-};
-
-fn encode(candidate: *const ConfigCandidate) ![]u8 {
-    var workspaces: [10]WireWorkspace = undefined;
-    var monitor_text: [10][4][133]u8 = undefined;
-    var monitor_slices: [10][4][]const u8 = undefined;
-    var bindings: [8][128]WireBinding = undefined;
-    var modes: [8]WireMode = undefined;
-    var rules: [64]WireRule = undefined;
-    for (candidate.workspaces[0..candidate.workspace_count], 0..) |*workspace, index| {
-        const selectors = workspace.monitor.slice();
-        for (selectors, 0..) |*selection, position| monitor_slices[index][position] = try monitorText(selection, &monitor_text[index][position]);
-        workspaces[index] = .{ .name = text(&workspace.name), .layout = workspace.layout, .ratio = workspace.ratio, .monitor = if (selectors.len > 0) monitor_slices[index][0..selectors.len] else null };
-    }
-    for (candidate.modes[0..candidate.mode_count], 0..) |*mode, mode_index| {
-        for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| bindings[mode_index][index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
-        modes[mode_index] = .{ .name = text(&mode.name), .bindings = bindings[mode_index][0..mode.binding_count] };
-    }
-    for (candidate.rules[0..candidate.rule_count], 0..) |*rule, index| rules[index] = .{
-        .bundle = text(&rule.bundle),
-        .bundle_kind = rule.bundle_kind,
-        .title = if (rule.title) |*title| .{ .kind = title.kind, .pattern = text(&title.pattern) } else null,
-        .floating = rule.floating,
-        .workspace = rule.workspace,
-        .geometry = rule.geometry,
-    };
-    const buffer = try allocator.alloc(u8, max_response);
-    defer allocator.free(buffer);
-    var writer: std.Io.Writer = .fixed(buffer);
-    std.json.Stringify.value(WireConfig{
-        .workspace_monitors = if (candidate.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
-        .mouse_follows_monitor = candidate.mouse_follows_monitor,
-        .workspace_back_and_forth = candidate.workspace_back_and_forth,
-        .status_bar = candidate.status_bar,
-        .session = candidate.session,
-        .mouse = candidate.mouse,
-        .gap = candidate.gap,
-        .border_width = candidate.border_width,
-        .border_color = candidate.border_color,
-        .border_single_window = candidate.border_single_window,
-        .duration = candidate.duration,
-        .workspaces = workspaces[0..candidate.workspace_count],
-        .modes = modes[0..candidate.mode_count],
-        .rules = rules[0..candidate.rule_count],
-    }, .{}, &writer) catch return error.ConfigResponseTooLarge;
-    return allocator.dupe(u8, writer.buffered());
-}
-
-fn decode(response: []const u8) !ConfigCandidate {
-    const parsed = try std.json.parseFromSlice(WireConfig, allocator, response, .{ .allocate = .alloc_always, .max_value_len = max_response });
+    const parsed = try std.json.parseFromSlice(WireConfig, allocator, response[0..used], .{ .allocate = .alloc_always, .max_value_len = max_response });
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len };
-    candidate.status_bar = wire.status_bar;
-    candidate.session = wire.session;
-    candidate.mouse = wire.mouse;
-    candidate.mouse_follows_monitor = wire.mouse_follows_monitor;
-    candidate.workspace_back_and_forth = wire.workspace_back_and_forth;
-    candidate.border_single_window = wire.border_single_window;
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .border_single_window = wire.border_single_window };
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -226,12 +148,11 @@ fn decode(response: []const u8) !ConfigCandidate {
         try copyText(&candidate.workspaces[index].name, workspace.name);
         candidate.workspaces[index].layout = workspace.layout;
         candidate.workspaces[index].ratio = workspace.ratio;
-        if (workspace.monitor) |selectors| {
-            if (selectors.len == 0) return error.EmptyWorkspaceMonitors;
-            if (selectors.len > 4) return error.TooManyWorkspaceMonitors;
-            candidate.workspaces[index].monitor.count = selectors.len;
-            for (selectors, 0..) |value, position| candidate.workspaces[index].monitor.selectors[position] = try workspaceMonitor(value);
-        }
+        const selectors = workspace.monitor orelse continue;
+        if (selectors.len == 0) return error.EmptyWorkspaceMonitors;
+        if (selectors.len > 4) return error.TooManyWorkspaceMonitors;
+        candidate.workspaces[index].monitor.count = selectors.len;
+        for (selectors, 0..) |value, position| candidate.workspaces[index].monitor.selectors[position] = try workspaceMonitor(value);
     }
     for (wire.modes, 0..) |mode, mode_index| {
         if (mode.bindings.len > 128) return error.InvalidCollectionSize;
@@ -259,13 +180,27 @@ fn decode(response: []const u8) !ConfigCandidate {
     return candidate;
 }
 
-fn monitorText(selection: *const commands.MonitorSelector, buffer: []u8) ![]const u8 {
-    return switch (selection.*) {
-        .class => |class| @tagName(class),
-        .name => |*name| std.fmt.bufPrint(buffer, "name:{s}", .{name.text()}),
-        .direction, .step => error.RelativeMonitorSelector,
-    };
-}
+const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, monitor: ?[]const []const u8 };
+const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
+const WireMode = struct { name: []const u8, bindings: []const WireBinding };
+const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
+const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
+const WireConfig = struct {
+    workspace_monitors: ?[]const Monitor,
+    mouse_follows_monitor: bool,
+    workspace_back_and_forth: bool,
+    status_bar: StatusBar,
+    session: Session,
+    mouse: Mouse,
+    gap: f64,
+    border_width: f64,
+    border_color: u32,
+    border_single_window: bool,
+    duration: f64,
+    workspaces: []const WireWorkspace,
+    modes: []const WireMode,
+    rules: []const WireRule,
+};
 
 fn workspaceMonitor(value: []const u8) !commands.MonitorSelector {
     const selection = commands.parseMonitorSelector(value) catch |err| return switch (err) {
@@ -315,7 +250,10 @@ fn validate(candidate: *const ConfigCandidate) !void {
         total_bindings += mode.binding_count;
         var escape_to_main = false;
         for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| {
-            if (!knownKeyCode(binding.key)) return error.UnknownKey;
+            switch (binding.key) {
+                0...0x33, 0x35, 0x7b...0x7e => {},
+                else => return error.UnknownKey,
+            }
             if ((mode_index == 0 and binding.modifiers == 0) or binding.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
             const command = try commands.parse(text(&binding.command), candidate.workspace_count);
             switch (command) {
@@ -338,9 +276,7 @@ fn validate(candidate: *const ConfigCandidate) !void {
             if (text(&title.pattern).len == 0) return error.EmptyTitlePattern;
             if (title.kind == .regex and native.platform_regex_match(&title.pattern, "", 0) < 0) return error.InvalidRegex;
         }
-        if (rule.workspace) |workspace| {
-            if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
-        }
+        if (rule.workspace) |workspace| if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
         if (rule.geometry) |geometry| {
             try checkNumber(geometry.left, -10000, 10000);
             try checkNumber(geometry.top, -10000, 10000);
@@ -352,11 +288,7 @@ fn validate(candidate: *const ConfigCandidate) !void {
 }
 
 pub fn workerMain(path: [*:0]const u8) u8 {
-    const candidate = evaluateLua(path) catch |err| {
-        native.platform_error(@errorName(err));
-        return 1;
-    };
-    const encoded = encode(&candidate) catch |err| {
+    const encoded = evaluateLua(path) catch |err| {
         native.platform_error(@errorName(err));
         return 1;
     };
@@ -423,12 +355,9 @@ fn checkKeys(state: *native.lua_State, allowed: []const []const u8) !void {
         const pointer = native.lua_tolstring(state, -2, &length);
         const key = pointer[0..length];
         if (std.mem.indexOfScalar(u8, key, 0) != null) return error.InvalidConfigurationKey;
-        var found = false;
-        for (allowed) |name| if (std.mem.eql(u8, name, key)) {
-            found = true;
-            break;
-        };
-        if (!found) return error.UnknownConfigurationField;
+        for (allowed) |name| {
+            if (std.mem.eql(u8, name, key)) break;
+        } else return error.UnknownConfigurationField;
         pop(state);
     }
 }
@@ -438,10 +367,10 @@ fn rawField(state: *native.lua_State, key: [*:0]const u8) c_int {
     return lua_rawget(state, -2);
 }
 
-fn fieldNumber(state: *native.lua_State, key: [*:0]const u8, default: f64, minimum: f64, maximum: f64) !f64 {
+fn fieldNumber(state: *native.lua_State, key: [*:0]const u8, default: ?f64, minimum: f64, maximum: f64) !f64 {
     const kind = rawField(state, key);
     defer pop(state);
-    if (kind == native.LUA_TNIL) return default;
+    if (kind == native.LUA_TNIL) return default orelse error.MissingGeometryField;
     if (kind != native.LUA_TNUMBER) return error.ExpectedNumber;
     const number = native.lua_tonumberx(state, -1, null);
     try checkNumber(number, minimum, maximum);
@@ -453,9 +382,7 @@ fn fieldString(state: *native.lua_State, key: [*:0]const u8) !?[]const u8 {
     defer pop(state);
     if (kind == native.LUA_TNIL) return null;
     if (kind != native.LUA_TSTRING) return error.ExpectedString;
-    var length: usize = 0;
-    const pointer = native.lua_tolstring(state, -1, &length);
-    return pointer[0..length];
+    return luaText(state);
 }
 
 fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: bool) !bool {
@@ -464,21 +391,6 @@ fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: bool) !bool 
     if (kind == native.LUA_TNIL) return default;
     if (kind != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
     return native.lua_toboolean(state, -1) != 0;
-}
-
-fn keyCode(name: []const u8) !u32 {
-    const names = [_][]const u8{ "a", "s", "d", "f", "h", "g", "z", "x", "c", "v", "section", "b", "q", "w", "e", "r", "y", "t", "1", "2", "3", "4", "6", "5", "=", "9", "7", "-", "8", "0", "]", "o", "u", "[", "i", "p", "return", "l", "j", "'", "k", ";", "\\", ",", "/", "n", "m", ".", "tab", "space", "`", "backspace" };
-    for (names, 0..) |candidate, index| if (std.mem.eql(u8, candidate, name)) return @intCast(index);
-    if (std.mem.eql(u8, name, "escape")) return 0x35;
-    if (std.mem.eql(u8, name, "left")) return 0x7b;
-    if (std.mem.eql(u8, name, "right")) return 0x7c;
-    if (std.mem.eql(u8, name, "down")) return 0x7d;
-    if (std.mem.eql(u8, name, "up")) return 0x7e;
-    return error.UnknownKey;
-}
-
-fn knownKeyCode(code: u32) bool {
-    return code <= 0x33 or code == 0x35 or (code >= 0x7b and code <= 0x7e);
 }
 
 fn modifiers(value: []const u8) !u32 {
@@ -494,7 +406,7 @@ fn modifiers(value: []const u8) !u32 {
     return flags;
 }
 
-fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
+fn evaluateLua(path: [*:0]const u8) ![]u8 {
     const descriptor = open(path, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
     if (descriptor < 0) return error.ConfigSourceUnavailable;
     defer _ = close(descriptor);
@@ -554,9 +466,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         result.workspace_monitors = .{ .count = count };
         for (0..count) |index| {
             if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedString;
-            var length: usize = 0;
-            const value = native.lua_tolstring(state, -1, &length);
-            result.workspace_monitors.?.order[index] = std.meta.stringToEnum(Monitor, value[0..length]) orelse return error.UnknownMonitor;
+            result.workspace_monitors.?.order[index] = std.meta.stringToEnum(Monitor, luaText(state)) orelse return error.UnknownMonitor;
             pop(state);
         }
     }
@@ -590,7 +500,24 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
                 native.LUA_TTABLE => {
                     try checkKeys(state, &.{ "name", "monitor" });
                     try copyText(&workspace.name, (try fieldString(state, "name")) orelse return error.ExpectedWorkspaceName);
-                    try readWorkspaceMonitors(state, &workspace.monitor);
+                    switch (rawField(state, "monitor")) {
+                        native.LUA_TNIL => {},
+                        native.LUA_TSTRING => {
+                            workspace.monitor.selectors[0] = try workspaceMonitor(luaText(state));
+                            workspace.monitor.count = 1;
+                        },
+                        else => {
+                            const count = arrayCount(state, workspace.monitor.selectors.len) catch |err| return if (err == error.InvalidCollectionSize) error.TooManyWorkspaceMonitors else err;
+                            if (count == 0) return error.EmptyWorkspaceMonitors;
+                            for (0..count) |position| {
+                                if (native.lua_rawgeti(state, -1, @intCast(position + 1)) != native.LUA_TSTRING) return error.ExpectedString;
+                                workspace.monitor.selectors[position] = try workspaceMonitor(luaText(state));
+                                pop(state);
+                            }
+                            workspace.monitor.count = count;
+                        },
+                    }
+                    pop(state);
                 },
                 else => return error.ExpectedWorkspaceName,
             }
@@ -598,9 +525,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         }
     }
     pop(state);
-    if (rawField(state, "bindings") != native.LUA_TNIL) {
-        try readBindings(state, &result.modes[0]);
-    }
+    if (rawField(state, "bindings") != native.LUA_TNIL) try readBindings(state, &result.modes[0]);
     pop(state);
     if (rawField(state, "modes") != native.LUA_TNIL) {
         const count = try arrayCount(state, 7);
@@ -646,10 +571,10 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
             if (rawField(state, "geometry") != native.LUA_TNIL) {
                 try checkKeys(state, &.{ "left", "top", "width", "height" });
                 rule.geometry = .{
-                    .left = try requiredNumber(state, "left", -10000, 10000),
-                    .top = try requiredNumber(state, "top", -10000, 10000),
-                    .width = try requiredNumber(state, "width", 80, 10000),
-                    .height = try requiredNumber(state, "height", 80, 10000),
+                    .left = try fieldNumber(state, "left", null, -10000, 10000),
+                    .top = try fieldNumber(state, "top", null, -10000, 10000),
+                    .width = try fieldNumber(state, "width", null, 80, 10000),
+                    .height = try fieldNumber(state, "height", null, 80, 10000),
                 };
                 if (rule.floating == false) return error.GeometryRequiresFloating;
                 rule.floating = true;
@@ -662,7 +587,53 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         }
     }
     try validate(&result);
-    return result;
+    var workspaces: [10]WireWorkspace = undefined;
+    var monitor_text: [10][4][133]u8 = undefined;
+    var monitor_slices: [10][4][]const u8 = undefined;
+    var bindings: [8][128]WireBinding = undefined;
+    var modes: [8]WireMode = undefined;
+    var rules: [64]WireRule = undefined;
+    for (result.workspaces[0..result.workspace_count], 0..) |*workspace, index| {
+        const selectors = workspace.monitor.slice();
+        for (selectors, 0..) |*selection, position| monitor_slices[index][position] = switch (selection.*) {
+            .class => |class| @tagName(class),
+            .name => |*name| try std.fmt.bufPrint(&monitor_text[index][position], "name:{s}", .{name.text()}),
+            .direction, .step => unreachable,
+        };
+        workspaces[index] = .{ .name = text(&workspace.name), .layout = workspace.layout, .ratio = workspace.ratio, .monitor = if (selectors.len > 0) monitor_slices[index][0..selectors.len] else null };
+    }
+    for (result.modes[0..result.mode_count], 0..) |*mode, mode_index| {
+        for (mode.bindings[0..mode.binding_count], 0..) |*binding, index| bindings[mode_index][index] = .{ .key = binding.key, .modifiers = binding.modifiers, .command = text(&binding.command) };
+        modes[mode_index] = .{ .name = text(&mode.name), .bindings = bindings[mode_index][0..mode.binding_count] };
+    }
+    for (result.rules[0..result.rule_count], 0..) |*rule, index| rules[index] = .{
+        .bundle = text(&rule.bundle),
+        .bundle_kind = rule.bundle_kind,
+        .title = if (rule.title) |*title| .{ .kind = title.kind, .pattern = text(&title.pattern) } else null,
+        .floating = rule.floating,
+        .workspace = rule.workspace,
+        .geometry = rule.geometry,
+    };
+    const buffer = try allocator.alloc(u8, max_response);
+    defer allocator.free(buffer);
+    var writer: std.Io.Writer = .fixed(buffer);
+    std.json.Stringify.value(WireConfig{
+        .workspace_monitors = if (result.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
+        .mouse_follows_monitor = result.mouse_follows_monitor,
+        .workspace_back_and_forth = result.workspace_back_and_forth,
+        .status_bar = result.status_bar,
+        .session = result.session,
+        .mouse = result.mouse,
+        .gap = result.gap,
+        .border_width = result.border_width,
+        .border_color = result.border_color,
+        .border_single_window = result.border_single_window,
+        .duration = result.duration,
+        .workspaces = workspaces[0..result.workspace_count],
+        .modes = modes[0..result.mode_count],
+        .rules = rules[0..result.rule_count],
+    }, .{}, &writer) catch return error.ConfigResponseTooLarge;
+    return allocator.dupe(u8, writer.buffered());
 }
 
 /// Reads the pattern table on top of the stack: exactly one of `literal`, `glob`, or `regex`.
@@ -678,40 +649,13 @@ fn patternField(state: *native.lua_State) !struct { kind: Rules.PatternKind, tex
     return .{ .kind = .regex, .text = regex.? };
 }
 
-fn requiredNumber(state: *native.lua_State, key: [*:0]const u8, minimum: f64, maximum: f64) !f64 {
-    const kind = rawField(state, key);
-    defer pop(state);
-    if (kind == native.LUA_TNIL) return error.MissingGeometryField;
-    if (kind != native.LUA_TNUMBER) return error.ExpectedNumber;
-    const number = native.lua_tonumberx(state, -1, null);
-    try checkNumber(number, minimum, maximum);
-    return number;
-}
-
 fn luaText(state: *native.lua_State) []const u8 {
     var length: usize = 0;
     const pointer = native.lua_tolstring(state, -1, &length);
     return pointer[0..length];
 }
 
-fn readWorkspaceMonitors(state: *native.lua_State, target: *WorkspaceMonitors) !void {
-    const kind = rawField(state, "monitor");
-    defer pop(state);
-    if (kind == native.LUA_TNIL) return;
-    if (kind == native.LUA_TSTRING) {
-        target.selectors[0] = try workspaceMonitor(luaText(state));
-        target.count = 1;
-        return;
-    }
-    const count = arrayCount(state, target.selectors.len) catch |err| return if (err == error.InvalidCollectionSize) error.TooManyWorkspaceMonitors else err;
-    if (count == 0) return error.EmptyWorkspaceMonitors;
-    for (0..count) |index| {
-        if (native.lua_rawgeti(state, -1, @intCast(index + 1)) != native.LUA_TSTRING) return error.ExpectedString;
-        target.selectors[index] = try workspaceMonitor(luaText(state));
-        pop(state);
-    }
-    target.count = count;
-}
+const key_names = [_][]const u8{ "a", "s", "d", "f", "h", "g", "z", "x", "c", "v", "section", "b", "q", "w", "e", "r", "y", "t", "1", "2", "3", "4", "6", "5", "=", "9", "7", "-", "8", "0", "]", "o", "u", "[", "i", "p", "return", "l", "j", "'", "k", ";", "\\", ",", "/", "n", "m", ".", "tab", "space", "`", "backspace" };
 
 fn readBindings(state: *native.lua_State, mode: *Mode) !void {
     mode.binding_count = try arrayCount(state, 128);
@@ -719,7 +663,10 @@ fn readBindings(state: *native.lua_State, mode: *Mode) !void {
         _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
         try checkKeys(state, &.{ "key", "mods", "command" });
         const binding = &mode.bindings[index];
-        binding.key = try keyCode((try fieldString(state, "key")) orelse return error.MissingKey);
+        const key = (try fieldString(state, "key")) orelse return error.MissingKey;
+        binding.key = for (key_names, 0..) |name, code| {
+            if (std.mem.eql(u8, name, key)) break @intCast(code);
+        } else if (std.mem.eql(u8, key, "escape")) 0x35 else if (std.mem.eql(u8, key, "left")) 0x7b else if (std.mem.eql(u8, key, "right")) 0x7c else if (std.mem.eql(u8, key, "down")) 0x7d else if (std.mem.eql(u8, key, "up")) 0x7e else return error.UnknownKey;
         binding.modifiers = try modifiers((try fieldString(state, "mods")) orelse return error.MissingModifiers);
         try copyText(&binding.command, (try fieldString(state, "command")) orelse return error.MissingCommand);
         pop(state);

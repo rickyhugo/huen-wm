@@ -19,10 +19,7 @@ pub const Ring = struct {
     }
 
     pub fn pick(self: *const Ring, current: ?u64, eligible: *const fn (u64) bool) ?u64 {
-        for (self.entries[0..self.count]) |identity| {
-            if (current != null and current.? == identity) continue;
-            if (eligible(identity)) return identity;
-        }
+        for (self.entries[0..self.count]) |identity| if (current != identity and eligible(identity)) return identity;
         return null;
     }
 };

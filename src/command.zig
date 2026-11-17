@@ -89,23 +89,6 @@ fn pointDelta(value: []const u8) !f64 {
     return delta;
 }
 
-fn parseSelector(value: []const u8, workspace_count: usize) !WorkspaceSelector {
-    if (std.mem.eql(u8, value, "previous")) return .previous;
-    if (std.mem.eql(u8, value, "empty")) return .{ .empty = .first };
-    if (std.mem.eql(u8, value, "next-empty")) return .{ .empty = .next };
-    const occupied = std.mem.startsWith(u8, value, "occupied");
-    const offset_text = if (occupied) value["occupied".len..] else value;
-    if (offset_text.len > 0 and (offset_text[0] == '+' or offset_text[0] == '-')) {
-        const offset = std.fmt.parseInt(i8, offset_text, 10) catch return error.InvalidWorkspaceOffset;
-        if (offset == 0 or @abs(offset) > 10) return error.InvalidWorkspaceOffset;
-        return .{ .relative = .{ .scope = if (occupied) .occupied else .all, .offset = offset } };
-    }
-    if (value.len == 0 or !std.ascii.isDigit(value[0])) return error.InvalidWorkspaceSelector;
-    const index = std.fmt.parseInt(usize, value, 10) catch return error.InvalidWorkspaceSelector;
-    if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
-    return .{ .index = index - 1 };
-}
-
 pub fn parseMonitorSelector(value: []const u8) !MonitorSelector {
     if (std.mem.startsWith(u8, value, "name:")) return .{ .name = Name.init(value["name:".len..]) catch return error.InvalidMonitorName };
     if (std.meta.stringToEnum(Direction, value)) |direction| return .{ .direction = direction };
@@ -131,7 +114,22 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
             return @unionInit(Command, verb_tag[1], .{ .name = try Name.init(std.mem.trimEnd(u8, input[start..], " \t")) });
         }
         if (tokens.next() != null) return error.ExtraArgument;
-        return @unionInit(Command, verb_tag[1], try parseSelector(value, workspace_count));
+        return @unionInit(Command, verb_tag[1], selector: {
+            if (std.mem.eql(u8, value, "previous")) break :selector .previous;
+            if (std.mem.eql(u8, value, "empty")) break :selector .{ .empty = .first };
+            if (std.mem.eql(u8, value, "next-empty")) break :selector .{ .empty = .next };
+            const occupied = std.mem.startsWith(u8, value, "occupied");
+            const offset_text = if (occupied) value["occupied".len..] else value;
+            if (offset_text.len > 0 and (offset_text[0] == '+' or offset_text[0] == '-')) {
+                const offset = std.fmt.parseInt(i8, offset_text, 10) catch return error.InvalidWorkspaceOffset;
+                if (offset == 0 or @abs(offset) > 10) return error.InvalidWorkspaceOffset;
+                break :selector .{ .relative = .{ .scope = if (occupied) .occupied else .all, .offset = offset } };
+            }
+            if (!std.ascii.isDigit(value[0])) return error.InvalidWorkspaceSelector;
+            const index = std.fmt.parseInt(usize, value, 10) catch return error.InvalidWorkspaceSelector;
+            if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
+            break :selector .{ .index = index - 1 };
+        });
     };
     inline for (.{ .{ "focus-monitor", "focus_monitor" }, .{ "send-to-monitor", "send_to_monitor" }, .{ "move-to-monitor", "move_to_monitor" }, .{ "move-workspace-to-monitor", "move_workspace_to_monitor" }, .{ "swap-monitor-workspaces", "swap_monitor_workspaces" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         const value = argument orelse return error.MissingArgument;
@@ -150,9 +148,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
             return .{ .group = .{ .join = direction } };
         }
         if (tokens.next() != null) return error.ExtraArgument;
-        inline for (.{ "tabbed", "stacked", "split", "next", "previous" }) |name| {
-            if (std.mem.eql(u8, action, name)) return .{ .group = @unionInit(Group, name, {}) };
-        }
+        inline for (.{ "tabbed", "stacked", "split", "next", "previous" }) |name| if (std.mem.eql(u8, action, name)) return .{ .group = @unionInit(Group, name, {}) };
         return error.InvalidGroupAction;
     }
     if (std.mem.eql(u8, verb, "resize")) {
@@ -205,27 +201,13 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (tokens.next() != null) return error.ExtraArgument;
     if (std.mem.eql(u8, verb, "mode")) return .{ .mode = try Name.init(argument orelse return error.MissingArgument) };
     if (std.mem.eql(u8, verb, "close")) {
-        if (argument) |option| {
-            if (!std.mem.eql(u8, option, "--quit-if-last-window")) return error.UnknownOption;
-        }
+        if (argument) |option| if (!std.mem.eql(u8, option, "--quit-if-last-window")) return error.UnknownOption;
         return .{ .close = argument != null };
     }
-    inline for (.{ "status", "windows", "monitors", "workspaces", "reload", "quit", "restore", "fullscreen", "center" }) |name| if (std.mem.eql(u8, verb, name)) {
+    inline for (.{ .{ "status", "status" }, .{ "windows", "windows" }, .{ "monitors", "monitors" }, .{ "workspaces", "workspaces" }, .{ "reload", "reload" }, .{ "quit", "quit" }, .{ "stop", "quit" }, .{ "restore", "restore" }, .{ "recover", "restore" }, .{ "fullscreen", "fullscreen" }, .{ "center", "center" }, .{ "toggle-floating", "toggle_floating" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         if (argument != null) return error.ExtraArgument;
-        return @unionInit(Command, name, {});
+        return @unionInit(Command, verb_tag[1], {});
     };
-    if (std.mem.eql(u8, verb, "stop")) {
-        if (argument != null) return error.ExtraArgument;
-        return .quit;
-    }
-    if (std.mem.eql(u8, verb, "recover")) {
-        if (argument != null) return error.ExtraArgument;
-        return .restore;
-    }
-    if (std.mem.eql(u8, verb, "toggle-floating")) {
-        if (argument != null) return error.ExtraArgument;
-        return .toggle_floating;
-    }
     const value = argument orelse return error.MissingArgument;
     if (std.mem.eql(u8, verb, "swap")) if (std.meta.stringToEnum(Step, value)) |step| return .{ .swap_cycle = step };
     inline for (.{ "swap", "move", "tilemove" }) |name| if (std.mem.eql(u8, verb, name)) return @unionInit(Command, name, std.meta.stringToEnum(Direction, value) orelse return error.InvalidDirection);

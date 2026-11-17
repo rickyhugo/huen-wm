@@ -12,16 +12,32 @@ pub const View = struct {
 };
 
 pub fn resolve(selection: commands.WorkspaceSelector, view: View) !usize {
-    return switch (selection) {
-        .index => |index| backAndForth(index, view),
-        .name => |name| backAndForth(view.config.workspaceIndex(name.text()) orelse return error.UnknownWorkspaceName, view),
-        .previous => view.previous orelse error.NoPreviousWorkspace,
-        .relative => |relative| switch (relative.scope) {
-            .all => wrap(view.current, relative.offset, view.config.workspace_count),
-            .occupied => occupiedStep(view, relative.offset),
+    const index = switch (selection) {
+        .index => |position| position,
+        .name => |name| view.config.workspaceIndex(name.text()) orelse return error.UnknownWorkspaceName,
+        .previous => return view.previous orelse error.NoPreviousWorkspace,
+        .relative => |relative| {
+            if (relative.scope == .all) return wrap(view.current, relative.offset, view.config.workspace_count);
+            var members: [10]usize = undefined;
+            var count: usize = 0;
+            var position: usize = 0;
+            for (0..view.config.workspace_count) |workspace| {
+                if (workspace != view.current and !view.occupied.isSet(workspace)) continue;
+                if (workspace == view.current) position = count;
+                members[count] = workspace;
+                count += 1;
+            }
+            return members[wrap(position, relative.offset, count)];
         },
-        .empty => |search| emptyWorkspace(view, search) orelse error.NoEmptyWorkspace,
+        .empty => |search| {
+            const count = view.config.workspace_count;
+            const origin = if (search == .next) view.current else 0;
+            for (@intFromBool(search == .next)..count) |distance| if (!view.occupied.isSet((origin + distance) % count)) return (origin + distance) % count;
+            return error.NoEmptyWorkspace;
+        },
     };
+    if (index != view.current or !view.back_and_forth) return index;
+    return view.previous orelse index;
 }
 
 pub fn cycleTarget(order: []const u64, current: ?u64, step: commands.Step) ?u64 {
@@ -34,40 +50,6 @@ pub fn cycleTarget(order: []const u64, current: ?u64, step: commands.Step) ?u64 
     };
 }
 
-fn backAndForth(index: usize, view: View) usize {
-    if (index != view.current or !view.back_and_forth) return index;
-    return view.previous orelse index;
-}
-
 fn wrap(position: usize, offset: i8, count: usize) usize {
     return @intCast(@mod(@as(isize, @intCast(position)) + offset, @as(isize, @intCast(count))));
-}
-
-fn occupiedStep(view: View, offset: i8) usize {
-    var members: [10]usize = undefined;
-    var count: usize = 0;
-    var position: usize = 0;
-    for (0..view.config.workspace_count) |index| {
-        if (index != view.current and !view.occupied.isSet(index)) continue;
-        if (index == view.current) position = count;
-        members[count] = index;
-        count += 1;
-    }
-    return members[wrap(position, offset, count)];
-}
-
-fn emptyWorkspace(view: View, search: commands.EmptySearch) ?usize {
-    const count = view.config.workspace_count;
-    const start: usize = switch (search) {
-        .first => 0,
-        .next => 1,
-    };
-    for (start..count) |distance| {
-        const index = switch (search) {
-            .first => distance,
-            .next => (view.current + distance) % count,
-        };
-        if (!view.occupied.isSet(index)) return index;
-    }
-    return null;
 }

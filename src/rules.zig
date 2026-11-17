@@ -26,10 +26,7 @@ pub fn resolve(rules: []const Rule, facts: Facts) Decision {
     var decision: Decision = .{};
     for (rules) |*rule| {
         if (!matches(rule.bundle_kind, &rule.bundle, facts.bundle)) continue;
-        if (rule.title) |*title| {
-            if (!facts.title_complete or !std.unicode.utf8ValidateSlice(facts.title)) continue;
-            if (!matches(title.kind, &title.pattern, facts.title)) continue;
-        }
+        if (rule.title) |*title| if (!facts.title_complete or !std.unicode.utf8ValidateSlice(facts.title) or !matches(title.kind, &title.pattern, facts.title)) continue;
         if (rule.floating) |floating| decision.floating = floating;
         if (rule.workspace) |workspace| decision.workspace = workspace;
         if (rule.geometry) |geometry| {
@@ -43,39 +40,36 @@ pub fn resolve(rules: []const Rule, facts: Facts) Decision {
 // Literal and glob patterns cover the whole text. A regular expression matches anywhere in it unless it is anchored.
 fn matches(kind: PatternKind, pattern: *const [256:0]u8, text: []const u8) bool {
     const expected = std.mem.sliceTo(pattern, 0);
-    return switch (kind) {
-        .literal => std.mem.eql(u8, expected, text),
-        .glob => globMatches(expected, text),
-        .regex => native.platform_regex_match(pattern, text.ptr, text.len) == 1,
-    };
+    switch (kind) {
+        .literal => return std.mem.eql(u8, expected, text),
+        .regex => return native.platform_regex_match(pattern, text.ptr, text.len) == 1,
+        .glob => {},
+    }
+    var pattern_offset: usize = 0;
+    var text_offset: usize = 0;
+    var star_pattern: ?usize = null;
+    var star_text: usize = 0;
+    while (text_offset < text.len) {
+        if (pattern_offset < expected.len and expected[pattern_offset] == '*') {
+            pattern_offset += 1;
+            star_pattern = pattern_offset;
+            star_text = text_offset;
+        } else if (pattern_offset < expected.len and expected[pattern_offset] == '?') {
+            pattern_offset += 1;
+            text_offset = scalarEnd(text, text_offset);
+        } else if (pattern_offset < expected.len and std.mem.eql(u8, expected[pattern_offset..scalarEnd(expected, pattern_offset)], text[text_offset..scalarEnd(text, text_offset)])) {
+            pattern_offset = scalarEnd(expected, pattern_offset);
+            text_offset = scalarEnd(text, text_offset);
+        } else if (star_pattern) |restart| {
+            star_text = scalarEnd(text, star_text);
+            text_offset = star_text;
+            pattern_offset = restart;
+        } else return false;
+    }
+    while (pattern_offset < expected.len and expected[pattern_offset] == '*') pattern_offset += 1;
+    return pattern_offset == expected.len;
 }
 
 fn scalarEnd(value: []const u8, offset: usize) usize {
     return offset + (std.unicode.utf8ByteSequenceLength(value[offset]) catch unreachable);
-}
-
-fn globMatches(pattern: []const u8, title: []const u8) bool {
-    var pattern_offset: usize = 0;
-    var title_offset: usize = 0;
-    var star_pattern: ?usize = null;
-    var star_title: usize = 0;
-    while (title_offset < title.len) {
-        if (pattern_offset < pattern.len and pattern[pattern_offset] == '*') {
-            pattern_offset += 1;
-            star_pattern = pattern_offset;
-            star_title = title_offset;
-        } else if (pattern_offset < pattern.len and pattern[pattern_offset] == '?') {
-            pattern_offset += 1;
-            title_offset = scalarEnd(title, title_offset);
-        } else if (pattern_offset < pattern.len and std.mem.eql(u8, pattern[pattern_offset..scalarEnd(pattern, pattern_offset)], title[title_offset..scalarEnd(title, title_offset)])) {
-            pattern_offset = scalarEnd(pattern, pattern_offset);
-            title_offset = scalarEnd(title, title_offset);
-        } else if (star_pattern) |restart| {
-            star_title = scalarEnd(title, star_title);
-            title_offset = star_title;
-            pattern_offset = restart;
-        } else return false;
-    }
-    while (pattern_offset < pattern.len and pattern[pattern_offset] == '*') pattern_offset += 1;
-    return pattern_offset == pattern.len;
 }
