@@ -1263,9 +1263,15 @@ fn reconcile() void {
     var borderIdentity: u64 = 0;
     if (focused) |identity| if (windowIndex(identity)) |index| {
         const window = windows.items[index];
-        if (visible(window) and !window.parked) borderIdentity = identity;
+        if (visible(window) and !window.parked and (config.border_single_window or workspaceShowsOthers(window))) borderIdentity = identity;
     };
     native.platform_border(borderIdentity, config.border_width, config.border_color);
+}
+fn workspaceShowsOthers(focused_window: Window) bool {
+    for (windows.items) |window| {
+        if (window.identity != focused_window.identity and window.display == focused_window.display and window.workspace == focused_window.workspace and visible(window)) return true;
+    }
+    return false;
 }
 fn pollClose() void {
     const pending = pending_close orelse return;

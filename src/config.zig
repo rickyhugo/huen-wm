@@ -38,6 +38,7 @@ pub const ConfigCandidate = struct {
     gap: f64 = 12,
     border_width: f64 = 2,
     border_color: u32 = 0x9bafff,
+    border_single_window: bool = true,
     duration: f64 = 0.12,
     workspaces: [10]Workspace = @splat(.{}),
     workspace_count: usize = 5,
@@ -151,6 +152,7 @@ const WireConfig = struct {
     gap: f64,
     border_width: f64,
     border_color: u32,
+    border_single_window: bool,
     duration: f64,
     workspaces: []const WireWorkspace,
     modes: []const WireMode,
@@ -193,6 +195,7 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
         .gap = candidate.gap,
         .border_width = candidate.border_width,
         .border_color = candidate.border_color,
+        .border_single_window = candidate.border_single_window,
         .duration = candidate.duration,
         .workspaces = workspaces[0..candidate.workspace_count],
         .modes = modes[0..candidate.mode_count],
@@ -212,6 +215,7 @@ fn decode(response: []const u8) !ConfigCandidate {
     candidate.mouse = wire.mouse;
     candidate.mouse_follows_monitor = wire.mouse_follows_monitor;
     candidate.workspace_back_and_forth = wire.workspace_back_and_forth;
+    candidate.border_single_window = wire.border_single_window;
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -522,7 +526,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "session", "mouse" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "session", "mouse" });
     if (rawField(state, "session") != native.LUA_TNIL) {
         try checkKeys(state, &.{"enabled"});
         result.session.enabled = try fieldBool(state, "enabled", false);
@@ -539,6 +543,7 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
     pop(state);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
     result.workspace_back_and_forth = try fieldBool(state, "workspace_back_and_forth", false);
+    result.border_single_window = try fieldBool(state, "border_single_window", true);
     if (rawField(state, "workspace_monitors") != native.LUA_TNIL) {
         const count = try arrayCount(state, 2);
         if (count == 0) return error.InvalidMonitorPreferences;

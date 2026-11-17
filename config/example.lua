@@ -31,6 +31,7 @@ return {
     master_ratio = 0.55,
     border_width = 2,
     border_color = "#9BAFFF",
+    border_single_window = true,
     motion_duration = 0.12,
     workspaces = { "Build", "Browse", "Write", "Talk", "Quiet" },
     bindings = bindings,
