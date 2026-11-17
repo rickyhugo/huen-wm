@@ -22,6 +22,7 @@
 @property double animationTime;
 @property double animationDuration;
 @property double placementVisibilityDeadline;
+@property double cornerRadius;
 @property BOOL changed;
 @property WMMotionState motion;
 @end
@@ -514,6 +515,18 @@ bool platform_terminate_if_empty(uint64_t identity, int pid, double process_toke
 }
 
 static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
+// macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
+// 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
+static double windowCornerRadius(WindowRecord *record, WMRect frame) {
+    if (record.cornerRadius > 0) return record.cornerRadius;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) return record.cornerRadius = 10;
+    id button = attribute(record.element, kAXCloseButtonAttribute);
+    WMRect bounds;
+    if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds)) return 16;
+    double offset = MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left);
+    return record.cornerRadius = MIN(MAX(offset, 10), 26);
+}
+
 void platform_border(uint64_t identity, double width, uint32_t color) {
     WindowRecord *focused = nil;
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) focused = record;
@@ -527,7 +540,8 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
     [borderPanel setFrame:NSInsetRect(cocoaRect(frame), -width, -width) display:YES];
     borderPanel.contentView.layer.borderWidth = width;
-    borderPanel.contentView.layer.cornerRadius = 11;
+    // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
+    borderPanel.contentView.layer.cornerRadius = windowCornerRadius(focused, frame) + width;
     borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
     [borderPanel orderFrontRegardless];
 }
