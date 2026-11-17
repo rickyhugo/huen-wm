@@ -168,13 +168,29 @@ pub fn savedHomes(snapshot: *const session.Snapshot, config: *const config_modul
 }
 
 pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, screens: []const Screen, config: *const config_module.ConfigCandidate, placed: [10]?u32) !Imported {
-    var saved_keys: [1024]session.StableKey = undefined;
     var current_keys: [1024]session.StableKey = undefined;
-    for (snapshot.windows, 0..) |window, index| saved_keys[index] = window.key;
     for (windows, 0..) |*window, index| current_keys[index] = try window.attributes.key();
-    const matches = try session.match(saved_keys[0..snapshot.windows.len], current_keys[0..windows.len]);
+    // Every duplicate saved or current candidate is skipped, not only later duplicates.
     var mapping: [1024]?usize = @splat(null);
-    for (matches.pairs[0..matches.count]) |pair| mapping[pair.saved] = pair.current;
+    var missing: usize = 0;
+    var ambiguous: usize = 0;
+    for (snapshot.windows, 0..) |saved, saved_index| {
+        var saved_count: usize = 0;
+        var current_count: usize = 0;
+        var current_index: usize = 0;
+        for (snapshot.windows) |candidate| if (equalKey(saved.key, candidate.key)) {
+            saved_count += 1;
+        };
+        for (current_keys[0..windows.len], 0..) |candidate, index| if (equalKey(saved.key, candidate)) {
+            current_count += 1;
+            current_index = index;
+        };
+        if (saved_count != 1 or current_count > 1) {
+            ambiguous += 1;
+        } else if (current_count == 0) {
+            missing += 1;
+        } else mapping[saved_index] = current_index;
+    }
     const logical = try allocator.create(layout.Snapshot);
     defer allocator.destroy(logical);
     logical.* = .{ .nodes = @splat(.{}), .roots = @splat(null) };
@@ -258,7 +274,13 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
     const matched = assignments.items.len;
     const owned_assignments = try assignments.toOwnedSlice(allocator);
     errdefer allocator.free(owned_assignments);
-    return .{ .store = store, .assignments = owned_assignments, .active = try active.toOwnedSlice(allocator), .matched = matched, .missing = matches.missing, .ambiguous = matches.ambiguous_saved + matches.ambiguous_current };
+    return .{ .store = store, .assignments = owned_assignments, .active = try active.toOwnedSlice(allocator), .matched = matched, .missing = missing, .ambiguous = ambiguous };
+}
+
+fn equalKey(first: session.StableKey, second: session.StableKey) bool {
+    return first.pid == second.pid and first.launch == second.launch and first.kind == second.kind and
+        std.mem.eql(u8, first.bundle, second.bundle) and std.mem.eql(u8, first.value, second.value) and
+        std.mem.eql(u8, first.role, second.role) and std.mem.eql(u8, first.subrole, second.subrole);
 }
 
 fn mappedIdentity(windows: []const LiveWindow, mapping: []const ?usize, index: ?u16) ?u64 {

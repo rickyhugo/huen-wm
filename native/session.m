@@ -7,7 +7,7 @@
 #include <unistd.h>
 
 static bool copy_string(CFStringRef string, char *output, size_t capacity) {
-    if (!string || CFGetTypeID(string) != CFStringGetTypeID() || capacity == 0) return false;
+    if (!string || CFGetTypeID(string) != CFStringGetTypeID()) return false;
     CFIndex length = CFStringGetLength(string);
     CFIndex used = 0;
     CFIndex converted = CFStringGetBytes(string, CFRangeMake(0, length), kCFStringEncodingUTF8,
@@ -17,52 +17,37 @@ static bool copy_string(CFStringRef string, char *output, size_t capacity) {
     return true;
 }
 
-static bool attribute(AXUIElementRef element, CFStringRef name, char *output, size_t capacity) {
+/* Returns 1 when copied, 0 when the attribute is unsupported or has no value, and -1 on failure. */
+static int attribute(AXUIElementRef element, CFStringRef name, char *output, size_t capacity) {
     CFTypeRef value = NULL;
-    if (AXUIElementCopyAttributeValue(element, name, &value) != kAXErrorSuccess || !value) return false;
-    bool valid = CFGetTypeID(value) == CFStringGetTypeID() && copy_string(value, output, capacity);
+    AXError result = AXUIElementCopyAttributeValue(element, name, &value);
+    if (result == kAXErrorAttributeUnsupported || result == kAXErrorNoValue) return 0;
+    if (result != kAXErrorSuccess || !value) return -1;
+    bool valid = copy_string(value, output, capacity);
     CFRelease(value);
-    return valid;
+    return valid ? 1 : -1;
 }
 
 bool huen_session_identify(AXUIElementRef element, pid_t pid, HuenSessionAttributes *output) {
-    if (!element || !output || pid <= 0) return false;
+    if (!element || pid <= 0) return false;
     memset(output, 0, sizeof(*output));
     pid_t actual_pid = 0;
     if (AXUIElementGetPid(element, &actual_pid) != kAXErrorSuccess || actual_pid != pid) return false;
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if (!application || !application.launchDate || !application.bundleIdentifier) return false;
-    HuenSessionAttributes candidate = {0};
-    candidate.pid = pid;
-    candidate.launch = application.launchDate.timeIntervalSince1970;
-    if (!isfinite(candidate.launch) || candidate.launch <= 0 ||
-        !copy_string((__bridge CFStringRef)application.bundleIdentifier, candidate.bundle, sizeof(candidate.bundle)) ||
-        !attribute(element, kAXRoleAttribute, candidate.role, sizeof(candidate.role))) return false;
-    CFTypeRef subrole = NULL;
-    AXError subrole_result = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute, &subrole);
-    if (subrole_result == kAXErrorSuccess && subrole) {
-        bool valid = copy_string(subrole, candidate.subrole, sizeof(candidate.subrole));
-        CFRelease(subrole);
-        if (!valid) return false;
-    } else if (subrole_result != kAXErrorAttributeUnsupported && subrole_result != kAXErrorNoValue) {
-        return false;
-    }
-    CFTypeRef identifier = NULL;
-    AXError identifier_result = AXUIElementCopyAttributeValue(element, CFSTR("AXIdentifier"), &identifier);
-    if (identifier_result == kAXErrorSuccess && identifier) {
-        bool valid = copy_string(identifier, candidate.value, sizeof(candidate.value));
-        CFRelease(identifier);
-        if (!valid) return false;
-        candidate.kind = 1;
-    } else {
-        if (identifier_result != kAXErrorAttributeUnsupported && identifier_result != kAXErrorNoValue) return false;
-        if (!attribute(element, kAXDocumentAttribute, candidate.value, sizeof(candidate.value))) return false;
-        NSURL *document = [NSURL URLWithString:[NSString stringWithUTF8String:candidate.value]];
-        if (!document.scheme.length) return false;
-        candidate.kind = 2;
-    }
-    *output = candidate;
-    return true;
+    output->pid = pid;
+    output->launch = application.launchDate.timeIntervalSince1970;
+    if (!isfinite(output->launch) || output->launch <= 0 ||
+        !copy_string((__bridge CFStringRef)application.bundleIdentifier, output->bundle, sizeof(output->bundle)) ||
+        attribute(element, kAXRoleAttribute, output->role, sizeof(output->role)) != 1 ||
+        attribute(element, kAXSubroleAttribute, output->subrole, sizeof(output->subrole)) < 0) return false;
+    int identifier = attribute(element, CFSTR("AXIdentifier"), output->value, sizeof(output->value));
+    if (identifier < 0) return false;
+    output->kind = identifier ? 1 : 2;
+    if (identifier) return true;
+    if (attribute(element, kAXDocumentAttribute, output->value, sizeof(output->value)) != 1) return false;
+    NSURL *document = [NSURL URLWithString:[NSString stringWithUTF8String:output->value]];
+    return document.scheme.length > 0;
 }
 
 bool huen_session_display_uuid(CGDirectDisplayID display, char *output, size_t capacity) {
@@ -92,23 +77,16 @@ static bool private_file(int descriptor, mode_t kind, mode_t permissions) {
 static int session_directory(void) {
     NSString *home = NSHomeDirectory();
     if (!home.length) return -1;
-    int descriptor = open(home.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (descriptor < 0) return -1;
-    struct stat home_status;
-    if (fstat(descriptor, &home_status) != 0 || home_status.st_uid != geteuid() ||
-        (home_status.st_mode & 0022) != 0) {
-        close(descriptor);
-        return -1;
-    }
-    const char *components[] = {"Library", "Application Support", "HuenWM"};
-    for (size_t index = 0; index < 3; index++) {
-        bool final = index == 2;
+    const char *components[] = {home.fileSystemRepresentation, "Library", "Application Support", "HuenWM"};
+    int descriptor = AT_FDCWD;
+    for (size_t index = 0; index < 4; index++) {
+        bool final = index == 3;
         if (final && mkdirat(descriptor, components[index], 0700) != 0 && errno != EEXIST) {
             close(descriptor);
             return -1;
         }
         int next = openat(descriptor, components[index], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-        close(descriptor);
+        if (descriptor != AT_FDCWD) close(descriptor);
         if (next < 0) return -1;
         struct stat status;
         if (fstat(next, &status) != 0 || status.st_uid != geteuid() ||
@@ -121,18 +99,9 @@ static int session_directory(void) {
     return descriptor;
 }
 
-static bool session_name(const char *hash, char *output, size_t capacity) {
-    if (!hash || strlen(hash) != 64) return false;
-    for (size_t index = 0; index < 64; index++) {
-        if (!((hash[index] >= '0' && hash[index] <= '9') || (hash[index] >= 'a' && hash[index] <= 'f'))) return false;
-    }
-    return snprintf(output, capacity, "session-%s.json", hash) == 77;
-}
-
 int huen_session_read(const char *hash, void *output, size_t capacity, size_t *used) {
     char name[96];
-    if (!output || !used || capacity == 0 || capacity > 4 * 1024 * 1024 ||
-        !session_name(hash, name, sizeof(name))) return -1;
+    snprintf(name, sizeof(name), "session-%s.json", hash);
     *used = 0;
     int directory = session_directory();
     if (directory < 0) return -1;
@@ -140,12 +109,9 @@ int huen_session_read(const char *hash, void *output, size_t capacity, size_t *u
     int open_error = errno;
     close(directory);
     if (descriptor < 0) return open_error == ENOENT ? 1 : -1;
-    if (!private_file(descriptor, S_IFREG, 0600)) {
-        close(descriptor);
-        return -1;
-    }
     struct stat status;
-    if (fstat(descriptor, &status) != 0 || status.st_size <= 0 || (uint64_t)status.st_size > capacity) {
+    if (fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
+        (status.st_mode & 0777) != 0600 || status.st_size <= 0 || (uint64_t)status.st_size > capacity) {
         close(descriptor);
         return -1;
     }
@@ -168,7 +134,7 @@ int huen_session_read(const char *hash, void *output, size_t capacity, size_t *u
 
 bool huen_session_write(const char *hash, const void *bytes, size_t length) {
     char name[96];
-    if (!bytes || length == 0 || length > 4 * 1024 * 1024 || !session_name(hash, name, sizeof(name))) return false;
+    snprintf(name, sizeof(name), "session-%s.json", hash);
     int directory = session_directory();
     if (directory < 0) return false;
     struct stat existing;

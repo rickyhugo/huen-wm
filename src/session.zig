@@ -130,31 +130,21 @@ pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
     defer allocator.free(bytes);
     var used: usize = 0;
     switch (huen_session_read(&hash, bytes.ptr, bytes.len, &used)) {
-        0 => return decode(allocator, bytes[0..used], scope),
+        0 => {},
         1 => return .{ .diagnostic = .none },
         else => return .{ .diagnostic = .rejected, .rejection = .storage },
     }
-}
-
-pub fn decode(allocator: std.mem.Allocator, bytes: []const u8, scope: Scope) Loaded {
-    validateScope(scope) catch return .{ .diagnostic = .rejected, .rejection = .scope };
-    if (bytes.len == 0 or bytes.len > max_bytes)
+    const parsed = std.json.parseFromSlice(Snapshot, allocator, bytes[0..used], .{ .allocate = .alloc_always, .max_value_len = max_bytes }) catch
         return .{ .diagnostic = .rejected, .rejection = .schema };
-    const parsed = std.json.parseFromSlice(Snapshot, allocator, bytes, .{ .allocate = .alloc_always, .max_value_len = max_bytes }) catch
-        return .{ .diagnostic = .rejected, .rejection = .schema };
-    validate(parsed.value) catch {
-        parsed.deinit();
-        return .{ .diagnostic = .rejected, .rejection = .schema };
+    const rejection: Rejection = rejection: {
+        validate(parsed.value) catch break :rejection .schema;
+        const saved = parsed.value.scope;
+        if (!std.mem.eql(u8, saved.config, scope.config) or !std.mem.eql(u8, saved.filter, scope.filter) or !std.mem.eql(u8, saved.boot, scope.boot)) break :rejection .scope;
+        if (parsed.value.clean) return .{ .diagnostic = .ready, .parsed = parsed };
+        break :rejection .unclean;
     };
-    if (!sameScope(parsed.value.scope, scope)) {
-        parsed.deinit();
-        return .{ .diagnostic = .rejected, .rejection = .scope };
-    }
-    if (!parsed.value.clean) {
-        parsed.deinit();
-        return .{ .diagnostic = .rejected, .rejection = .unclean };
-    }
-    return .{ .diagnostic = .ready, .parsed = parsed };
+    parsed.deinit();
+    return .{ .diagnostic = .rejected, .rejection = rejection };
 }
 
 pub fn save(allocator: std.mem.Allocator, checkpoint: Snapshot, outcome: RecoveryOutcome) !void {
@@ -183,11 +173,6 @@ fn validateScope(scope: Scope) !void {
         !textValid(scope.boot, 128, false)) return error.InvalidScope;
 }
 
-fn sameScope(first: Scope, second: Scope) bool {
-    return std.mem.eql(u8, first.config, second.config) and
-        std.mem.eql(u8, first.filter, second.filter) and std.mem.eql(u8, first.boot, second.boot);
-}
-
 pub fn scopeHash(scope: Scope) ![64:0]u8 {
     try validateScope(scope);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -195,16 +180,7 @@ pub fn scopeHash(scope: Scope) ![64:0]u8 {
     hasher.update(scope.config);
     hasher.update("\x00");
     hasher.update(scope.filter);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    var result: [64:0]u8 = undefined;
-    const alphabet = "0123456789abcdef";
-    for (digest, 0..) |byte, index| {
-        result[index * 2] = alphabet[byte >> 4];
-        result[index * 2 + 1] = alphabet[byte & 15];
-    }
-    result[64] = 0;
-    return result;
+    return std.fmt.bytesToHex(hasher.finalResult(), .lower) ++ [_:0]u8{};
 }
 
 pub fn validateKey(key: StableKey) !void {
@@ -245,18 +221,17 @@ pub fn validate(checkpoint: Snapshot) !void {
     var leaves: [max_windows]bool = @splat(false);
     var stack: [max_nodes]LogicalIndex = undefined;
     var edge_count: usize = 0;
-    for (checkpoint.nodes) |node| {
-        switch (node) {
-            .leaf => {},
-            .split => |split| {
-                if (!ratioValid(split.ratio)) return error.InvalidRatio;
-                for (split.children) |child| try claim(child, checkpoint.nodes.len, &parents, &edge_count);
-            },
-            .group => |group| {
-                if (group.children.len < 2 or group.children.len > max_windows or group.selected >= group.children.len)
-                    return error.InvalidGroup;
-                for (group.children) |child| try claim(child, checkpoint.nodes.len, &parents, &edge_count);
-            },
+    for (checkpoint.nodes) |*node| {
+        const children: []const LogicalIndex = switch (node.*) {
+            .leaf => continue,
+            .split => |*split| if (ratioValid(split.ratio)) &split.children else return error.InvalidRatio,
+            .group => |group| if (group.children.len >= 2 and group.children.len <= max_windows and group.selected < group.children.len) group.children else return error.InvalidGroup,
+        };
+        for (children) |child| {
+            if (child >= checkpoint.nodes.len or parents[child]) return error.DuplicateParent;
+            parents[child] = true;
+            edge_count += 1;
+            if (edge_count > max_edges) return error.Capacity;
         }
     }
     for (checkpoint.roots, 0..) |root, root_index| {
@@ -287,27 +262,21 @@ pub fn validate(checkpoint: Snapshot) !void {
             const index = stack[pending];
             if (owners[index] != null) return error.Cycle;
             owners[index] = @intCast(root_index);
-            switch (checkpoint.nodes[index]) {
+            const children: []const LogicalIndex = switch (checkpoint.nodes[index]) {
                 .leaf => |window| {
                     if (window >= checkpoint.windows.len or leaves[window] or
                         checkpoint.windows[window].floating or checkpoint.windows[window].root != root_index)
                         return error.InvalidLeaf;
                     leaves[window] = true;
+                    continue;
                 },
-                .split => |split| {
-                    for (split.children) |child| {
-                        if (pending == max_nodes) return error.Capacity;
-                        stack[pending] = child;
-                        pending += 1;
-                    }
-                },
-                .group => |group| {
-                    for (group.children) |child| {
-                        if (pending == max_nodes) return error.Capacity;
-                        stack[pending] = child;
-                        pending += 1;
-                    }
-                },
+                .split => |*split| &split.children,
+                .group => |group| group.children,
+            };
+            for (children) |child| {
+                if (pending == max_nodes) return error.Capacity;
+                stack[pending] = child;
+                pending += 1;
             }
         }
         if (root.selection) |selection| {
@@ -315,58 +284,4 @@ pub fn validate(checkpoint: Snapshot) !void {
         }
     }
     for (owners[0..checkpoint.nodes.len]) |owner| if (owner == null) return error.OrphanNode;
-}
-
-fn claim(child: LogicalIndex, count: usize, parents: *[max_nodes]bool, edges: *usize) !void {
-    if (child >= count or parents[child]) return error.DuplicateParent;
-    parents[child] = true;
-    edges.* += 1;
-    if (edges.* > max_edges) return error.Capacity;
-}
-
-pub const Pair = struct { saved: LogicalIndex, current: LogicalIndex };
-pub const MatchResult = struct {
-    pairs: [max_windows]Pair = undefined,
-    count: usize = 0,
-    missing: usize = 0,
-    ambiguous_saved: usize = 0,
-    ambiguous_current: usize = 0,
-};
-
-pub fn equalKey(first: StableKey, second: StableKey) bool {
-    return first.pid == second.pid and first.launch == second.launch and first.kind == second.kind and
-        std.mem.eql(u8, first.bundle, second.bundle) and std.mem.eql(u8, first.value, second.value) and
-        std.mem.eql(u8, first.role, second.role) and std.mem.eql(u8, first.subrole, second.subrole);
-}
-
-pub fn match(saved: []const StableKey, current: []const StableKey) !MatchResult {
-    if (saved.len > max_windows or current.len > max_windows) return error.Capacity;
-    for (saved) |key| try validateKey(key);
-    for (current) |key| try validateKey(key);
-    var result = MatchResult{};
-    for (saved, 0..) |key, saved_index| {
-        var saved_count: usize = 0;
-        var current_count: usize = 0;
-        var current_index: usize = 0;
-        for (saved) |candidate| {
-            if (equalKey(key, candidate)) saved_count += 1;
-        }
-        for (current, 0..) |candidate, index| {
-            if (equalKey(key, candidate)) {
-                current_count += 1;
-                current_index = index;
-            }
-        }
-        if (saved_count != 1) {
-            result.ambiguous_saved += 1;
-        } else if (current_count > 1) {
-            result.ambiguous_current += 1;
-        } else if (current_count == 0) {
-            result.missing += 1;
-        } else {
-            result.pairs[result.count] = .{ .saved = @intCast(saved_index), .current = @intCast(current_index) };
-            result.count += 1;
-        }
-    }
-    return result;
 }
