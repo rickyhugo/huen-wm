@@ -29,7 +29,7 @@ pub extern "c" fn platform_frame(identity: u64, frame: WMRect, duration: f64, in
 pub extern "c" fn platform_read_frame(identity: u64, frame: *WMRect) bool;
 pub extern "c" fn platform_focus(identity: u64) bool;
 pub extern "c" fn platform_focused_window() u64;
-pub extern "c" fn platform_launch(bundle: [*:0]const u8, new_instance: bool) u64;
+pub extern "c" fn platform_launch(bundle: [*:0]const u8, new_instance: bool, hidden: bool) u64;
 pub const WMLaunchStatus = extern struct { request_id: u64, state: c_int, message: [256]u8 };
 pub extern "c" fn platform_launch_status() WMLaunchStatus;
 pub extern "c" fn platform_exec(shell: [*:0]const u8) bool;

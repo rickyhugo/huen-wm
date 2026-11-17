@@ -16,7 +16,7 @@ const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -1251,6 +1251,8 @@ fn reconcile() void {
                         floatRejectedTile(window);
                         continue;
                     }
+                    // A launching application can refuse or override its first placements. Retry a new window before floating it.
+                    if (native.platform_monotonic() - window.discovered < 1.0) continue;
                     window.floating = true;
                     window.floating_restore = false;
                     if (!native.platform_read_frame(window.identity, &accepted)) accepted = actual;
@@ -1345,6 +1347,7 @@ export fn wm_tick() void {
                     window.floating_restore = true;
                 }
             }
+            window.discovered = native.platform_monotonic();
             windows.append(allocator, window) catch return;
         }
     }
@@ -1750,7 +1753,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
         },
         .launch => |request| {
             if (suspended) return failure("RuntimeSuspendedRestartToResume");
-            const request_id = native.platform_launch(request.bundle.text(), request.new_instance);
+            const request_id = native.platform_launch(request.bundle.text(), request.new_instance, request.hidden);
             if (request_id == 0) return failure("ApplicationNotFound");
             return json(.{ .ok = true, .accepted = true, .request_id = request_id });
         },

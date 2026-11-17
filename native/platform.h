@@ -33,7 +33,7 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
 bool platform_read_frame(uint64_t identity, WMRect *frame);
 bool platform_focus(uint64_t identity);
 uint64_t platform_focused_window(void);
-uint64_t platform_launch(const char *bundle, bool new_instance);
+uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden);
 typedef struct { uint64_t request_id; int state; char message[256]; } WMLaunchStatus;
 WMLaunchStatus platform_launch_status(void);
 bool platform_exec(const char *shell);

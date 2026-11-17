@@ -58,11 +58,17 @@ The tooltip includes the mode name.
 | --- | --- |
 | `launch BUNDLE` | Requests application activation or launch by bundle ID. |
 | `launch --new-instance BUNDLE` | Requests a new application instance through NSWorkspace. |
+| `launch --hidden BUNDLE` | Launches the application hidden and shows it after its first window is placed. |
 | `exec-and-forget SHELLTEXT` | Starts `/bin/sh -c` with the remaining command text. |
 | `close` | Presses the focused known window's AX close button. |
 | `close --quit-if-last-window` | Requests close, then conditionally requests normal application termination. |
 
 Bundle IDs contain at most 127 bytes of ASCII letters, digits, periods, or hyphens.
+`--hidden` and `--new-instance` can be combined in either order.
+With `--hidden`, the first window appears at its tile instead of at the frame the application chose.
+It applies only when the command starts a new process. An application that already runs is activated as usual.
+An application that creates no window while hidden is shown after one second.
+A new window in an application that already runs still appears at its own frame for a few frames before it is placed.
 `launch` does not interpret shell syntax.
 An unknown bundle ID returns `ApplicationNotFound`.
 Launch replies contain `accepted` and a `request_id`.
@@ -85,7 +91,7 @@ The native task copies shell text before the command buffer is released.
 
 ```sh
 huen-wm launch com.google.Chrome
-huen-wm launch --new-instance com.mitchellh.ghostty
+huen-wm launch --new-instance --hidden com.mitchellh.ghostty
 huen-wm exec-and-forget 'open -a Flameshot --args gui'
 huen-wm close --quit-if-last-window
 ```

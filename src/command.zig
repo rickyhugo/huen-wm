@@ -42,7 +42,7 @@ pub const MonitorSelector = union(enum) {
     class: MonitorClass,
     name: Name,
 };
-pub const Launch = struct { bundle: Name, new_instance: bool = false };
+pub const Launch = struct { bundle: Name, new_instance: bool = false, hidden: bool = false };
 pub const Command = union(enum) {
     status,
     windows,
@@ -168,13 +168,16 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .resize = delta };
     }
     if (std.mem.eql(u8, verb, "launch")) {
-        const new_instance = argument != null and std.mem.eql(u8, argument.?, "--new-instance");
-        if (new_instance) argument = tokens.next();
+        var new_instance = false;
+        var hidden = false;
+        while (argument) |option| : (argument = tokens.next()) {
+            if (std.mem.eql(u8, option, "--new-instance") and !new_instance) new_instance = true else if (std.mem.eql(u8, option, "--hidden") and !hidden) hidden = true else break;
+        }
         const bundle = try Name.init(argument orelse return error.MissingArgument);
         if (bundle.bytes[0] == '-') return error.UnknownOption;
         for (bundle.text()) |character| if (!std.ascii.isAlphanumeric(character) and character != '.' and character != '-') return error.InvalidBundle;
         if (tokens.next() != null) return error.ExtraArgument;
-        return .{ .launch = .{ .bundle = bundle, .new_instance = new_instance } };
+        return .{ .launch = .{ .bundle = bundle, .new_instance = new_instance, .hidden = hidden } };
     }
     if (std.mem.eql(u8, verb, "focus")) {
         if (argument != null and std.mem.eql(u8, argument.?, "last")) {

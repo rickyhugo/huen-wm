@@ -64,8 +64,15 @@ static void requestSettleScans(pid_t process) {
     settleScanDeadline = now + 1.0;
     markChanged();
 }
+// An application launched hidden is shown after its first window is placed, so the window never appears at the frame
+// the application chose. Some applications create no window while hidden, so the deadline shows them anyway.
+static NSRunningApplication *revealApplication;
+static double revealDeadline = 0;
+static double revealPlacementTime = 0;
 static double lastScan = 0;
 static double lastProcessScan = 0;
+// A scan of one application that timed out waits this long before the next, so a busy application cannot stall every tick.
+static double processScanRetryTime = 0;
 static BOOL serviceActive = NO;
 static void scanAndTick(pid_t process);
 static BOOL stopping;
@@ -110,9 +117,13 @@ lua_State *platform_lua_open(void) {
     return state;
 }
 
+// Set when an AX read times out. A scan stops reading that application, or each further read would wait for the timeout again.
+static BOOL readTimedOut = NO;
 static id attribute(AXUIElementRef element, CFStringRef name) {
     CFTypeRef result = NULL;
-    if (AXUIElementCopyAttributeValue(element, name, &result) != kAXErrorSuccess) return nil;
+    AXError error = AXUIElementCopyAttributeValue(element, name, &result);
+    if (error == kAXErrorCannotComplete) readTimedOut = YES;
+    if (error != kAXErrorSuccess) return nil;
     return CFBridgingRelease(result);
 }
 
@@ -254,11 +265,12 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
                     // A launching application can reject registration. Retry soon, or its new windows would wait for periodic scans.
                     // Applications that keep rejecting it are retried only by periodic scans.
                     CFRelease(observer);
-                    if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans(0);
+                    if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans(application.processIdentifier);
                 }
             }
         }
         CFTypeRef windowValues = NULL;
+        readTimedOut = NO;
         AXError scanResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windowValues);
         if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
             if (windowValues) CFRelease(windowValues);
@@ -278,10 +290,12 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
             AXUIElementSetMessagingTimeout(element, 0.08);
             WMRect frame;
             if (readFrame(element, &frame)) frames[[NSValue valueWithPointer:element]] = [NSValue valueWithBytes:&frame objCType:@encode(WMRect)];
+            if (readTimedOut) break;
         }
-        id focused = attribute(appElement, kAXFocusedWindowAttribute);
+        id focused = readTimedOut ? nil : attribute(appElement, kAXFocusedWindowAttribute);
         NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
         for (id object in windows) {
+            if (readTimedOut) break;
             AXUIElementRef element = (__bridge AXUIElementRef)object;
             AXUIElementSetMessagingTimeout(element, 0.08);
             WindowRecord *record = nil;
@@ -307,7 +321,9 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
                 // in an application that is not hidden opens on the current Space, so place it at once and let WindowServer
                 // confirm it within the deadline. Without that confirmation it stops being eligible, as before.
                 // Other new windows only make the scan retry instead of waiting unplaced for the next scan.
-                if (initialScanComplete && !application.hidden) record.assumedVisibleDeadline = CACurrentMediaTime() + 0.5;
+                BOOL revealing = revealApplication && revealApplication.processIdentifier == application.processIdentifier;
+                // WindowServer does not list a hidden application's window, so that window stays assumed until it is shown.
+                if (initialScanComplete && (!application.hidden || revealing)) record.assumedVisibleDeadline = (revealing ? revealDeadline : CACurrentMediaTime()) + 0.5;
                 else record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
                 WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
                 [records addObject:record];
@@ -356,6 +372,15 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
             observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
             record.observation = observation;
             [seen addObject:@(observation.identity)];
+        }
+        if (readTimedOut) {
+            // The application stopped answering partway, usually while it launches or is busy. Keep its records as they
+            // are: the windows not reached are unknown, not gone.
+            NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
+            timeoutCounts[process] = @(count);
+            if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
+            if (onlyProcess) processScanRetryTime = CACurrentMediaTime() + 0.05;
+            CFRelease(appElement); continue;
         }
         NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) {
             (void)index; (void)stop;
@@ -527,8 +552,41 @@ uint64_t platform_focused_window(void) {
     return 0;
 }
 
+static void revealLaunchedApplication(void) {
+    NSRunningApplication *application = revealApplication;
+    if (!application) return;
+    revealApplication = nil;
+    if (application.terminated) return;
+    // NSRunningApplication can refuse to activate another application from the background, so also ask through AX.
+    AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
+    AXUIElementSetMessagingTimeout(appElement, 0.08);
+    AXUIElementSetAttributeValue(appElement, kAXHiddenAttribute, kCFBooleanFalse);
+    [application unhide];
+    [application activateWithOptions:0];
+    AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute, kCFBooleanTrue);
+    CFRelease(appElement);
+    for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) {
+        AXUIElementPerformAction(record.element, kAXRaiseAction);
+        AXUIElementSetAttributeValue(record.element, kAXMainAttribute, kCFBooleanTrue);
+        break;
+    }
+    requestSettleScans(application.processIdentifier);
+}
+static void revealWhenPlaced(void) {
+    if (!revealApplication) return;
+    if (revealApplication.terminated || CACurrentMediaTime() > revealDeadline) { revealLaunchedApplication(); return; }
+    for (WindowRecord *record in records) if (record.observation.pid == revealApplication.processIdentifier && record.target.width > 0) {
+        // Show the application when its window is at the frame we asked for. A launching application can still override
+        // or adjust that frame, so stop waiting 150 ms after the first placement.
+        double now = CACurrentMediaTime();
+        if (!revealPlacementTime) revealPlacementTime = now;
+        WMRect actual;
+        if ((readFrame(record.element, &actual) && framesNear(actual, record.target, 2)) || now - revealPlacementTime > 0.15) { revealLaunchedApplication(); return; }
+    }
+}
+
 static WMLaunchStatus launchStatus;
-uint64_t platform_launch(const char *bundle, bool new_instance) {
+uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden) {
     NSString *identifier = [NSString stringWithUTF8String:bundle];
     NSURL *url = nil;
     for (NSRunningApplication *application in [NSRunningApplication runningApplicationsWithBundleIdentifier:identifier]) {
@@ -537,11 +595,14 @@ uint64_t platform_launch(const char *bundle, bool new_instance) {
             break;
         }
     }
+    // Hiding applies to a new process only. It must not hide an application that already shows windows.
+    BOOL hide = hidden && (new_instance || !url);
     if (!url) url = [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:identifier];
     if (!url) return 0;
     NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
     configuration.createsNewApplicationInstance = new_instance;
     configuration.activates = YES;
+    configuration.hides = hide;
     uint64_t requestID = launchStatus.request_id + 1;
     launchStatus = (WMLaunchStatus){ .request_id = requestID, .state = 1 };
     [NSWorkspace.sharedWorkspace openApplicationAtURL:url configuration:configuration completionHandler:^(NSRunningApplication *application, NSError *error) {
@@ -549,6 +610,13 @@ uint64_t platform_launch(const char *bundle, bool new_instance) {
             if (launchStatus.request_id != requestID) return;
             launchStatus.state = error || !application ? 3 : 2;
             copyUTF8(launchStatus.message, sizeof(launchStatus.message), error.localizedDescription ?: @"");
+            if (hide && application && !error) {
+                revealLaunchedApplication();
+                revealApplication = application;
+                revealPlacementTime = 0;
+                revealDeadline = CACurrentMediaTime() + 1.0;
+                requestSettleScans(application.processIdentifier);
+            }
         });
     }];
     return requestID;
@@ -618,6 +686,7 @@ static void scanAndTick(pid_t process) {
     platform_settle_budget_begin();
     scanWindows(process);
     wm_tick();
+    revealWhenPlaced();
 }
 
 static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
@@ -859,7 +928,10 @@ int platform_main(int argc, char **argv) {
         // AX observers exist only for applications seen by an earlier scan, so launches need their own signal.
         NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
         for (NSNotificationName name in @[NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidUnhideApplicationNotification]) {
-            [workspaceCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(0); }];
+            [workspaceCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+                NSRunningApplication *subject = notification.userInfo[NSWorkspaceApplicationKey];
+                requestSettleScans(subject ? subject.processIdentifier : 0);
+            }];
         }
         [workspaceCenter addObserverForName:NSWorkspaceDidActivateApplicationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
             NSRunningApplication *activated = notification.userInfo[NSWorkspaceApplicationKey];
@@ -877,10 +949,11 @@ int platform_main(int argc, char **argv) {
             if (interrupted) platform_quit();
             wm_input_poll();
             double now = CACurrentMediaTime();
+            revealWhenPlaced();
             BOOL settling = now < settleScanDeadline;
             // Slightly under three 60 Hz ticks, so settle scans of every application run every 50 ms instead of every fourth tick.
             if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
-            else if (settling && settleProcess && now - lastProcessScan > 0.012) scanAndTick(settleProcess);
+            else if (settling && settleProcess && now - lastProcessScan > 0.012 && now > processScanRetryTime) scanAndTick(settleProcess);
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;
                 if (stat(configPath.fileSystemRepresentation, &metadata) == 0 && (metadata.st_mtimespec.tv_sec != lastModified.tv_sec || metadata.st_mtimespec.tv_nsec != lastModified.tv_nsec)) {
