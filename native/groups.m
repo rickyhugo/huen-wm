@@ -21,15 +21,11 @@
 }
 @property(nonatomic) HuenHeaderItem item;
 @property(nonatomic) BOOL available;
-- (void)selectHeader:(id)sender;
 @end
 
 @implementation HuenHeaderButton
 - (BOOL)acceptsFirstResponder { return NO; }
-- (BOOL)acceptsFirstMouse:(NSEvent *)event {
-    (void)event;
-    return YES;
-}
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
 - (void)mouseDown:(NSEvent *)event {
     // Publication runs from a common-modes timer inside this tracking loop and can close the panel.
     __attribute__((objc_precise_lifetime)) HuenHeaderButton *trackingButton = self;
@@ -79,12 +75,6 @@ static bool valid_rect(HuenInteractionRect rect) {
            isfinite(rect.left + rect.width) && isfinite(rect.top + rect.height);
 }
 
-// AppKit conversion rounds shared edges of stacked rows into overlap, so compare caller coordinates.
-static bool rects_overlap(HuenInteractionRect first, HuenInteractionRect second) {
-    return first.left < second.left + second.width && second.left < first.left + first.width &&
-           first.top < second.top + second.height && second.top < first.top + first.height;
-}
-
 static NSRect cocoa_rect(HuenInteractionRect rect) {
     double primaryTop = CGDisplayBounds(CGMainDisplayID()).size.height;
     return NSMakeRect(rect.left, primaryTop - rect.top - rect.height, rect.width, rect.height);
@@ -113,20 +103,6 @@ static HuenInteractionPanel *new_panel(bool mouseEnabled) {
     panel.animationBehavior = NSWindowAnimationBehaviorNone;
     panel.accessibilityElement = mouseEnabled;
     return panel;
-}
-
-static HuenHeaderButton *new_header_button(void) {
-    HuenHeaderButton *button = [[HuenHeaderButton alloc] initWithFrame:NSZeroRect];
-    button.bordered = NO;
-    button.buttonType = NSButtonTypeMomentaryChange;
-    button.alignment = NSTextAlignmentLeft;
-    button.lineBreakMode = NSLineBreakByTruncatingTail;
-    button.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
-    button.focusRingType = NSFocusRingTypeNone;
-    button.target = button;
-    button.action = @selector(selectHeader:);
-    button.wantsLayer = YES;
-    return button;
 }
 
 static void disable_panel_buttons(HuenInteractionPanel *panel) {
@@ -158,10 +134,13 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
             rowsByGroup[key] = row;
             [rows addObject:row];
         }
+        // AppKit conversion rounds shared edges of stacked rows into overlap, so compare caller coordinates.
         for (NSValue *previous in row.items) {
             HuenHeaderItem previousItem;
             [previous getValue:&previousItem size:sizeof(previousItem)];
-            if (rects_overlap(item->rect, previousItem.rect)) return false;
+            HuenInteractionRect first = item->rect, second = previousItem.rect;
+            if (first.left < second.left + second.width && second.left < first.left + first.width &&
+                first.top < second.top + second.height && second.top < first.top + first.height) return false;
         }
         row.frame = NSUnionRect(row.frame, itemFrame);
         row.area += item->rect.width * item->rect.height;
@@ -196,10 +175,22 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
         NSView *content = panel.contentView;
         [panel setFrame:row.frame display:YES];
         for (size_t itemIndex = 0; itemIndex < row.items.count; itemIndex++) {
-            if (itemIndex == content.subviews.count) [content addSubview:new_header_button()];
+            HuenHeaderButton *button = itemIndex < content.subviews.count ? (HuenHeaderButton *)content.subviews[itemIndex] : nil;
+            if (!button) {
+                button = [[HuenHeaderButton alloc] initWithFrame:NSZeroRect];
+                button.bordered = NO;
+                button.buttonType = NSButtonTypeMomentaryChange;
+                button.alignment = NSTextAlignmentLeft;
+                button.lineBreakMode = NSLineBreakByTruncatingTail;
+                button.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+                button.focusRingType = NSFocusRingTypeNone;
+                button.target = button;
+                button.action = @selector(selectHeader:);
+                button.wantsLayer = YES;
+                [content addSubview:button];
+            }
             HuenHeaderItem item;
             [row.items[itemIndex] getValue:&item size:sizeof(item)];
-            HuenHeaderButton *button = (HuenHeaderButton *)content.subviews[itemIndex];
             button.item = item;
             button.available = item.eligible;
             button.enabled = item.eligible;

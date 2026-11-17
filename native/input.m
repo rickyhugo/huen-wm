@@ -83,12 +83,6 @@ static uint32_t carbon_modifiers(CGEventFlags flags) {
     return modifiers;
 }
 
-static bool valid_rect(HuenInteractionRect rect) {
-    return isfinite(rect.left) && isfinite(rect.top) && isfinite(rect.width) &&
-           isfinite(rect.height) && rect.width > 0 && rect.height > 0 &&
-           isfinite(rect.left + rect.width) && isfinite(rect.top + rect.height);
-}
-
 static bool contains(HuenInteractionRect rect, CGPoint point) {
     return point.x >= rect.left && point.x < rect.left + rect.width &&
            point.y >= rect.top && point.y < rect.top + rect.height;
@@ -98,29 +92,6 @@ static bool same_ref(HuenNodeRef first, HuenNodeRef second) {
     return first.slot == second.slot && first.generation == second.generation;
 }
 
-static bool same_hit(HuenHitRegion first, HuenHitRegion second) {
-    return first.kind == second.kind &&
-        first.rect.left == second.rect.left && first.rect.top == second.rect.top &&
-        first.rect.width == second.rect.width && first.rect.height == second.rect.height &&
-        same_ref(first.node, second.node) && same_ref(first.group, second.group) &&
-        same_ref(first.boundary, second.boundary) &&
-        first.window_identity == second.window_identity && first.window_id == second.window_id;
-}
-
-static const HuenHitRegion *hit_for_down(CGEventType type, CGPoint point) {
-    HuenHitKind desired = type == kCGEventRightMouseDown ? HuenHitBoundary : HuenHitTile;
-    if (type == kCGEventLeftMouseDown) {
-        for (size_t index = 0; index < input.hit_count; index++) {
-            if (input.hits[index].kind == HuenHitHeader && contains(input.hits[index].rect, point)) return NULL;
-        }
-    }
-    for (size_t index = input.hit_count; index > 0; index--) {
-        const HuenHitRegion *hit = &input.hits[index - 1];
-        if (hit->kind == desired && contains(hit->rect, point)) return hit;
-    }
-    return NULL;
-}
-
 static void update_sample(CGEventRef event) {
     CGPoint point = CGEventGetLocation(event);
     input.drag.sample.point = (HuenInteractionPoint){point.x, point.y};
@@ -128,20 +99,6 @@ static void update_sample(CGEventRef event) {
     double horizontal = point.x - input.drag.sample.origin.left;
     double vertical = point.y - input.drag.sample.origin.top;
     if (hypot(horizontal, vertical) >= 4) input.drag.sample.crossed_threshold = true;
-}
-
-static void enqueue_motion(void) {
-    input.drag.sample.kind = HuenInteractionUpdate;
-    if (input.queue_count) {
-        size_t tail = (input.queue_head + input.queue_count - 1) % HuenQueueCapacity;
-        HuenInteractionEvent *previous = &input.queue[tail];
-        if (previous->kind == HuenInteractionUpdate &&
-            previous->gesture_id == input.drag.sample.gesture_id) {
-            *previous = input.drag.sample;
-            return;
-        }
-    }
-    if (input.queue_count < HuenQueueCapacity - 1) enqueue(input.drag.sample);
 }
 
 static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
@@ -170,9 +127,8 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
         if (type == input.drag.up_type) {
             if (input.drag.phase == HuenDragActive) {
                 update_sample(event);
-                if (carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) {
-                    cancel_drag(HuenCancelModifiers);
-                } else {
+                if (carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) cancel_drag(HuenCancelModifiers);
+                else {
                     input.drag.sample.kind = HuenInteractionEnd;
                     enqueue(input.drag.sample);
                 }
@@ -180,35 +136,43 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
             input.drag.phase = HuenDragIdle;
             return NULL;
         }
-        if (type == input.drag.drag_type) {
-            if (input.drag.phase == HuenDragActive) {
-                if (carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) {
-                    cancel_drag(HuenCancelModifiers);
-                } else {
-                    update_sample(event);
-                    enqueue_motion();
-                }
-            }
+        if (type != input.drag.drag_type) return event;
+        if (input.drag.phase != HuenDragActive) return NULL;
+        if (carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) {
+            cancel_drag(HuenCancelModifiers);
             return NULL;
         }
-        return event;
+        update_sample(event);
+        input.drag.sample.kind = HuenInteractionUpdate;
+        HuenInteractionEvent *previous = &input.queue[(input.queue_head + input.queue_count - 1) % HuenQueueCapacity];
+        if (input.queue_count && previous->kind == HuenInteractionUpdate &&
+            previous->gesture_id == input.drag.sample.gesture_id) *previous = input.drag.sample;
+        else if (input.queue_count < HuenQueueCapacity - 1) enqueue(input.drag.sample);
+        return NULL;
     }
     if (type != kCGEventLeftMouseDown && type != kCGEventRightMouseDown) return event;
     if (!input.enabled || input.stopping || !input.ready || input.transitioning ||
         input.availability != HuenInputAvailable || input.queue_count > HuenQueueAdmissionLimit ||
         carbon_modifiers(CGEventGetFlags(event)) != input.modifiers) return event;
+    bool left = type == kCGEventLeftMouseDown;
     CGPoint point = CGEventGetLocation(event);
-    const HuenHitRegion *hit = hit_for_down(type, point);
+    for (size_t index = 0; left && index < input.hit_count; index++) {
+        if (input.hits[index].kind == HuenHitHeader && contains(input.hits[index].rect, point)) return event;
+    }
+    const HuenHitRegion *hit = NULL;
+    for (size_t index = input.hit_count; index > 0 && !hit; index--) {
+        if (input.hits[index - 1].kind == (left ? HuenHitTile : HuenHitBoundary) &&
+            contains(input.hits[index - 1].rect, point)) hit = &input.hits[index - 1];
+    }
     if (!hit) return event;
     input.drag.phase = HuenDragActive;
     input.drag.down_type = type;
-    input.drag.drag_type = type == kCGEventLeftMouseDown ? kCGEventLeftMouseDragged : kCGEventRightMouseDragged;
-    input.drag.up_type = type == kCGEventLeftMouseDown ? kCGEventLeftMouseUp : kCGEventRightMouseUp;
-    input.next_gesture++;
-    if (input.next_gesture == 0) input.next_gesture++;
+    input.drag.drag_type = left ? kCGEventLeftMouseDragged : kCGEventRightMouseDragged;
+    input.drag.up_type = left ? kCGEventLeftMouseUp : kCGEventRightMouseUp;
+    if (++input.next_gesture == 0) input.next_gesture++;
     input.drag.sample = (HuenInteractionEvent){
         .kind = HuenInteractionStart,
-        .gesture = type == kCGEventLeftMouseDown ? HuenGestureReorder : HuenGestureResize,
+        .gesture = left ? HuenGestureReorder : HuenGestureResize,
         .generation = input.generation,
         .gesture_id = input.next_gesture,
         .monotonic_ns = monotonic_ns(),
@@ -220,40 +184,10 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
     return NULL;
 }
 
-static bool install_tap(void) {
-    if (input.tap && CFMachPortIsValid(input.tap)) return true;
-    if (input.source) {
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), input.source, kCFRunLoopCommonModes);
-        CFRelease(input.source);
-        input.source = NULL;
-    }
-    if (input.tap) {
-        CFRelease(input.tap);
-        input.tap = NULL;
-    }
-    CGEventMask mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
-        CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventRightMouseDown) |
-        CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged) |
-        CGEventMaskBit(kCGEventKeyDown);
-    input.tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
-        kCGEventTapOptionDefault, mask, input_callback, NULL);
-    if (!input.tap) return false;
-    input.source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, input.tap, 0);
-    if (!input.source) {
-        CFRelease(input.tap);
-        input.tap = NULL;
-        return false;
-    }
-    CFRunLoopAddSource(CFRunLoopGetMain(), input.source, kCFRunLoopCommonModes);
-    CGEventTapEnable(input.tap, true);
-    return true;
-}
-
 HuenInputAvailability huen_input_configure(bool enabled, uint32_t modifiers) {
     require_main_thread();
     if (input.stopping) return HuenInputStopping;
-    const uint32_t allowed = cmdKey | shiftKey | optionKey | controlKey;
-    if (modifiers == 0 || (modifiers & ~allowed)) enabled = false;
+    if (modifiers == 0 || (modifiers & ~(cmdKey | shiftKey | optionKey | controlKey))) enabled = false;
     if (input.enabled != enabled || input.modifiers != modifiers) cancel_drag(HuenCancelConfiguration);
     input.enabled = enabled;
     input.modifiers = modifiers;
@@ -265,22 +199,40 @@ HuenInputAvailability huen_input_status(void) {
     if (input.tap && !CFMachPortIsValid(input.tap)) cancel_unobserved_drag(HuenCancelTapDisabled);
     if (!input.enabled && input.drag.phase == HuenDragIdle) {
         if (input.tap) CGEventTapEnable(input.tap, false);
-        input.availability = input.stopping ? HuenInputStopping : HuenInputDisabled;
-    } else if (!permissions_allowed()) {
-        cancel_unobserved_drag(HuenCancelPermission);
-        input.availability = HuenInputPermissionDenied;
-    } else if (!install_tap()) {
-        cancel_unobserved_drag(HuenCancelTapDisabled);
-        input.availability = HuenInputTapUnavailable;
-    } else {
-        if (!CGEventTapIsEnabled(input.tap)) {
-            cancel_unobserved_drag(HuenCancelTapDisabled);
-            CGEventTapEnable(input.tap, true);
-        }
-        input.availability = input.stopping ? HuenInputStopping :
-            (input.enabled ? HuenInputAvailable : HuenInputDisabled);
+        return input.availability = input.stopping ? HuenInputStopping : HuenInputDisabled;
     }
-    return input.availability;
+    if (!permissions_allowed()) {
+        cancel_unobserved_drag(HuenCancelPermission);
+        return input.availability = HuenInputPermissionDenied;
+    }
+    if (!input.tap || !CFMachPortIsValid(input.tap)) {
+        if (input.tap) {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), input.source, kCFRunLoopCommonModes);
+            CFRelease(input.source);
+            CFRelease(input.tap);
+        }
+        CGEventMask mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
+            CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventRightMouseDown) |
+            CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged) |
+            CGEventMaskBit(kCGEventKeyDown);
+        input.tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+            kCGEventTapOptionDefault, mask, input_callback, NULL);
+        input.source = input.tap ? CFMachPortCreateRunLoopSource(kCFAllocatorDefault, input.tap, 0) : NULL;
+        if (!input.source) {
+            if (input.tap) CFRelease(input.tap);
+            input.tap = NULL;
+            cancel_unobserved_drag(HuenCancelTapDisabled);
+            return input.availability = HuenInputTapUnavailable;
+        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), input.source, kCFRunLoopCommonModes);
+        CGEventTapEnable(input.tap, true);
+    }
+    if (!CGEventTapIsEnabled(input.tap)) {
+        cancel_unobserved_drag(HuenCancelTapDisabled);
+        CGEventTapEnable(input.tap, true);
+    }
+    return input.availability = input.stopping ? HuenInputStopping :
+        (input.enabled ? HuenInputAvailable : HuenInputDisabled);
 }
 
 bool huen_input_publish(const HuenInputSnapshot *snapshot) {
@@ -289,19 +241,25 @@ bool huen_input_publish(const HuenInputSnapshot *snapshot) {
         snapshot->hit_count > HUEN_INPUT_MAX_HITS || (snapshot->hit_count && !snapshot->hits)) return false;
     for (size_t index = 0; index < snapshot->hit_count; index++) {
         const HuenHitRegion *hit = &snapshot->hits[index];
-        if (!valid_rect(hit->rect) || hit->kind < HuenHitTile || hit->kind > HuenHitHeader ||
+        HuenInteractionRect rect = hit->rect;
+        if (!isfinite(rect.left) || !isfinite(rect.top) || !isfinite(rect.width) || !isfinite(rect.height) ||
+            rect.width <= 0 || rect.height <= 0 || !isfinite(rect.left + rect.width) ||
+            !isfinite(rect.top + rect.height) || hit->kind < HuenHitTile || hit->kind > HuenHitHeader ||
             (hit->kind == HuenHitTile &&
              (hit->window_identity == 0 || hit->window_id == 0 || hit->node.generation == 0)) ||
             (hit->kind == HuenHitBoundary && hit->boundary.generation == 0) ||
             (hit->kind == HuenHitHeader && (hit->node.generation == 0 || hit->group.generation == 0))) return false;
     }
     if (snapshot->generation < input.generation ||
-        (snapshot->generation == input.generation &&
-         snapshot->hit_count != input.hit_count)) return false;
-    if (snapshot->generation == input.generation) {
-        for (size_t index = 0; index < snapshot->hit_count; index++) {
-            if (!same_hit(snapshot->hits[index], input.hits[index])) return false;
-        }
+        (snapshot->generation == input.generation && snapshot->hit_count != input.hit_count)) return false;
+    for (size_t index = 0; snapshot->generation == input.generation && index < snapshot->hit_count; index++) {
+        HuenHitRegion first = snapshot->hits[index], second = input.hits[index];
+        if (first.kind != second.kind ||
+            first.rect.left != second.rect.left || first.rect.top != second.rect.top ||
+            first.rect.width != second.rect.width || first.rect.height != second.rect.height ||
+            !same_ref(first.node, second.node) || !same_ref(first.group, second.group) ||
+            !same_ref(first.boundary, second.boundary) ||
+            first.window_identity != second.window_identity || first.window_id != second.window_id) return false;
     }
     HuenHitRegion *copied = NULL;
     if (snapshot->hit_count) {
@@ -381,12 +339,10 @@ bool huen_input_finish_stop(bool force) {
     if (input.tap) {
         CGEventTapEnable(input.tap, false);
         CFMachPortInvalidate(input.tap);
-    }
-    if (input.source) {
         CFRunLoopRemoveSource(CFRunLoopGetMain(), input.source, kCFRunLoopCommonModes);
         CFRelease(input.source);
+        CFRelease(input.tap);
     }
-    if (input.tap) CFRelease(input.tap);
     free(input.hits);
     memset(&input, 0, sizeof(input));
     return true;

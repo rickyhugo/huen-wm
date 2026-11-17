@@ -29,9 +29,6 @@ typedef NS_ENUM(NSUInteger, HuenSceneState) {
 @property(nonatomic) HuenSceneReady callback;
 @property(nonatomic) void *context;
 @property(nonatomic, strong) HuenScenePanel *panel;
-- (void)settle:(bool)covered;
-- (void)retireAndSettleCallback;
-- (void)announceCover;
 @end
 
 static HuenSceneTransition *currentTransition;
@@ -69,103 +66,9 @@ static void retire_and_settle_callback(HuenSceneTransition *transition) {
 
 static NSScreen *screen_for_display(uint32_t displayID) {
     for (NSScreen *screen in NSScreen.screens) {
-        if ([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == displayID) {
-            return screen;
-        }
+        if ([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == displayID) return screen;
     }
     return nil;
-}
-
-static void present_image(HuenSceneTransition *transition, id image, CGFloat scale) {
-    NSScreen *screen = screen_for_display(transition.displayID);
-    if (!screen) {
-        retire_and_settle_callback(transition);
-        return;
-    }
-
-    HuenScenePanel *panel = [[HuenScenePanel alloc]
-        initWithContentRect:screen.frame
-        styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
-        backing:NSBackingStoreBuffered defer:NO];
-    panel.releasedWhenClosed = NO;
-    panel.opaque = YES;
-    panel.backgroundColor = NSColor.blackColor;
-    panel.hasShadow = NO;
-    panel.hidesOnDeactivate = NO;
-    panel.becomesKeyOnlyIfNeeded = YES;
-    panel.ignoresMouseEvents = NO;
-    panel.level = NSScreenSaverWindowLevel;
-    panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
-                               NSWindowCollectionBehaviorFullScreenAuxiliary |
-                               NSWindowCollectionBehaviorStationary |
-                               NSWindowCollectionBehaviorIgnoresCycle;
-    panel.animationBehavior = NSWindowAnimationBehaviorNone;
-    NSView *imageView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, screen.frame.size.width,
-                                                              screen.frame.size.height)];
-    CALayer *layer = [CALayer layer];
-    layer.frame = imageView.bounds;
-    imageView.layer = layer;
-    imageView.wantsLayer = YES;
-    panel.contentView = imageView;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    layer.contentsScale = scale;
-    layer.contentsGravity = kCAGravityResize;
-    layer.opaque = YES;
-    layer.contents = image;
-    [CATransaction commit];
-    transition.panel = panel;
-    [panel orderFrontRegardless];
-    [panel displayIfNeeded];
-    [CATransaction flush];
-    [transition performSelector:@selector(announceCover) withObject:nil afterDelay:0
-                       inModes:@[NSRunLoopCommonModes]];
-}
-
-static void capture_display(HuenSceneTransition *transition, SCShareableContent *content) {
-    SCDisplay *selectedDisplay = nil;
-    for (SCDisplay *display in content.displays) {
-        if (display.displayID == transition.displayID) {
-            selectedDisplay = display;
-            break;
-        }
-    }
-    NSMutableArray<SCRunningApplication *> *excludedApplications = [NSMutableArray array];
-    pid_t processID = NSProcessInfo.processInfo.processIdentifier;
-    for (SCRunningApplication *application in content.applications) {
-        if (application.processID == processID) [excludedApplications addObject:application];
-    }
-    if (!selectedDisplay || excludedApplications.count == 0) {
-        retire_and_settle_callback(transition);
-        return;
-    }
-
-    SCContentFilter *filter = [[SCContentFilter alloc]
-        initWithDisplay:selectedDisplay excludingApplications:excludedApplications exceptingWindows:@[]];
-    CGFloat scale = filter.pointPixelScale;
-    double pixelWidth = ceil(CGRectGetWidth(filter.contentRect) * scale);
-    double pixelHeight = ceil(CGRectGetHeight(filter.contentRect) * scale);
-    if (!isfinite(scale) || scale <= 0 || !isfinite(pixelWidth) || !isfinite(pixelHeight) ||
-        pixelWidth < 1 || pixelHeight < 1 || pixelWidth > UINT32_MAX || pixelHeight > UINT32_MAX) {
-        retire_and_settle_callback(transition);
-        return;
-    }
-    SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
-    configuration.width = (size_t)pixelWidth;
-    configuration.height = (size_t)pixelHeight;
-    configuration.showsCursor = NO;
-    [SCScreenshotManager captureImageWithFilter:filter configuration:configuration
-        completionHandler:^(CGImageRef image, NSError *error) {
-            id ownedImage = image ? CFBridgingRelease(CGImageRetain(image)) : nil;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (currentTransition != transition || transition.state != HuenSceneCapturing) return;
-                if (error || !ownedImage) {
-                    retire_and_settle_callback(transition);
-                    return;
-                }
-                present_image(transition, ownedImage, scale);
-            });
-        }];
 }
 
 bool huen_scene_capture_allowed(void) {
@@ -194,20 +97,91 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
 
     __weak HuenSceneTransition *weakTransition = transition;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        HuenSceneTransition *pendingTransition = weakTransition;
-        if (pendingTransition && currentTransition == pendingTransition) {
-            retire_and_settle_callback(pendingTransition);
-        }
+        if (currentTransition == weakTransition) retire_and_settle_callback(currentTransition);
     });
     [SCShareableContent getShareableContentExcludingDesktopWindows:NO onScreenWindowsOnly:NO
         completionHandler:^(SCShareableContent *content, NSError *error) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (currentTransition != transition || transition.state != HuenSceneCapturing) return;
-                if (error || !content) {
+                SCDisplay *selectedDisplay = nil;
+                for (SCDisplay *display in content.displays) {
+                    if (display.displayID == transition.displayID) {
+                        selectedDisplay = display;
+                        break;
+                    }
+                }
+                NSMutableArray<SCRunningApplication *> *excludedApplications = [NSMutableArray array];
+                pid_t processID = NSProcessInfo.processInfo.processIdentifier;
+                for (SCRunningApplication *application in content.applications) {
+                    if (application.processID == processID) [excludedApplications addObject:application];
+                }
+                if (error || !content || !selectedDisplay || excludedApplications.count == 0) {
                     retire_and_settle_callback(transition);
                     return;
                 }
-                capture_display(transition, content);
+                SCContentFilter *filter = [[SCContentFilter alloc]
+                    initWithDisplay:selectedDisplay excludingApplications:excludedApplications exceptingWindows:@[]];
+                CGFloat scale = filter.pointPixelScale;
+                double pixelWidth = ceil(CGRectGetWidth(filter.contentRect) * scale);
+                double pixelHeight = ceil(CGRectGetHeight(filter.contentRect) * scale);
+                if (!isfinite(scale) || scale <= 0 || !isfinite(pixelWidth) || !isfinite(pixelHeight) ||
+                    pixelWidth < 1 || pixelHeight < 1 || pixelWidth > UINT32_MAX || pixelHeight > UINT32_MAX) {
+                    retire_and_settle_callback(transition);
+                    return;
+                }
+                SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+                configuration.width = (size_t)pixelWidth;
+                configuration.height = (size_t)pixelHeight;
+                configuration.showsCursor = NO;
+                [SCScreenshotManager captureImageWithFilter:filter configuration:configuration
+                    completionHandler:^(CGImageRef image, NSError *captureError) {
+                        id ownedImage = image ? CFBridgingRelease(CGImageRetain(image)) : nil;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            if (currentTransition != transition || transition.state != HuenSceneCapturing) return;
+                            NSScreen *screen = screen_for_display(transition.displayID);
+                            if (captureError || !ownedImage || !screen) {
+                                retire_and_settle_callback(transition);
+                                return;
+                            }
+                            HuenScenePanel *panel = [[HuenScenePanel alloc]
+                                initWithContentRect:screen.frame
+                                styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                backing:NSBackingStoreBuffered defer:NO];
+                            panel.releasedWhenClosed = NO;
+                            panel.opaque = YES;
+                            panel.backgroundColor = NSColor.blackColor;
+                            panel.hasShadow = NO;
+                            panel.hidesOnDeactivate = NO;
+                            panel.becomesKeyOnlyIfNeeded = YES;
+                            panel.ignoresMouseEvents = NO;
+                            panel.level = NSScreenSaverWindowLevel;
+                            panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                                       NSWindowCollectionBehaviorFullScreenAuxiliary |
+                                                       NSWindowCollectionBehaviorStationary |
+                                                       NSWindowCollectionBehaviorIgnoresCycle;
+                            panel.animationBehavior = NSWindowAnimationBehaviorNone;
+                            NSView *imageView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, screen.frame.size.width,
+                                                                                      screen.frame.size.height)];
+                            CALayer *layer = [CALayer layer];
+                            layer.frame = imageView.bounds;
+                            imageView.layer = layer;
+                            imageView.wantsLayer = YES;
+                            panel.contentView = imageView;
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+                            layer.contentsScale = scale;
+                            layer.contentsGravity = kCAGravityResize;
+                            layer.opaque = YES;
+                            layer.contents = ownedImage;
+                            [CATransaction commit];
+                            transition.panel = panel;
+                            [panel orderFrontRegardless];
+                            [panel displayIfNeeded];
+                            [CATransaction flush];
+                            [transition performSelector:@selector(announceCover) withObject:nil afterDelay:0
+                                               inModes:@[NSRunLoopCommonModes]];
+                        });
+                    }];
             });
         }];
 }
