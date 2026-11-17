@@ -1,12 +1,15 @@
 const std = @import("std");
+const native = @import("native.zig");
 
+pub const PatternKind = enum { literal, glob, regex };
 pub const Title = struct {
-    kind: enum { literal, glob },
+    kind: PatternKind,
     pattern: [256:0]u8 = @splat(0),
 };
 pub const Geometry = struct { left: f64, top: f64, width: f64, height: f64 };
 pub const Rule = struct {
     bundle: [256:0]u8 = @splat(0),
+    bundle_kind: PatternKind = .literal,
     title: ?Title = null,
     floating: ?bool = null,
     workspace: ?usize = null,
@@ -22,15 +25,10 @@ pub const Decision = struct {
 pub fn resolve(rules: []const Rule, facts: Facts) Decision {
     var decision: Decision = .{};
     for (rules) |*rule| {
-        if (!std.mem.eql(u8, std.mem.sliceTo(&rule.bundle, 0), facts.bundle)) continue;
+        if (!matches(rule.bundle_kind, &rule.bundle, facts.bundle)) continue;
         if (rule.title) |*title| {
             if (!facts.title_complete or !std.unicode.utf8ValidateSlice(facts.title)) continue;
-            const pattern = std.mem.sliceTo(&title.pattern, 0);
-            const matched = switch (title.kind) {
-                .literal => std.mem.eql(u8, pattern, facts.title),
-                .glob => globMatches(pattern, facts.title),
-            };
-            if (!matched) continue;
+            if (!matches(title.kind, &title.pattern, facts.title)) continue;
         }
         if (rule.floating) |floating| decision.floating = floating;
         if (rule.workspace) |workspace| decision.workspace = workspace;
@@ -40,6 +38,16 @@ pub fn resolve(rules: []const Rule, facts: Facts) Decision {
         }
     }
     return decision;
+}
+
+// Literal and glob patterns cover the whole text. A regular expression matches anywhere in it unless it is anchored.
+fn matches(kind: PatternKind, pattern: *const [256:0]u8, text: []const u8) bool {
+    const expected = std.mem.sliceTo(pattern, 0);
+    return switch (kind) {
+        .literal => std.mem.eql(u8, expected, text),
+        .glob => globMatches(expected, text),
+        .regex => native.platform_regex_match(pattern, text.ptr, text.len) == 1,
+    };
 }
 
 fn scalarEnd(value: []const u8, offset: usize) usize {

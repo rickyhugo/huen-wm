@@ -585,6 +585,23 @@ static void revealWhenPlaced(void) {
     }
 }
 
+// Window rules call this once per rule when a window is discovered. Compiled expressions are kept by pattern.
+int platform_regex_match(const char *pattern, const char *text, size_t length) {
+    static NSMutableDictionary<NSString *, NSRegularExpression *> *compiled;
+    if (!compiled) compiled = [NSMutableDictionary dictionary];
+    NSString *source = [NSString stringWithUTF8String:pattern];
+    if (!source) return -1;
+    NSRegularExpression *expression = compiled[source];
+    if (!expression) {
+        expression = [NSRegularExpression regularExpressionWithPattern:source options:0 error:NULL];
+        if (!expression) return -1;
+        compiled[source] = expression;
+    }
+    NSString *subject = [[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
+    if (!subject) return 0;
+    return [expression firstMatchInString:subject options:0 range:NSMakeRange(0, subject.length)] ? 1 : 0;
+}
+
 static WMLaunchStatus launchStatus;
 uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden) {
     NSString *identifier = [NSString stringWithUTF8String:bundle];

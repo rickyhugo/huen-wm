@@ -14,17 +14,29 @@ rules = {
         title = { glob = "Notes ?*" },
         geometry = { left = 40, top = 60, width = 800, height = 600 },
     },
+    { bundle = { regex = "^com\\.google\\." }, title = { regex = "(?i)devtools" }, floating = true },
 }
 ```
 
-`bundle` is required and matches the exact application bundle identifier.
-It must contain 1 to 255 UTF-8 bytes. An optional `title` further restricts the
-match. Supply exactly one of `{ literal = "..." }` or `{ glob = "..." }`.
-Patterns must contain 1 to 255 UTF-8 bytes. Matching is case-sensitive and covers
-the whole provided title. `*` matches any sequence, including an empty sequence.
-`?` matches one Unicode scalar, not one byte or grapheme. No escape syntax,
-regular expressions, or Lua callbacks are supported. Invalid UTF-8 titles do
-not satisfy a title predicate.
+`bundle` is required. A string matches the exact application bundle identifier.
+A pattern table matches it with exactly one of `{ literal = "..." }`,
+`{ glob = "..." }`, or `{ regex = "..." }`. An optional `title` further restricts
+the match and takes the same pattern table. Patterns must contain 1 to 255 UTF-8
+bytes. Matching is case-sensitive.
+
+Literal and glob patterns cover the whole text. In a glob, `*` matches any
+sequence, including an empty sequence. `?` matches one Unicode scalar, not one
+byte or grapheme. Globs have no escape syntax.
+
+A regular expression uses the ICU syntax of `NSRegularExpression`. It matches
+anywhere in the text, so anchor it with `^` and `$` to cover the whole text.
+Start it with `(?i)` to ignore case. A Lua string needs two backslashes for one
+in the expression, as in `"^com\\.google\\."`. An expression that does not
+compile rejects the configuration with `InvalidRegex`. Matching has no time
+limit, so avoid expressions with nested repetition.
+
+Lua callbacks are not supported. Invalid UTF-8 titles do not satisfy a title
+predicate.
 
 Native discovery copies at most 511 UTF-8 bytes and reports whether the entire
 title fits. Truncated, unencodable, or NUL-containing titles never satisfy a title predicate.

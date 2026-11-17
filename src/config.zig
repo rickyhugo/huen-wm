@@ -140,8 +140,8 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
 const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, monitor: ?[]const []const u8 };
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
-const WireTitle = struct { kind: @FieldType(Rules.Title, "kind"), pattern: []const u8 };
-const WireRule = struct { bundle: []const u8, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
+const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
+const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
@@ -177,6 +177,7 @@ fn encode(candidate: *const ConfigCandidate) ![]u8 {
     }
     for (candidate.rules[0..candidate.rule_count], 0..) |*rule, index| rules[index] = .{
         .bundle = text(&rule.bundle),
+        .bundle_kind = rule.bundle_kind,
         .title = if (rule.title) |*title| .{ .kind = title.kind, .pattern = text(&title.pattern) } else null,
         .floating = rule.floating,
         .workspace = rule.workspace,
@@ -245,6 +246,7 @@ fn decode(response: []const u8) !ConfigCandidate {
     }
     for (wire.rules, 0..) |rule, index| {
         try copyText(&candidate.rules[index].bundle, rule.bundle);
+        candidate.rules[index].bundle_kind = rule.bundle_kind;
         candidate.rules[index].floating = rule.floating;
         candidate.rules[index].workspace = rule.workspace;
         candidate.rules[index].geometry = rule.geometry;
@@ -331,8 +333,10 @@ fn validate(candidate: *const ConfigCandidate) !void {
     if (total_bindings > 256) return error.TooManyBindings;
     for (candidate.rules[0..candidate.rule_count]) |*rule| {
         if (text(&rule.bundle).len == 0) return error.MissingBundle;
+        if (rule.bundle_kind == .regex and native.platform_regex_match(&rule.bundle, "", 0) < 0) return error.InvalidRegex;
         if (rule.title) |*title| {
             if (text(&title.pattern).len == 0) return error.EmptyTitlePattern;
+            if (title.kind == .regex and native.platform_regex_match(&title.pattern, "", 0) < 0) return error.InvalidRegex;
         }
         if (rule.workspace) |workspace| {
             if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
@@ -619,19 +623,24 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
             try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry" });
             const rule = &result.rules[index];
-            try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
+            if (rawField(state, "bundle") == native.LUA_TTABLE) {
+                const pattern = try patternField(state);
+                rule.bundle_kind = pattern.kind;
+                try copyText(&rule.bundle, pattern.text);
+                pop(state);
+            } else {
+                pop(state);
+                try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
+            }
             if (rawField(state, "floating") != native.LUA_TNIL) {
                 if (native.lua_type(state, -1) != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
                 rule.floating = native.lua_toboolean(state, -1) != 0;
             }
             pop(state);
             if (rawField(state, "title") != native.LUA_TNIL) {
-                try checkKeys(state, &.{ "literal", "glob" });
-                const literal = try fieldString(state, "literal");
-                const glob = try fieldString(state, "glob");
-                if ((literal == null) == (glob == null)) return error.InvalidTitlePredicate;
-                rule.title = .{ .kind = if (literal != null) .literal else .glob };
-                try copyText(&rule.title.?.pattern, literal orelse glob.?);
+                const pattern = try patternField(state);
+                rule.title = .{ .kind = pattern.kind };
+                try copyText(&rule.title.?.pattern, pattern.text);
             }
             pop(state);
             if (rawField(state, "geometry") != native.LUA_TNIL) {
@@ -654,6 +663,19 @@ fn evaluateLua(path: [*:0]const u8) !ConfigCandidate {
     }
     try validate(&result);
     return result;
+}
+
+/// Reads the pattern table on top of the stack: exactly one of `literal`, `glob`, or `regex`.
+fn patternField(state: *native.lua_State) !struct { kind: Rules.PatternKind, text: []const u8 } {
+    try checkKeys(state, &.{ "literal", "glob", "regex" });
+    const literal = try fieldString(state, "literal");
+    const glob = try fieldString(state, "glob");
+    const regex = try fieldString(state, "regex");
+    const count = @as(u8, @intFromBool(literal != null)) + @intFromBool(glob != null) + @intFromBool(regex != null);
+    if (count != 1) return error.InvalidPattern;
+    if (literal) |value| return .{ .kind = .literal, .text = value };
+    if (glob) |value| return .{ .kind = .glob, .text = value };
+    return .{ .kind = .regex, .text = regex.? };
 }
 
 fn requiredNumber(state: *native.lua_State, key: [*:0]const u8, minimum: f64, maximum: f64) !f64 {
