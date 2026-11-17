@@ -23,6 +23,7 @@
 @property double animationDuration;
 @property double placementVisibilityDeadline;
 @property double cornerRadius;
+@property double assumedVisibleDeadline;
 @property BOOL changed;
 @property WMMotionState motion;
 @end
@@ -41,6 +42,8 @@ static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutCounts;
 static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutRetryTimes;
 static void forgetTimeouts(pid_t process) { [timeoutCounts removeObjectForKey:@(process)]; [timeoutRetryTimes removeObjectForKey:@(process)]; }
 static uint64_t nextIdentity = 1;
+// The first scan of every application also finds windows on other native Spaces. Later scans find only windows created since.
+static BOOL initialScanComplete = NO;
 static BOOL dirty = YES;
 // A created window can be unready for the first scan (no subrole, frame, or settable position) and posts no later notification.
 // Until this deadline, scans repeat quickly so the window tiles once it is ready instead of at the next periodic scan.
@@ -282,8 +285,12 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
                 AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
                 if (!positionSettable || !sizeSettable) continue;
                 record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
-                // WindowServer can publish a new window after AX does. Let the scan retry instead of leaving it unplaced until the next scan.
-                record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
+                // WindowServer can publish a new window tens of milliseconds after AX does. A window created after the first scan
+                // in an application that is not hidden opens on the current Space, so place it at once and let WindowServer
+                // confirm it within the deadline. Without that confirmation it stops being eligible, as before.
+                // Other new windows only make the scan retry instead of waiting unplaced for the next scan.
+                if (initialScanComplete && !application.hidden) record.assumedVisibleDeadline = CACurrentMediaTime() + 0.5;
+                else record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
                 WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
                 [records addObject:record];
                 AXUIElementSetMessagingTimeout(element, 0.08);
@@ -310,7 +317,8 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
                     observation.public_window_id = [visibleWindow[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
                 }
             }
-            observation.onscreen = frames.count == windows.count && matchingAX == 1 && matchingCG == 1;
+            BOOL assumedVisible = frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.assumedVisibleDeadline;
+            observation.onscreen = frames.count == windows.count && matchingAX == 1 && (matchingCG == 1 || assumedVisible);
             if (!observation.onscreen) observation.public_window_id = 0;
             observation.hit_eligible = observation.public_window_id != 0;
             for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
@@ -323,7 +331,7 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
             }
             observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
             observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
-            if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
+            if (!observation.minimized && !observation.fullscreen && frames.count == windows.count && matchingAX == 1 && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
             observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
             copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
             NSString *title = attribute(element, kAXTitleAttribute);
@@ -355,6 +363,7 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
     [records removeObjectsAtIndexes:dead];
     for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
     for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) { [applications removeObjectForKey:process]; forgetTimeouts(process.intValue); }
+    if (!onlyProcess) initialScanComplete = YES;
     return !unmatched;
 }
 
