@@ -34,12 +34,30 @@ static NSMutableArray<WindowRecord *> *records;
 static NSArray<NSDictionary *> *inputWindowOrdering;
 static NSMutableDictionary<NSNumber *, NSValue *> *observers;
 static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
+// An application that does not answer AX stalls every scan for the messaging timeout, and every command scans.
+// After two consecutive timeouts, scans of every application skip it for a doubling delay, up to 10 seconds.
+// A scan of that one application, an AX notification from it, or its activation retries it at once.
+static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutCounts;
+static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutRetryTimes;
+static void forgetTimeouts(pid_t process) { [timeoutCounts removeObjectForKey:@(process)]; [timeoutRetryTimes removeObjectForKey:@(process)]; }
 static uint64_t nextIdentity = 1;
 static BOOL dirty = YES;
 // A created window can be unready for the first scan (no subrole, frame, or settable position) and posts no later notification.
 // Until this deadline, scans repeat quickly so the window tiles once it is ready instead of at the next periodic scan.
+// One settling application is scanned alone on every tick, which costs far less than a scan of every application.
+// Zero means every application: a launch, or several applications settling at once.
 static double settleScanDeadline = 0;
-static void requestSettleScans(void) { dirty = YES; settleScanDeadline = CACurrentMediaTime() + 1.0; }
+static pid_t settleProcess = 0;
+static void requestSettleScans(pid_t process) {
+    double now = CACurrentMediaTime();
+    settleProcess = now < settleScanDeadline && settleProcess != process ? 0 : process;
+    settleScanDeadline = now + 1.0;
+    dirty = YES;
+}
+static double lastScan = 0;
+static double lastProcessScan = 0;
+static BOOL serviceActive = NO;
+static void scanAndTick(pid_t process);
 static BOOL stopping;
 static NSString *configPath;
 static NSString *bundleFilter;
@@ -163,12 +181,22 @@ static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
 }
 
 static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
-    (void)observer; (void)element; (void)context;
-    if (CFEqual(notification, kAXWindowCreatedNotification) || CFEqual(notification, kAXApplicationShownNotification)) requestSettleScans();
-    else dirty = YES;
+    (void)observer; (void)context;
+    if (CFEqual(notification, kAXWindowCreatedNotification) || CFEqual(notification, kAXApplicationShownNotification)) {
+        pid_t process = 0;
+        AXUIElementGetPid(element, &process);
+        forgetTimeouts(process);
+        requestSettleScans(process);
+        // Place a new window now instead of at the next timer tick. The scan runs outside this AX callback.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            pid_t target = settleProcess;
+            if (serviceActive && CACurrentMediaTime() - (target ? lastProcessScan : lastScan) > 0.005) scanAndTick(target);
+        });
+    } else dirty = YES;
 }
 
-static BOOL scanWindowSnapshot(void) {
+// A nonzero process limits AX reads to that application. Other applications keep their last observations.
+static BOOL scanWindowSnapshot(pid_t onlyProcess) {
     BOOL unmatched = NO;
     NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
     inputWindowOrdering = visibleWindows;
@@ -186,6 +214,8 @@ static BOOL scanWindowSnapshot(void) {
         }
         applications[process] = application;
         [livePids addObject:process];
+        if (onlyProcess && application.processIdentifier != onlyProcess) continue;
+        if (!onlyProcess && timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue) continue;
         AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
         AXUIElementSetMessagingTimeout(appElement, 0.08);
         if (!observers[process]) {
@@ -203,7 +233,7 @@ static BOOL scanWindowSnapshot(void) {
                     // A launching application can reject registration. Retry soon, or its new windows would wait for periodic scans.
                     // Applications that keep rejecting it are retried only by periodic scans.
                     CFRelease(observer);
-                    if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans();
+                    if (application.launchDate && -application.launchDate.timeIntervalSinceNow < 5) requestSettleScans(0);
                 }
             }
         }
@@ -212,8 +242,14 @@ static BOOL scanWindowSnapshot(void) {
         if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
             if (windowValues) CFRelease(windowValues);
             for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+            if (scanResult == kAXErrorCannotComplete) {
+                NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
+                timeoutCounts[process] = @(count);
+                if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(10.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)5))));
+            }
             CFRelease(appElement); continue;
         }
+        forgetTimeouts(application.processIdentifier);
         NSArray *windows = CFBridgingRelease(windowValues);
         NSMutableDictionary<NSValue *, NSValue *> *frames = [NSMutableDictionary dictionary];
         for (id object in windows) {
@@ -246,6 +282,8 @@ static BOOL scanWindowSnapshot(void) {
                 AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
                 if (!positionSettable || !sizeSettable) continue;
                 record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
+                // WindowServer can publish a new window after AX does. Let the scan retry instead of leaving it unplaced until the next scan.
+                record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
                 WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
                 [records addObject:record];
                 AXUIElementSetMessagingTimeout(element, 0.08);
@@ -316,15 +354,15 @@ static BOOL scanWindowSnapshot(void) {
     NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
     [records removeObjectsAtIndexes:dead];
     for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
-    for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) [applications removeObjectForKey:process];
+    for (NSNumber *process in applications.allKeys) if (![livePids containsObject:process]) { [applications removeObjectForKey:process]; forgetTimeouts(process.intValue); }
     return !unmatched;
 }
 
-static void scanWindows(void) {
+static void scanWindows(pid_t onlyProcess) {
     // AX can reflect our placement before WindowServer publishes the matching CG bounds.
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
         if (attempt) usleep(10000);
-        if (scanWindowSnapshot()) break;
+        if (scanWindowSnapshot(onlyProcess)) break;
     }
 }
 
@@ -359,7 +397,7 @@ size_t platform_windows(WMWindow *output, size_t capacity) {
 }
 
 size_t platform_refresh_windows(WMWindow *output, size_t capacity) {
-    scanWindows();
+    scanWindows(0);
     return platform_windows(output, capacity);
 }
 
@@ -528,6 +566,14 @@ bool platform_terminate_if_empty(uint64_t identity, int pid, double process_toke
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if (!application.launchDate || application.launchDate.timeIntervalSinceReferenceDate != process_token) return false;
     return [application terminate];
+}
+
+static void scanAndTick(pid_t process) {
+    lastProcessScan = CACurrentMediaTime();
+    if (!process) { dirty = NO; lastScan = lastProcessScan; }
+    platform_settle_budget_begin();
+    scanWindows(process);
+    wm_tick();
 }
 
 static NSRect cocoaRect(WMRect frame) { return NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height); }
@@ -753,7 +799,7 @@ int platform_main(int argc, char **argv) {
         if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) { fputs("huen-wm already running or lock unavailable\n", stderr); return 1; }
         if (!AXIsProcessTrusted()) { fputs("Accessibility permission required. Grant it to the signed Huen WM app in System Settings, then start explicitly. No permission was requested.\n", stderr); close(lockDescriptor); return 1; }
         [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-        records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary]; applications = [NSMutableDictionary dictionary];
+        records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary]; applications = [NSMutableDictionary dictionary]; timeoutCounts = [NSMutableDictionary dictionary]; timeoutRetryTimes = [NSMutableDictionary dictionary];
         if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
         if (!wm_activate_config()) { close(lockDescriptor); return 1; }
@@ -765,12 +811,17 @@ int platform_main(int argc, char **argv) {
         if (bindResult || listen(serverSocket, 8)) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         fcntl(serverSocket, F_SETFL, O_NONBLOCK);
         signal(SIGINT, signalHandler); signal(SIGTERM, signalHandler); signal(SIGPIPE, SIG_IGN);
-        __block double lastScan = 0; __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
+        __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
         // AX observers exist only for applications seen by an earlier scan, so launches need their own signal.
         NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
-        for (NSNotificationName name in @[NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidUnhideApplicationNotification]) {
-            [workspaceCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(); }];
+        for (NSNotificationName name in @[NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidUnhideApplicationNotification]) {
+            [workspaceCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(0); }];
         }
+        [workspaceCenter addObserverForName:NSWorkspaceDidActivateApplicationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) {
+            NSRunningApplication *activated = notification.userInfo[NSWorkspaceApplicationKey];
+            if (activated) forgetTimeouts(activated.processIdentifier);
+            dirty = YES;
+        }];
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
@@ -778,8 +829,10 @@ int platform_main(int argc, char **argv) {
             if (interrupted) platform_quit();
             wm_input_poll();
             double now = CACurrentMediaTime();
-            BOOL settling = now < settleScanDeadline && now - lastScan > 0.05;
-            if ((dirty && now - lastScan > 0.15) || settling || now - lastScan > 2) { dirty = NO; scanWindows(); wm_tick(); lastScan = now; }
+            BOOL settling = now < settleScanDeadline;
+            // Slightly under three 60 Hz ticks, so settle scans of every application run every 50 ms instead of every fourth tick.
+            if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
+            else if (settling && settleProcess && now - lastProcessScan > 0.012) scanAndTick(settleProcess);
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;
                 if (stat(configPath.fileSystemRepresentation, &metadata) == 0 && (metadata.st_mtimespec.tv_sec != lastModified.tv_sec || metadata.st_mtimespec.tv_nsec != lastModified.tv_nsec)) {
@@ -845,7 +898,7 @@ int platform_main(int argc, char **argv) {
             }
             if (stopping && wm_shutdown()) { [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
         }];
-        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; [NSApp run]; [timer invalidate];
+        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; serviceActive = YES; [NSApp run]; serviceActive = NO; [timer invalidate];
         close(serverSocket); unlink(socketPath.fileSystemRepresentation); close(lockDescriptor); return 0;
     }
 }
