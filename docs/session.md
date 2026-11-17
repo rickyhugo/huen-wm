@@ -94,7 +94,7 @@ The native capacities, including termination, are 256 bytes for bundle, 2048 for
 The caller retains that object until encoding or copies the strings into checkpoint-owned memory.
 `huen_session_display_uuid` optionally supplies a public display UUID hint.
 
-`match(saved_keys, current_keys)` returns logical `Pair` indices and counts.
+`continuity.restore` matches the saved keys with the keys of the current windows.
 Both key arrays must contain valid keys and at most 1024 entries.
 The caller omits windows whose native metadata is unavailable and retains a separate index map for that compact array.
 Each complete key must occur exactly once on both sides.
@@ -113,7 +113,6 @@ Public AX attributes cannot eliminate that risk.
 A rejected result includes `storage`, `schema`, `scope`, or `unclean`.
 `Loaded.snapshot()` borrows the bounded, validated snapshot.
 `Loaded.deinit()` releases its allocation.
-`decode` provides the same validation for caller-supplied bytes without filesystem or native access.
 
 `save(allocator, checkpoint, outcome)` returns an error on failure.
 It requires both `checkpoint.clean == true` and `outcome == .clean`.
@@ -127,7 +126,7 @@ An interruption before successful save retains the previous checkpoint.
 There is no guaranteed crash recovery.
 
 The following skeleton shows the ownership order.
-`freezeCheckpoint`, `restoreOriginalFrames`, and `importPrunedCheckpoint` are caller operations, not session APIs.
+`freezeCheckpoint` and `restoreOriginalFrames` are caller operations, not session APIs.
 
 ```zig
 const frozen = try engine.freezeCheckpoint(scope);
@@ -139,8 +138,7 @@ session.save(allocator, frozen, if (recovery.clean) .clean else .failed) catch |
 var loaded = session.load(allocator, scope);
 defer loaded.deinit();
 if (loaded.snapshot()) |snapshot| {
-    const mapping = try session.match(saved_keys, current_keys);
-    try engine.importPrunedCheckpoint(snapshot, mapping.pairs[0..mapping.count]);
+    const imported = try continuity.restore(snapshot, current_windows, screens, &config, placements);
 }
 ```
 

@@ -179,7 +179,6 @@ Fullscreen activation uses the same ancestor reveal path.
 | `editGroup(state, focused, action)` | Applies a `command.Group` action. Cycle actions return an optional focus identity. |
 | `drop(state, source_ref, target_ref, placement)` | Explicit subtree edit with `left`, `right`, `up`, `down`, `join`, or leaf-only `swap`. |
 | `selectGroupChild(state, group_ref, child_ref)` | Selects a direct eligible group child and returns a focus candidate. |
-| `activateHeader(state, header)` | Checks the presentation revision before selecting its child. |
 
 Edits validate workspace, ancestry, eligibility, and required capacity before mutation.
 `drop` rejects both ancestor-to-descendant and descendant-to-ancestor targets.
@@ -206,7 +205,6 @@ An existing caller that computes master geometry separately can keep its existin
 `visibility(identity)` returns `visible` with a frame, `hidden_by_group`, or `unavailable`.
 `goal(identity)` returns a frame only for visible eligible leaves.
 Hidden eligible leaves remain in the tree and must not receive stale goals or floating fallback.
-`hiddenLeaves(state, output)` enumerates those identities for the native parking transaction.
 Workspace hiding remains the external workspace owner's responsibility.
 
 `headers(state, output)` emits copied `Header` records for visible groups.
@@ -222,9 +220,7 @@ Unavailable direct children retain a header but cannot be selected.
 
 ### Pointer APIs
 
-`hitTest(state, left, top, tolerance)` checks headers, shared boundaries, then visible leaves.
 `boundaries(state, tolerance, output)` emits only shared binary boundaries with two visible children.
-Tolerance is finite and between zero and 80 points.
 Header and boundary enumeration returns `PresentationCapacityExceeded` if the output is too small.
 Buffers of 2047 headers and 1023 boundaries cover the pool.
 
@@ -241,7 +237,6 @@ For `join`, it covers the moved child below the target group's headers.
 For `swap`, it covers the source identity's projected destination.
 The caller owns a reusable `Store` scratch buffer, separate from the live store.
 The method overwrites this buffer on each call and does not allocate.
-Passing the live store as scratch returns `InvalidPreviewScratch`.
 Pointer `join` targets an explicit group.
 Center drops use leaf-only `swap`.
 `commitDrop(state, preview)` rejects a changed revision before applying the explicit edit.
@@ -255,7 +250,6 @@ Native event handling and gesture ownership are outside this module.
 
 ### Checkpoints and native transactions
 
-`exportSnapshot(output)` copies bounded logical state into `Snapshot`.
 `importSnapshot(snapshot)` validates the entire candidate before publication.
 It rejects invalid indices, cycles, shared nodes, duplicate identities, unreachable nodes, malformed sibling lists, invalid ratios, and invalid selections.
 The limits are 1024 leaves, 2047 nodes, 320 roots, and workspace indices below ten.
