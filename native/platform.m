@@ -36,8 +36,9 @@ static NSArray<NSDictionary *> *inputWindowOrdering;
 static NSMutableDictionary<NSNumber *, NSValue *> *observers;
 static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 // An application that does not answer AX stalls every scan for the messaging timeout, and every command scans.
-// After two consecutive timeouts, scans of every application skip it for a doubling delay, up to 10 seconds.
+// After two consecutive timeouts, scans of every application skip it for a doubling delay, up to 30 seconds.
 // A scan of that one application, an AX notification from it, or its activation retries it at once.
+// A scan that a command waits for skips it after one timeout, so only timer scans pay for retries.
 static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutCounts;
 static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutRetryTimes;
 static void forgetTimeouts(pid_t process) { [timeoutCounts removeObjectForKey:@(process)]; [timeoutRetryTimes removeObjectForKey:@(process)]; }
@@ -45,6 +46,12 @@ static uint64_t nextIdentity = 1;
 // The first scan of every application also finds windows on other native Spaces. Later scans find only windows created since.
 static BOOL initialScanComplete = NO;
 static BOOL dirty = YES;
+// Commands scan before they act only when this is set: since the last scan of every application, a window appeared,
+// went away, or changed geometry or state. Focus changes and the echoes of our own frame writes leave it clear, because
+// commands read focus directly and use layout intent, not observed frames. Most hotkeys therefore act without a scan.
+static BOOL commandScanNeeded = YES;
+static BOOL scanningForCommand = NO;
+static void markChanged(void) { dirty = YES; commandScanNeeded = YES; }
 // A created window can be unready for the first scan (no subrole, frame, or settable position) and posts no later notification.
 // Until this deadline, scans repeat quickly so the window tiles once it is ready instead of at the next periodic scan.
 // One settling application is scanned alone on every tick, which costs far less than a scan of every application.
@@ -55,7 +62,7 @@ static void requestSettleScans(pid_t process) {
     double now = CACurrentMediaTime();
     settleProcess = now < settleScanDeadline && settleProcess != process ? 0 : process;
     settleScanDeadline = now + 1.0;
-    dirty = YES;
+    markChanged();
 }
 static double lastScan = 0;
 static double lastProcessScan = 0;
@@ -195,7 +202,18 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
             pid_t target = settleProcess;
             if (serviceActive && CACurrentMediaTime() - (target ? lastProcessScan : lastScan) > 0.005) scanAndTick(target);
         });
-    } else dirty = YES;
+        return;
+    }
+    dirty = YES;
+    if (CFEqual(notification, kAXFocusedWindowChangedNotification)) return;
+    if (CFEqual(notification, kAXMovedNotification) || CFEqual(notification, kAXResizedNotification)) {
+        // An application reports our own frame write back. That is not a change a command has to scan for.
+        for (WindowRecord *record in records) if (CFEqual(record.element, element)) {
+            if (CACurrentMediaTime() < record.placementVisibilityDeadline) return;
+            break;
+        }
+    }
+    commandScanNeeded = YES;
 }
 
 // A nonzero process limits AX reads to that application. Other applications keep their last observations.
@@ -218,7 +236,7 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
         applications[process] = application;
         [livePids addObject:process];
         if (onlyProcess && application.processIdentifier != onlyProcess) continue;
-        if (!onlyProcess && timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue) continue;
+        if (!onlyProcess && (scanningForCommand ? timeoutCounts[process] != nil : timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue)) continue;
         AXUIElementRef appElement = AXUIElementCreateApplication(application.processIdentifier);
         AXUIElementSetMessagingTimeout(appElement, 0.08);
         if (!observers[process]) {
@@ -248,7 +266,7 @@ static BOOL scanWindowSnapshot(pid_t onlyProcess) {
             if (scanResult == kAXErrorCannotComplete) {
                 NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
                 timeoutCounts[process] = @(count);
-                if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(10.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)5))));
+                if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
             }
             CFRelease(appElement); continue;
         }
@@ -406,7 +424,13 @@ size_t platform_windows(WMWindow *output, size_t capacity) {
 }
 
 size_t platform_refresh_windows(WMWindow *output, size_t capacity) {
-    scanWindows(0);
+    if (commandScanNeeded || CACurrentMediaTime() - lastScan > 2) {
+        dirty = NO; commandScanNeeded = NO;
+        lastScan = CACurrentMediaTime();
+        scanningForCommand = YES;
+        scanWindows(0);
+        scanningForCommand = NO;
+    }
     return platform_windows(output, capacity);
 }
 
@@ -440,6 +464,11 @@ bool platform_warp_pointer(WMPoint point) {
     return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
 
+// A command does not scan again after its own writes, so a window it has just placed keeps its last observation.
+// Windows of one application parked on the same corner are observed as not on screen, because their frames are equal.
+// Mark a placed window as on screen, or it would be ineligible for focus and layout until the next scan.
+static void assumeOnscreen(WindowRecord *record) { WMWindow observation = record.observation; observation.onscreen = true; record.observation = observation; }
+
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;
@@ -452,11 +481,17 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
             record.animationDuration = 0;
             record.motion = WMMotionIdle;
             record.target = frame;
+            if (intent == WMFrameIntentVerifiedPlacement) assumeOnscreen(record);
             return true;
         }
         record.motion = WMMotionIdle;
         record.target = frame; record.changed = YES;
-        if (duration <= 0) { record.animationDuration = 0; return writeFrame(record, frame, YES); }
+        if (duration <= 0) {
+            record.animationDuration = 0;
+            BOOL applied = writeFrame(record, frame, YES);
+            if (applied && intent == WMFrameIntentVerifiedPlacement) assumeOnscreen(record);
+            return applied;
+        }
         record.animationStart = current; record.animationTime = CACurrentMediaTime(); record.animationDuration = duration; record.motion = WMMotionAnimating;
         return true;
     }
@@ -546,7 +581,7 @@ bool platform_close(uint64_t identity, bool track, double *process_token) {
         if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID()) return false;
         if (AXUIElementPerformAction((__bridge AXUIElementRef)button, kAXPressAction) != kAXErrorSuccess) return false;
         if (track) { closingRecord = record; closingProcessToken = token; *process_token = token; }
-        dirty = YES;
+        markChanged();
         return true;
     }
     return false;
@@ -579,7 +614,7 @@ bool platform_terminate_if_empty(uint64_t identity, int pid, double process_toke
 
 static void scanAndTick(pid_t process) {
     lastProcessScan = CACurrentMediaTime();
-    if (!process) { dirty = NO; lastScan = lastProcessScan; }
+    if (!process) { dirty = NO; commandScanNeeded = NO; lastScan = lastProcessScan; }
     platform_settle_budget_begin();
     scanWindows(process);
     wm_tick();
@@ -724,7 +759,7 @@ size_t platform_restore(void) {
 void platform_quit(void) { stopping = YES; platform_status_present(NULL); }
 const char *platform_config_path(void) { return configPath.fileSystemRepresentation; }
 const char *platform_filter(void) { return bundleFilter.UTF8String ?: ""; }
-void platform_config_changed(void) { dirty = YES; }
+void platform_config_changed(void) { markChanged(); }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
 
 static int connectSocket(void) {
@@ -831,6 +866,10 @@ int platform_main(int argc, char **argv) {
             if (activated) forgetTimeouts(activated.processIdentifier);
             dirty = YES;
         }];
+        // Neither event reaches an AX observer: a terminated application's windows go away, and a native Space change
+        // changes which windows WindowServer lists.
+        [workspaceCenter addObserverForName:NSWorkspaceDidTerminateApplicationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; markChanged(); }];
+        [workspaceCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; markChanged(); }];
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
@@ -865,7 +904,7 @@ int platform_main(int argc, char **argv) {
                     WMRect actual;
                     record.motion = !applied || !readFrame(record.element, &actual) || !framesNear(actual, target, 2) ? WMMotionRejected : WMMotionIdle;
                     record.animationDuration = 0;
-                    dirty = YES;
+                    markChanged();
                 }
             }
             int client = accept(serverSocket, NULL, NULL);
