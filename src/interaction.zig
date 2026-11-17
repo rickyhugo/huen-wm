@@ -1,6 +1,3 @@
-pub const max_hits = 4096;
-pub const max_header_items = 2046;
-pub const max_header_panels = 1024;
 pub const title_bytes = 256;
 
 pub const Rect = extern struct { left: f64, top: f64, width: f64, height: f64 };
@@ -23,25 +20,10 @@ pub const Snapshot = extern struct {
     ready: bool,
     transitioning: bool,
 };
-pub const Availability = enum(c_uint) {
-    disabled,
-    available,
-    permission_denied,
-    tap_unavailable,
-    stopping,
-};
+pub const Availability = enum(c_uint) { disabled, available, permission_denied, tap_unavailable, stopping };
 pub const EventKind = enum(c_uint) { start = 1, update, end, cancel, group_select };
 pub const Gesture = enum(c_uint) { none, reorder, resize };
-pub const CancelReason = enum(c_uint) {
-    none,
-    publication,
-    modifiers,
-    escape,
-    tap_disabled,
-    permission,
-    configuration,
-    shutdown,
-};
+pub const CancelReason = enum(c_uint) { none, publication, modifiers, escape, tap_disabled, permission, configuration, shutdown };
 pub const Event = extern struct {
     kind: EventKind,
     gesture: Gesture,

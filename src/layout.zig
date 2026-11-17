@@ -35,7 +35,6 @@ pub const WorkspaceLayout = struct {
 pub const Visibility = union(enum) { visible: Rect, hidden_by_group, unavailable };
 pub const Header = struct { group: NodeRef, child: NodeRef, rect: Rect, selected: bool, eligible: bool, revision: u64 };
 pub const Boundary = struct { node: NodeRef, axis: Axis, rect: Rect, revision: u64 };
-pub const Hit = union(enum) { tile: NodeRef, header: Header, boundary: Boundary };
 pub const Drop = enum { left, right, up, down, join, swap };
 pub const ResizePreview = struct { boundary: Boundary, ratio: f64, applied_delta: f64 };
 pub const MovePreview = struct { source: NodeRef, target: NodeRef, placement: Drop, rect: Rect, revision: u64 };
@@ -59,15 +58,6 @@ pub const Store = struct {
         const node = self.nodes[reference_value.slot];
         if (node.content == .free or node.generation != reference_value.generation) return error.StaleNode;
         return reference_value.slot;
-    }
-
-    fn allocate(self: *Store) !Handle {
-        for (&self.nodes, 0..) |*node, index| if (node.content == .free) {
-            self.serial +%= 1;
-            node.* = .{ .generation = self.serial };
-            return @intCast(index);
-        };
-        return error.LayoutCapacityExceeded;
     }
 
     fn firstChild(self: *const Store, handle: Handle) ?Handle {
@@ -192,43 +182,27 @@ pub const Store = struct {
     }
 
     pub fn sync(self: *Store, members: []const Member, focused: ?u64, gap: f64) !void {
-        for (&self.roots) |*slot| if (slot.*) |*state| {
-            if (state.last_focused) |identity| {
-                var retained = false;
-                for (members) |member| if (member.identity == identity and member.display == state.display and member.workspace == state.workspace) {
-                    retained = true;
-                    break;
-                };
-                if (!retained) state.last_focused = null;
-            }
-            if (state.fullscreen) |identity| {
-                var retained = false;
-                for (members) |member| if (member.identity == identity and member.display == state.display and member.workspace == state.workspace) {
-                    retained = true;
-                    break;
-                };
-                if (!retained) state.fullscreen = null;
-            }
+        for (&self.roots) |*slot| if (slot.*) |*state| for ([_]*?u64{ &state.last_focused, &state.fullscreen }) |field| if (field.*) |identity| {
+            for (members) |member| {
+                if (member.identity == identity and member.display == state.display and member.workspace == state.workspace) break;
+            } else field.* = null;
         };
         for (&self.nodes, 0..) |*node, index| {
             if (node.content != .leaf) continue;
             const root = self.rootOf(@intCast(index));
             for (&self.roots) |*slot| if (slot.*) |*state| {
                 if (state.root != root) continue;
-                var retained = false;
-                for (members) |member| if (member.tiled and member.identity == node.content.leaf and member.display == state.display and member.workspace == state.workspace) {
+                for (members) |member| {
+                    if (!member.tiled or member.identity != node.content.leaf or member.display != state.display or member.workspace != state.workspace) continue;
                     if (node.active != member.active) self.revision +%= 1;
                     node.active = member.active;
-                    retained = true;
                     break;
-                };
-                if (!retained) self.remove(state, @intCast(index));
+                } else self.remove(state, @intCast(index));
                 break;
             };
         }
         for (members) |member| {
-            if (!member.tiled) continue;
-            if (self.leaf(member.identity) != null) continue;
+            if (!member.tiled or self.leaf(member.identity) != null) continue;
             const destination = self.lookup(member.display, member.workspace) orelse return error.MissingLayoutRoot;
             var available: [2]Handle = undefined;
             var count: usize = 0;
@@ -267,14 +241,9 @@ pub const Store = struct {
             self.revision +%= 1;
             self.arrange(destination, member.area, gap);
         }
-        for (&self.roots) |*slot| if (slot.*) |*state| {
-            if (state.selection) |selection| {
-                const handle = self.resolve(selection) catch {
-                    state.selection = null;
-                    continue;
-                };
-                if (state.root != self.rootOf(handle)) state.selection = null;
-            }
+        for (&self.roots) |*slot| if (slot.*) |*state| if (state.selection) |selection| {
+            const live = if (self.resolve(selection) catch null) |handle| state.root == self.rootOf(handle) else false;
+            if (!live) state.selection = null;
         };
     }
 
@@ -304,8 +273,7 @@ pub const Store = struct {
                 var child: ?Handle = group.first;
                 while (child) |current| : (child = self.nodes[current].next) {
                     self.measure(current, gap);
-                    const member = self.nodes[current];
-                    if (!member.active) continue;
+                    if (!self.nodes[current].active) continue;
                     if (current == group.selected) selected_active = true;
                     node.active = true;
                 }
@@ -396,40 +364,33 @@ pub const Store = struct {
 
     pub fn resizePoints(self: *Store, identity: u64, axis: Axis, delta: f64, gap: f64) !f64 {
         var child = self.leaf(identity) orelse return error.WindowNotTiled;
-        while (self.nodes[child].parent) |parent| {
+        while (self.nodes[child].parent) |parent| : (child = parent) {
             const node = &self.nodes[parent];
-            if (node.content != .branch) {
-                child = parent;
-                continue;
-            }
+            if (node.content != .branch) continue;
             var branch = &node.content.branch;
             const first = branch.children[0];
             const second = branch.children[1];
-            if (branch.axis == axis and self.nodes[first].active and self.nodes[second].active) {
-                const dimension: usize = if (axis == .width) 0 else 1;
-                const extent = if (axis == .width) node.frame.width else node.frame.height;
-                const available = extent - @min(gap, @max(0, extent - 2));
-                const minimum = self.nodes[first].minimum[dimension];
-                const maximum = available - self.nodes[second].minimum[dimension];
-                if (available <= 0 or maximum < minimum) return 0;
-                const previous = available * branch.ratio;
-                const sign: f64 = if (child == first) 1 else -1;
-                const next = std.math.clamp(previous + sign * delta, minimum, maximum);
-                branch.ratio = next / available;
-                self.revision +%= 1;
-                return (next - previous) * sign;
-            }
-            child = parent;
+            if (branch.axis != axis or !self.nodes[first].active or !self.nodes[second].active) continue;
+            const dimension: usize = if (axis == .width) 0 else 1;
+            const extent = if (axis == .width) node.frame.width else node.frame.height;
+            const available = extent - @min(gap, @max(0, extent - 2));
+            const minimum = self.nodes[first].minimum[dimension];
+            const maximum = available - self.nodes[second].minimum[dimension];
+            if (available <= 0 or maximum < minimum) return 0;
+            const previous = available * branch.ratio;
+            const sign: f64 = if (child == first) 1 else -1;
+            const next = std.math.clamp(previous + sign * delta, minimum, maximum);
+            branch.ratio = next / available;
+            self.revision +%= 1;
+            return (next - previous) * sign;
         }
         return 0;
     }
 
     pub fn adjustRatio(self: *Store, state: *WorkspaceLayout, delta: f64) void {
-        if (state.layout == .dwindle) {
-            if (state.root) |root| if (self.nodes[root].content == .branch) {
-                state.ratio = self.nodes[root].content.branch.ratio;
-            };
-        }
+        if (state.layout == .dwindle) if (state.root) |root| if (self.nodes[root].content == .branch) {
+            state.ratio = self.nodes[root].content.branch.ratio;
+        };
         state.ratio = std.math.clamp(state.ratio + delta, 0.1, 0.9);
         self.revision +%= 1;
         if (state.layout == .dwindle) if (state.root) |root| if (self.nodes[root].content == .branch) {
@@ -487,9 +448,7 @@ pub const Store = struct {
     fn eligibleLeaf(self: *const Store, handle: Handle) ?u64 {
         const node = self.nodes[handle];
         if (node.content == .leaf) return if (node.active) node.content.leaf else null;
-        if (node.last_child) |child| {
-            if (self.eligibleLeaf(child)) |identity| return identity;
-        }
+        if (node.last_child) |child| if (self.eligibleLeaf(child)) |identity| return identity;
         const group_child: ?Handle = if (node.content == .group) node.content.group.selected else null;
         if (group_child) |child| if (node.last_child != child) {
             if (self.eligibleLeaf(child)) |identity| return identity;
@@ -544,15 +503,11 @@ pub const Store = struct {
         self.forgetIdentity(identity);
         const handle = self.leaf(identity) orelse return;
         const root = self.rootOf(handle);
-        for (&self.roots) |*slot| if (slot.*) |*state| {
-            if (state.root != root) continue;
+        for (&self.roots) |*slot| if (slot.*) |*state| if (state.root == root) {
             self.remove(state, handle);
-            if (state.selection) |selection| {
-                _ = self.resolve(selection) catch {
-                    state.selection = null;
-                    return;
-                };
-            }
+            if (state.selection) |selection| if ((self.resolve(selection) catch null) == null) {
+                state.selection = null;
+            };
             return;
         };
     }
@@ -570,11 +525,7 @@ pub const Store = struct {
     }
 
     pub fn selected(self: *const Store, state: *const WorkspaceLayout, focused: ?u64) !NodeRef {
-        if (state.selection) |selection| {
-            if (self.resolve(selection)) |handle| {
-                if (state.root == self.rootOf(handle)) return selection;
-            } else |_| {}
-        }
+        if (state.selection) |selection| if (self.resolve(selection) catch null) |handle| if (state.root == self.rootOf(handle)) return selection;
         const identity = focused orelse state.last_focused orelse return error.NoSelection;
         const handle = self.leaf(identity) orelse return error.WindowNotTiled;
         if (state.root != self.rootOf(handle)) return error.WrongWorkspace;
@@ -598,50 +549,48 @@ pub const Store = struct {
         return state.selection.?;
     }
 
-    fn editHandles(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef) !struct { source: Handle, target: Handle } {
+    fn editHandles(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef) ![2]Handle {
         if (state.layout != .dwindle) return error.ContainerRequiresDwindle;
         const source = try self.resolve(source_ref);
         const target = try self.resolve(target_ref);
         if (state.root != self.rootOf(source) or state.root != self.rootOf(target)) return error.WrongWorkspace;
         if (self.contains(source, target) or self.contains(target, source)) return error.LayoutCycle;
         if (self.eligibleLeaf(source) == null or self.eligibleLeaf(target) == null) return error.NoTileTarget;
-        return .{ .source = source, .target = target };
-    }
-
-    fn append(self: *Store, parent: Handle, child: Handle) void {
-        var group = &self.nodes[parent].content.group;
-        self.nodes[group.last].next = child;
-        self.nodes[child].previous = group.last;
-        self.nodes[child].next = null;
-        self.nodes[child].parent = parent;
-        group.last = child;
-        group.selected = child;
-        group.count += 1;
-        self.nodes[parent].last_child = child;
+        return .{ source, target };
     }
 
     pub fn drop(self: *Store, state: *WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop) !void {
-        const handles = try self.editHandles(state, source_ref, target_ref);
-        const source = handles.source;
-        const target = handles.target;
+        const source, const target = try self.editHandles(state, source_ref, target_ref);
         if (placement == .swap) {
             if (self.nodes[source].content != .leaf or self.nodes[target].content != .leaf) return error.SwapRequiresLeaves;
             self.swap(self.nodes[source].content.leaf, self.nodes[target].content.leaf);
             state.selection = target_ref;
             return;
         }
-        var free_count: usize = 0;
-        for (self.nodes) |node| if (node.content == .free) {
-            free_count += 1;
-        };
+        const has_free = for (self.nodes) |node| {
+            if (node.content == .free) break true;
+        } else false;
         const existing_group = placement == .join and self.nodes[target].content == .group;
         const collapses = self.nodes[source].parent != null and (self.nodes[self.nodes[source].parent.?].content == .branch or self.nodes[self.nodes[source].parent.?].content.group.count == 2);
-        if (!existing_group and free_count == 0 and !collapses) return error.LayoutCapacityExceeded;
+        if (!existing_group and !has_free and !collapses) return error.LayoutCapacityExceeded;
         self.detach(state, source);
         if (existing_group) {
-            self.append(target, source);
+            var group = &self.nodes[target].content.group;
+            self.nodes[group.last].next = source;
+            self.nodes[source].previous = group.last;
+            self.nodes[source].next = null;
+            self.nodes[source].parent = target;
+            group.last = source;
+            group.selected = source;
+            group.count += 1;
+            self.nodes[target].last_child = source;
         } else {
-            const container = self.allocate() catch unreachable;
+            const container: Handle = for (&self.nodes, 0..) |*node, index| {
+                if (node.content != .free) continue;
+                self.serial +%= 1;
+                node.* = .{ .generation = self.serial };
+                break @intCast(index);
+            } else unreachable;
             if (placement == .join) {
                 self.nodes[container].content = .{ .group = .{ .mode = .tabbed, .first = target, .last = source, .selected = source, .count = 2 } };
             } else {
@@ -719,11 +668,6 @@ pub const Store = struct {
         return identity;
     }
 
-    pub fn activateHeader(self: *Store, state: *WorkspaceLayout, header: Header) !?u64 {
-        if (header.revision != self.revision) return error.StaleGesture;
-        return self.selectGroupChild(state, header.group, header.child);
-    }
-
     pub fn editGroup(self: *Store, state: *WorkspaceLayout, focused: ?u64, action: commands.Group) !?u64 {
         if (state.layout != .dwindle) return error.ContainerRequiresDwindle;
         const source_ref = try self.selected(state, focused);
@@ -737,7 +681,6 @@ pub const Store = struct {
                 try self.drop(state, source_ref, self.reference(target), .join);
             },
             .tabbed, .stacked => {
-                if (self.nodes[handle].content == .leaf) return error.NoContainer;
                 const mode: commands.GroupMode = if (action == .tabbed) .tabbed else .stacked;
                 switch (self.nodes[handle].content) {
                     .group => |*container| container.mode = mode,
@@ -757,7 +700,44 @@ pub const Store = struct {
             },
             .split => {
                 if (self.nodes[handle].content != .group) return error.NoGroup;
-                try self.ungroup(state, handle);
+                const container = self.nodes[handle].content.group;
+                var available: [1022]Handle = undefined;
+                const needed = container.count - 2;
+                var free_count: usize = 0;
+                for (self.nodes, 0..) |node, index| {
+                    if (free_count == needed) break;
+                    if (node.content != .free) continue;
+                    available[free_count] = @intCast(index);
+                    free_count += 1;
+                }
+                if (free_count < needed) return error.LayoutCapacityExceeded;
+                const remembered = self.nodes[handle].last_child orelse container.selected;
+                var remembered_passed = false;
+                var current = handle;
+                var child = container.first;
+                var remaining = container.count;
+                while (remaining >= 2) : (remaining -= 1) {
+                    const next = self.nodes[child].next.?;
+                    const tail = if (remaining == 2) next else available[container.count - remaining];
+                    if (remaining > 2) {
+                        self.serial +%= 1;
+                        self.nodes[tail] = .{ .generation = self.serial };
+                    }
+                    self.nodes[current].content = .{ .branch = .{ .axis = .width, .ratio = if (current == handle and self.nodes[handle].parent == null) state.ratio else 0.5, .children = .{ child, tail } } };
+                    self.nodes[current].last_child = if (!remembered_passed and child != remembered) tail else child;
+                    if (child == remembered) remembered_passed = true;
+                    self.nodes[child].parent = current;
+                    self.nodes[child].previous = null;
+                    self.nodes[child].next = null;
+                    self.nodes[tail].parent = current;
+                    if (remaining == 2) {
+                        self.nodes[tail].previous = null;
+                        self.nodes[tail].next = null;
+                    }
+                    current = tail;
+                    child = next;
+                }
+                self.revision +%= 1;
             },
             .next, .previous => {
                 handle = self.selectedGroup(handle) orelse return error.NoGroup;
@@ -772,47 +752,6 @@ pub const Store = struct {
             },
         }
         return null;
-    }
-
-    fn ungroup(self: *Store, state: *WorkspaceLayout, handle: Handle) !void {
-        const container = self.nodes[handle].content.group;
-        var available: [1022]Handle = undefined;
-        const needed = container.count - 2;
-        var free_count: usize = 0;
-        for (self.nodes, 0..) |node, index| {
-            if (free_count == needed) break;
-            if (node.content != .free) continue;
-            available[free_count] = @intCast(index);
-            free_count += 1;
-        }
-        if (free_count < needed) return error.LayoutCapacityExceeded;
-        const remembered = self.nodes[handle].last_child orelse container.selected;
-        var remembered_passed = false;
-        var current = handle;
-        var child = container.first;
-        var remaining = container.count;
-        while (remaining >= 2) : (remaining -= 1) {
-            const next = self.nodes[child].next.?;
-            const tail = if (remaining == 2) next else available[container.count - remaining];
-            if (remaining > 2) {
-                self.serial +%= 1;
-                self.nodes[tail] = .{ .generation = self.serial };
-            }
-            self.nodes[current].content = .{ .branch = .{ .axis = .width, .ratio = if (current == handle and self.nodes[handle].parent == null) state.ratio else 0.5, .children = .{ child, tail } } };
-            self.nodes[current].last_child = if (!remembered_passed and child != remembered) tail else child;
-            if (child == remembered) remembered_passed = true;
-            self.nodes[child].parent = current;
-            self.nodes[child].previous = null;
-            self.nodes[child].next = null;
-            self.nodes[tail].parent = current;
-            if (remaining == 2) {
-                self.nodes[tail].previous = null;
-                self.nodes[tail].next = null;
-            }
-            current = tail;
-            child = next;
-        }
-        self.revision +%= 1;
     }
 
     fn headerHeight(self: *const Store, handle: Handle) f64 {
@@ -834,7 +773,6 @@ pub const Store = struct {
     }
 
     pub fn headers(self: *const Store, state: *const WorkspaceLayout, output: []Header) !usize {
-        if (state.layout != .dwindle) return 0;
         var count: usize = 0;
         for (self.nodes, 0..) |node, index| {
             if (node.content != .group or !node.visible or state.root != self.rootOf(@intCast(index))) continue;
@@ -880,20 +818,7 @@ pub const Store = struct {
         return self.nodes[self.rememberedLeaf(try self.resolve(reference_value))].content.leaf;
     }
 
-    pub fn hiddenLeaves(self: *const Store, state: *const WorkspaceLayout, output: []u64) !usize {
-        var count: usize = 0;
-        for (self.nodes, 0..) |node, index| {
-            if (node.content != .leaf or !node.active or node.visible or state.root != self.rootOf(@intCast(index))) continue;
-            if (count == output.len) return error.PresentationCapacityExceeded;
-            output[count] = node.content.leaf;
-            count += 1;
-        }
-        return count;
-    }
-
     pub fn boundaries(self: *const Store, state: *const WorkspaceLayout, tolerance: f64, output: []Boundary) !usize {
-        if (!std.math.isFinite(tolerance) or tolerance < 0 or tolerance > 80) return error.InvalidTolerance;
-        if (state.layout != .dwindle) return 0;
         var count: usize = 0;
         for (self.nodes, 0..) |node, index| {
             if (node.content != .branch or !node.visible or state.root != self.rootOf(@intCast(index))) continue;
@@ -914,29 +839,6 @@ pub const Store = struct {
             count += 1;
         }
         return count;
-    }
-
-    pub fn hitTest(self: *const Store, state: *const WorkspaceLayout, left: f64, top: f64, tolerance: f64) !?Hit {
-        if (state.layout != .dwindle) return null;
-        var header_buffer: [2047]Header = undefined;
-        const header_count = try self.headers(state, &header_buffer);
-        for (header_buffer[0..header_count]) |header| if (inside(header.rect, left, top)) return .{ .header = header };
-        var boundary_buffer: [1023]Boundary = undefined;
-        const boundary_count = try self.boundaries(state, tolerance, &boundary_buffer);
-        var best: ?Boundary = null;
-        var best_area = std.math.inf(f64);
-        for (boundary_buffer[0..boundary_count]) |boundary| if (inside(boundary.rect, left, top)) {
-            const area = boundary.rect.width * boundary.rect.height;
-            if (area < best_area) {
-                best = boundary;
-                best_area = area;
-            }
-        };
-        if (best) |boundary| return .{ .boundary = boundary };
-        for (self.nodes, 0..) |node, index| {
-            if (node.content == .leaf and node.active and node.visible and state.root == self.rootOf(@intCast(index)) and inside(node.frame, left, top)) return .{ .tile = self.reference(@intCast(index)) };
-        }
-        return null;
     }
 
     pub fn previewResize(self: *const Store, boundary: Boundary, delta: f64, gap: f64) !ResizePreview {
@@ -968,27 +870,26 @@ pub const Store = struct {
         self.revision +%= 1;
     }
 
-    fn pointerDropHandles(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop) !struct { source: Handle, target: Handle } {
-        const handles = try self.editHandles(state, source_ref, target_ref);
-        if (!self.nodes[handles.source].visible or !self.nodes[handles.target].visible) return error.NoTileTarget;
+    fn pointerDropHandles(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop) ![2]Handle {
+        const source, const target = try self.editHandles(state, source_ref, target_ref);
+        if (!self.nodes[source].visible or !self.nodes[target].visible) return error.NoTileTarget;
         switch (placement) {
-            .join => if (self.nodes[handles.target].content != .group) return error.NoGroup,
-            .swap => if (self.nodes[handles.source].content != .leaf or self.nodes[handles.target].content != .leaf) return error.SwapRequiresLeaves,
+            .join => if (self.nodes[target].content != .group) return error.NoGroup,
+            .swap => if (self.nodes[source].content != .leaf or self.nodes[target].content != .leaf) return error.SwapRequiresLeaves,
             else => {},
         }
-        return .{ .source = handles.source, .target = handles.target };
+        return .{ source, target };
     }
 
     pub fn previewDrop(self: *const Store, state: *const WorkspaceLayout, source_ref: NodeRef, target_ref: NodeRef, placement: Drop, scratch: *Store) !MovePreview {
-        if (scratch == self) return error.InvalidPreviewScratch;
-        const handles = try self.pointerDropHandles(state, source_ref, target_ref, placement);
+        const source, const target = try self.pointerDropHandles(state, source_ref, target_ref, placement);
         const frame = self.nodes[state.root.?].frame;
         @memcpy(std.mem.asBytes(scratch), std.mem.asBytes(self));
-        const projected_state = scratch.lookup(state.display, state.workspace) orelse return error.MissingLayoutRoot;
+        const projected_state = scratch.lookup(state.display, state.workspace).?;
         projected_state.* = state.*;
         try scratch.drop(projected_state, source_ref, target_ref, placement);
         scratch.arrange(projected_state, frame, state.projection_gap);
-        const moved = if (placement == .swap) handles.target else handles.source;
+        const moved = if (placement == .swap) target else source;
         if (!scratch.nodes[moved].visible) return error.NoTileTarget;
         return .{ .source = source_ref, .target = target_ref, .placement = placement, .rect = scratch.nodes[moved].frame, .revision = self.revision };
     }
@@ -997,10 +898,6 @@ pub const Store = struct {
         if (preview.revision != self.revision) return error.StaleGesture;
         _ = try self.pointerDropHandles(state, preview.source, preview.target, preview.placement);
         try self.drop(state, preview.source, preview.target, preview.placement);
-    }
-
-    pub fn exportSnapshot(self: *const Store, output: *Snapshot) void {
-        output.* = .{ .nodes = self.nodes, .roots = self.roots };
     }
 
     fn validateNode(snapshot: *const Snapshot, handle: Handle, parent: ?Handle, seen: *[2047]bool) error{InvalidSnapshot}!void {
@@ -1082,10 +979,8 @@ pub const Store = struct {
             node.frame = std.mem.zeroes(Rect);
             node.minimum = .{ 0, 0 };
         }
-        for (&self.roots) |*slot| if (slot.*) |*state| if (state.selection) |selection| {
-            state.selection = self.reference(selection.slot);
-        };
         for (&self.roots) |*slot| if (slot.*) |*state| {
+            if (state.selection) |selection| state.selection = self.reference(selection.slot);
             state.projection_gap = 0;
             state.projected_layout = null;
         };
@@ -1146,10 +1041,6 @@ pub const Store = struct {
         self.revision +%= 1;
     }
 };
-
-fn inside(rect: Rect, left: f64, top: f64) bool {
-    return left >= rect.left and top >= rect.top and left < rect.left + rect.width and top < rect.top + rect.height;
-}
 
 pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64) [2]Rect {
     var first = frame;
