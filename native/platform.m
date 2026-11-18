@@ -570,17 +570,19 @@ static void revealWhenPlaced(void) {
 }
 
 // Window rules call this once per rule when a window is discovered. Compiled expressions are kept by pattern.
+// A reload checks its patterns on the reload thread while the main thread matches window rules, so the cache is locked.
 int platform_regex_match(const char *pattern, const char *text, size_t length) {
     static NSMutableDictionary<NSString *, NSRegularExpression *> *compiled;
-    if (!compiled) compiled = [NSMutableDictionary dictionary];
+    static dispatch_once_t created;
+    dispatch_once(&created, ^{ compiled = [NSMutableDictionary dictionary]; });
     NSString *source = [NSString stringWithUTF8String:pattern];
     if (!source) return -1;
-    NSRegularExpression *expression = compiled[source];
-    if (!expression) {
-        expression = [NSRegularExpression regularExpressionWithPattern:source options:0 error:NULL];
-        if (!expression) return -1;
-        compiled[source] = expression;
+    NSRegularExpression *expression;
+    @synchronized (compiled) {
+        expression = compiled[source] ?: [NSRegularExpression regularExpressionWithPattern:source options:0 error:NULL];
+        if (expression) compiled[source] = expression;
     }
+    if (!expression) return -1;
     NSString *subject = [[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding];
     if (!subject) return 0;
     return [expression firstMatchInString:subject options:0 range:NSMakeRange(0, subject.length)] ? 1 : 0;
