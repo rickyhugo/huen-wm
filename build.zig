@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn build(builder: *std.Build) void {
-    if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.0")) @panic("huen-wm requires Zig exactly 0.17.0");
+    if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.1")) @panic("huen-wm requires Zig exactly 0.17.1");
     const target = builder.standardTargetOptions(.{ .default_target = .{ .os_tag = .macos, .os_version_min = .{ .semver = .{ .major = 14, .minor = 0, .patch = 0 } } } });
     if (target.result.os.tag != .macos or target.result.cpu.arch != @import("builtin").cpu.arch) @panic("huen-wm builds for the host macOS architecture only");
     const optimize = builder.standardOptimizeOption(.{});

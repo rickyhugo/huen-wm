@@ -3,7 +3,7 @@
 ## Goal
 
 Build a macOS tiling window manager with Hyprland-inspired interaction and Lua configuration.
-Keep SIP enabled. Use Zig 0.17.0, mise, and hk.
+Keep SIP enabled. Use Zig 0.17.1, mise, and hk.
 
 The first build targets keyboard-driven tiling, virtual workspaces, multiple monitors, Lua reload, and visual feedback.
 It is not a replacement for the macOS compositor.
@@ -93,7 +93,7 @@ Scene smoothness, capture timing, and parking remain unverified until native exe
 
 ## Verification so far
 
-- `mise exec -- zig version` reports `0.17.0`.
+- `mise exec -- zig version` reports `0.17.1`.
 - `mise exec -- hk validate` accepts `hk.pkl`.
 - `mise run check` passes on the integrated tooling and fixture source.
 - `scripts/build-native-fixture.sh` builds the disposable Cocoa application.

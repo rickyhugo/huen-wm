@@ -23,7 +23,7 @@ def invoke(*arguments, success=True):
 help_text = invoke("--help").stdout
 assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces"))
 doctor = json.loads(invoke("doctor").stdout)
-assert doctor["zig"] == "0.17.0" and not doctor["permission_prompted"]
+assert doctor["zig"] == "0.17.1" and not doctor["permission_prompted"]
 assert not doctor["screen_capture_required_for_tiling"]
 assert json.loads(invoke("validate", "--config", str(root / "config/example.lua")).stdout)["ok"]
 invoke("--config", success=False)

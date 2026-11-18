@@ -1,6 +1,6 @@
 # huen-wm
 
-A native macOS tiling window manager with dwindle splits, tabbed and stacked groups, master layout, Lua configuration, keyboard modes, focused-window borders, workspace snapshots, and an optional menu-bar item. Mouse tiling and session continuity are opt-in. Requires macOS 14 or later and Zig **exactly 0.17.0**. SIP stays enabled.
+A native macOS tiling window manager with dwindle splits, tabbed and stacked groups, master layout, Lua configuration, keyboard modes, focused-window borders, workspace snapshots, and an optional menu-bar item. Mouse tiling and session continuity are opt-in. Requires macOS 14 or later and Zig **exactly 0.17.1**. SIP stays enabled.
 
 Headless smoke checks cover configuration and CLI boundaries. Native fixture checks pass tiling, focus, movement, workspace parking and return, automatic reload, and original-frame restoration. Global hotkeys, border appearance, and scene appearance remain unverified.
 
