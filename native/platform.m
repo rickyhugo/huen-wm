@@ -79,6 +79,9 @@ static BOOL stopping;
 static NSString *configPath;
 static NSString *bundleFilter;
 static NSPanel *borderPanel;
+static BOOL pointerPressed, pointerMoving;
+static CGWindowID pressedWindow;
+static CGRect pressedBounds;
 static int serverSocket = -1;
 static NSString *socketPath;
 static EventHotKeyRef hotkeyRefs[256];
@@ -678,12 +681,15 @@ static void scanAndTick(pid_t process) {
 }
 
 void platform_border(uint64_t identity, double width, uint32_t color) {
+    if (pointerMoving) return;
     WindowRecord *focused = nil;
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) focused = record;
     if (!focused || width <= 0) { [borderPanel orderOut:nil]; return; }
     if (!borderPanel) {
         borderPanel = [[NSPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
         borderPanel.opaque = NO; borderPanel.backgroundColor = NSColor.clearColor; borderPanel.ignoresMouseEvents = YES; borderPanel.level = NSFloatingWindowLevel;
+        // The default behavior fades a panel out over about 250 ms, which leaves the border behind a window that moved away.
+        borderPanel.animationBehavior = NSWindowAnimationBehaviorNone;
         borderPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorFullScreenAuxiliary;
         borderPanel.contentView.wantsLayer = YES;
     }
@@ -925,9 +931,30 @@ int platform_main(int argc, char **argv) {
             wm_input_poll();
             double now = CACurrentMediaTime();
             revealWhenPlaced();
+            // While the pointer moves or resizes a window, a scan stalls that window for its duration and the border trails it.
+            // Scans and the border wait for the release. WindowServer reports the move within one tick.
+            // A press with a modifier is left alone, because huen's own mouse controls use one.
+            BOOL pressed = NSEvent.pressedMouseButtons & 1;
+            if (!pressed) {
+                pressedWindow = 0;
+                if (pointerMoving) { pointerMoving = NO; scanAndTick(0); }
+            } else if (!pointerPressed && !(NSEvent.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand))) {
+                WMPoint pointer;
+                if (platform_pointer(&pointer)) for (NSDictionary *window in (NSArray *)CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID))) {
+                    if ([window[(__bridge NSString *)kCGWindowLayer] intValue] != 0 || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(__bridge NSString *)kCGWindowBounds], &pressedBounds) || !CGRectContainsPoint(pressedBounds, CGPointMake(pointer.left, pointer.top))) continue;
+                    pressedWindow = [window[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+                    break;
+                }
+            } else if (pressedWindow && !pointerMoving) {
+                NSArray *listing = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, pressedWindow));
+                CGRect bounds;
+                if (listing.count && CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)listing[0][(__bridge NSString *)kCGWindowBounds], &bounds) && !CGRectEqualToRect(bounds, pressedBounds)) { pointerMoving = YES; [borderPanel orderOut:nil]; }
+            }
+            pointerPressed = pressed;
             BOOL settling = now < settleScanDeadline;
             // Slightly under three 60 Hz ticks, so settle scans of every application run every 50 ms instead of every fourth tick.
-            if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
+            if (pointerMoving) {
+            } else if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
             else if (settling && settleProcess && now - lastProcessScan > 0.012 && now > processScanRetryTime) scanAndTick(settleProcess);
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;
