@@ -16,7 +16,7 @@ const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, goal: Rect, placement_error: ?[]const u8 = null };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -1774,8 +1774,20 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 },
                 .toggle_floating => {
                     if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
-                    source.floating = !source.floating;
-                    source.floating_frame = source.observation.frame;
+                    if (source.floating) {
+                        source.last_floating_frame = source.floating_frame;
+                        source.floating = false;
+                    } else {
+                        // Like Hyprland: return to the last floating frame, or float at half the usable area, centered.
+                        const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
+                        source.floating = true;
+                        source.floating_frame = boundedFloating(source.last_floating_frame orelse .{
+                            .left = area.left + area.width / 4,
+                            .top = area.top + area.height / 4,
+                            .width = area.width / 2,
+                            .height = area.height / 2,
+                        }, area);
+                    }
                 },
                 .send_to_workspace => |selection| {
                     const resolved = resolvePlacements();
