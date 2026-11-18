@@ -659,24 +659,14 @@ fn resolvePlacements() [10]?u32 {
     }
     return resolved;
 }
-fn commitPlacements(resolved: [10]?u32) void {
-    for (&placements, resolved) |*placement, destination| {
-        if (destination != placement.display) {
-            const lost = if (placement.display) |identity| displayIndex(identity) == null else false;
-            placement.shown_when_lost = lost and (placement.shown or placement.shown_when_lost);
-        }
-        placement.display = destination;
-    }
-}
-const Routing = struct {
-    const Activation = struct { display: u32, workspace: usize };
-    destinations: [10]?u32 = @splat(null),
-    activate: []const Activation = &.{},
-    send: ?struct { index: usize, display: u32, workspace: usize } = null,
-};
-fn placementActivations(resolved: [10]?u32, forced: []const Routing.Activation, output: *[11]Routing.Activation) []Routing.Activation {
+const Activation = struct { display: u32, workspace: usize };
+// Moves each workspace and its windows to the display that `resolved` gives it, and `send` moves one window to
+// another workspace. Each `forced` display shows its workspace. Any other display that gained or lost a workspace
+// picks one to show. A failure changes nothing.
+fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: usize, display: u32, workspace: usize }) bool {
     const workspace_count = config.workspace_count;
-    @memcpy(output[0..forced.len], forced);
+    var activations: [11]Activation = undefined;
+    @memcpy(activations[0..forced.len], forced);
     var count = forced.len;
     scan: for (displays.items) |display| {
         const identity = display.identity;
@@ -698,10 +688,82 @@ fn placementActivations(resolved: [10]?u32, forced: []const Routing.Activation, 
         } else if (resolved[current] == identity) current else for (0..workspace_count) |workspace| {
             if (resolved[workspace] == identity) break workspace;
         } else unreachable;
-        output[count] = .{ .display = identity, .workspace = choice };
+        activations[count] = .{ .display = identity, .workspace = choice };
         count += 1;
     }
-    return output[0..count];
+    const transaction = PlacementTransaction.begin(.all) catch |err| {
+        transition_error = @errorName(err);
+        return false;
+    };
+    defer transaction.deinit();
+    var staged: [1024]u32 = undefined;
+    for (activations[0..count]) |activation| if (displayBlocked(activation.display)) {
+        transition_error = "Native fullscreen window blocks routing destination";
+        return false;
+    };
+    for (windows.items, 0..) |window, index| {
+        const sent = send != null and send.?.index == index;
+        const destination = if (sent) send.?.display else resolved[window.workspace] orelse if (displayIndex(window.display) == null) displays.items[0].identity else window.display;
+        staged[index] = destination;
+        if (window.observation.minimized or window.observation.fullscreen or (!window.observation.onscreen and !window.parked)) {
+            if (destination != window.display or (window.observation.fullscreen and sent)) {
+                transition_error = "Routing deferred for unavailable or native fullscreen window";
+                return false;
+            }
+            continue;
+        }
+        if (window.observation.stale or displayBlocked(destination) or displayBlocked(window.display)) {
+            transition_error = "Routing blocked by stale or native fullscreen window";
+            return false;
+        }
+        var original: Rect = undefined;
+        if (!native.platform_read_frame(window.identity, &original)) {
+            transition_error = "Routing geometry could not be read";
+            return false;
+        }
+    }
+    for (&layouts.roots) |*slot| if (slot.*) |*state| {
+        const destination = resolved[state.workspace] orelse if (displayIndex(state.display) == null) displays.items[0].identity else state.display;
+        if (destination == state.display) continue;
+        if (layouts.lookup(destination, state.workspace)) |existing| {
+            const defaults = config.workspaces[state.workspace];
+            const empty_default = existing.root == null and existing.fullscreen == null and existing.layout == defaults.layout and existing.ratio == defaults.ratio;
+            if (empty_default) {
+                existing.* = state.*;
+                existing.display = destination;
+            } else layouts.discard(state);
+            slot.* = null;
+        } else state.display = destination;
+    };
+    for (activations[0..count]) |activation| displays.items[displayIndex(activation.display).?].workspace = activation.workspace;
+    for (windows.items, staged[0..windows.items.len], 0..) |*window, destination, index| {
+        if (send) |request| if (request.index == index) {
+            window.workspace = request.workspace;
+        };
+        if (destination == window.display) continue;
+        const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
+        // Keeps a floating window's center at the same proportional position in the destination area.
+        var relocated = window.floating_frame;
+        if (displayIndex(window.display)) |slot| {
+            const previous = inset(displays.items[slot].frame, config.gap);
+            relocated.left = area.left + (relocated.left + relocated.width / 2 - previous.left) / previous.width * area.width - relocated.width / 2;
+            relocated.top = area.top + (relocated.top + relocated.height / 2 - previous.top) / previous.height * area.height - relocated.height / 2;
+        }
+        window.floating_frame = boundedFloating(relocated, area);
+        window.parking_frame = boundedFloating(window.parking_frame, area);
+        window.display = destination;
+    }
+    if (send) |request| layouts.forgetIdentity(windows.items[request.index].identity);
+    if (!transaction.commit()) return false;
+    for (&placements, resolved) |*placement, destination| {
+        if (destination != placement.display) {
+            const lost = if (placement.display) |identity| displayIndex(identity) == null else false;
+            placement.shown_when_lost = lost and (placement.shown or placement.shown_when_lost);
+        }
+        placement.display = destination;
+    }
+    routing_blocked = false;
+    return true;
 }
 const PlacementTransaction = struct {
     const Scope = union(enum) {
@@ -801,74 +863,6 @@ const PlacementTransaction = struct {
         return true;
     }
 };
-fn commitRouting(request: Routing) bool {
-    const transaction = PlacementTransaction.begin(.all) catch |err| {
-        transition_error = @errorName(err);
-        return false;
-    };
-    defer transaction.deinit();
-    const staged = allocator.alloc(u32, windows.items.len) catch return false;
-    defer allocator.free(staged);
-    for (request.activate) |activation| if (displayBlocked(activation.display)) {
-        transition_error = "Native fullscreen window blocks routing destination";
-        return false;
-    };
-    for (windows.items, 0..) |window, index| {
-        const destination = if (request.send != null and request.send.?.index == index) request.send.?.display else request.destinations[window.workspace] orelse if (displayIndex(window.display) == null) displays.items[0].identity else window.display;
-        staged[index] = destination;
-        if (window.observation.minimized or window.observation.fullscreen or (!window.observation.onscreen and !window.parked)) {
-            if (destination != window.display or (window.observation.fullscreen and request.send != null and request.send.?.index == index)) {
-                transition_error = "Routing deferred for unavailable or native fullscreen window";
-                return false;
-            }
-            continue;
-        }
-        if (window.observation.stale or displayBlocked(destination) or displayBlocked(window.display)) {
-            transition_error = "Routing blocked by stale or native fullscreen window";
-            return false;
-        }
-        var original: Rect = undefined;
-        if (!native.platform_read_frame(window.identity, &original)) {
-            transition_error = "Routing geometry could not be read";
-            return false;
-        }
-    }
-    for (&layouts.roots) |*slot| if (slot.*) |*state| {
-        const destination = request.destinations[state.workspace] orelse if (displayIndex(state.display) == null) displays.items[0].identity else state.display;
-        if (destination == state.display) continue;
-        if (layouts.lookup(destination, state.workspace)) |existing| {
-            const defaults = config.workspaces[state.workspace];
-            const empty_default = existing.root == null and existing.fullscreen == null and existing.layout == defaults.layout and existing.ratio == defaults.ratio;
-            if (empty_default) {
-                existing.* = state.*;
-                existing.display = destination;
-            } else layouts.discard(state);
-            slot.* = null;
-        } else state.display = destination;
-    };
-    for (request.activate) |activation| displays.items[displayIndex(activation.display).?].workspace = activation.workspace;
-    for (windows.items, 0..) |*window, index| {
-        const destination = staged[index];
-        if (request.send) |send| if (send.index == index) {
-            window.workspace = send.workspace;
-        };
-        if (destination != window.display) {
-            const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
-            // Keeps a floating window's center at the same proportional position in the destination area.
-            var relocated = window.floating_frame;
-            if (displayIndex(window.display)) |slot| {
-                const previous = inset(displays.items[slot].frame, config.gap);
-                relocated.left = area.left + (relocated.left + relocated.width / 2 - previous.left) / previous.width * area.width - relocated.width / 2;
-                relocated.top = area.top + (relocated.top + relocated.height / 2 - previous.top) / previous.height * area.height - relocated.height / 2;
-            }
-            window.floating_frame = boundedFloating(relocated, area);
-            window.parking_frame = boundedFloating(window.parking_frame, area);
-            window.display = destination;
-        }
-    }
-    if (request.send) |send| layouts.forgetIdentity(windows.items[send.index].identity);
-    return transaction.commit();
-}
 fn routeMembership() bool {
     const resolved = resolvePlacements();
     var needed = false;
@@ -885,11 +879,7 @@ fn routeMembership() bool {
         const destination = resolved[state.workspace];
         if (has_state and (displayIndex(state.display) == null or (destination != null and state.display != destination.?))) needed = true;
     };
-    if (!needed) return true;
-    var activations: [11]Routing.Activation = undefined;
-    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{}, &activations) })) return false;
-    commitPlacements(resolved);
-    return true;
+    return !needed or route(resolved, &.{}, null);
 }
 fn visible(window: Window) bool {
     if (!externallyEligible(window)) return false;
@@ -1572,10 +1562,7 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
     if (migration) {
         generation += 1;
         snapshot_presentation = .instant;
-        var activations: [11]Routing.Activation = undefined;
-        if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = owner, .workspace = workspace }}, &activations) })) return failure(transition_error orelse "MonitorRoutingFailed");
-        commitPlacements(resolved);
-        routing_blocked = false;
+        if (!route(resolved, &.{.{ .display = owner, .workspace = workspace }}, null)) return failure(transition_error orelse "MonitorRoutingFailed");
         recordPrevious(destination_slot, from, workspace);
         focusWorkspace(owner, focus_target);
         native.platform_config_changed();
@@ -1601,7 +1588,7 @@ fn jumpToWindow(identity: u64, display_slot: usize) [*:0]const u8 {
 // Global mode: sets each moved workspace's runtime home to its destination display and shows it
 // there. A display in `vacated` that loses its shown workspace shows the global previous workspace
 // if it is placed there, else its lowest placed workspace, else nothing. Selects `follow`.
-fn rehomeWorkspaces(moves: []const Routing.Activation, vacated: ?u32, follow: u32) [*:0]const u8 {
+fn rehomeWorkspaces(moves: []const Activation, vacated: ?u32, follow: u32) [*:0]const u8 {
     var homes: [10][128]u8 = undefined;
     for (&homes, placements) |*home, placement| home.* = placement.home;
     for (moves) |move| {
@@ -1612,7 +1599,7 @@ fn rehomeWorkspaces(moves: []const Routing.Activation, vacated: ?u32, follow: u3
         return failure("MonitorUuidUnavailable");
     }
     const resolved = resolvePlacements();
-    var forced: [3]Routing.Activation = undefined;
+    var forced: [3]Activation = undefined;
     @memcpy(forced[0..moves.len], moves);
     var count = moves.len;
     if (vacated) |identity| {
@@ -1626,13 +1613,10 @@ fn rehomeWorkspaces(moves: []const Routing.Activation, vacated: ?u32, follow: u3
     }
     generation += 1;
     snapshot_presentation = .instant;
-    var activations: [11]Routing.Activation = undefined;
-    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, forced[0..count], &activations) })) {
+    if (!route(resolved, forced[0..count], null)) {
         for (&placements, homes) |*placement, home| placement.home = home;
         return failure(transition_error orelse "MonitorRoutingFailed");
     }
-    commitPlacements(resolved);
-    routing_blocked = false;
     focusWorkspace(follow, null);
     native.platform_config_changed();
     return json(.{ .ok = true, .monitor = follow, .verified = selected_display == follow, .focused = focused });
@@ -1948,10 +1932,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const workspace = resolveWorkspace(selection, selectionSlot(sourceIndex, displaySlot)) catch |err| return failure(@errorName(err));
                     const destination = resolved[workspace] orelse source.display;
                     if (workspace == source.workspace and destination == source.display) return json(.{ .ok = true, .changed = false });
-                    var activations: [11]Routing.Activation = undefined;
-                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{}, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
-                    commitPlacements(resolved);
-                    routing_blocked = false;
+                    if (!route(resolved, &.{}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
                     if (!visible(source.*)) focused = null;
                     native.platform_config_changed();
                     return json(.{ .ok = true });
@@ -1966,10 +1947,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const identity = source.identity;
                     generation += 1;
                     snapshot_presentation = .instant;
-                    var activations: [11]Routing.Activation = undefined;
-                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = destination, .workspace = workspace }}, &activations), .send = .{ .index = sourceIndex, .display = destination, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
-                    commitPlacements(resolved);
-                    routing_blocked = false;
+                    if (!route(resolved, &.{.{ .display = destination, .workspace = workspace }}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
                     recordPrevious(destination_slot, from, workspace);
                     const verified = focusVerified(identity);
                     native.platform_config_changed();
@@ -1986,10 +1964,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (target == origin) return json(.{ .ok = true, .changed = false, .monitor = target, .workspace = source.workspace + 1 });
                     const resolved = resolvePlacements();
                     if (config.workspace_monitors != null and resolved[workspace] != target) return failure("NoWorkspaceOnMonitor");
-                    var activations: [11]Routing.Activation = undefined;
-                    if (!commitRouting(.{ .destinations = resolved, .activate = placementActivations(resolved, &.{.{ .display = target, .workspace = workspace }}, &activations), .send = .{ .index = sourceIndex, .display = target, .workspace = workspace } })) return failure(transition_error orelse "MonitorRoutingFailed");
-                    commitPlacements(resolved);
-                    routing_blocked = false;
+                    if (!route(resolved, &.{.{ .display = target, .workspace = workspace }}, .{ .index = sourceIndex, .display = target, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
                     native.platform_config_changed();
                     if (command == .move_to_monitor) return json(.{ .ok = true, .monitor = target, .workspace = workspace + 1, .verified = focusVerified(source.identity), .target = source.identity });
                     // The selection stays, so keyboard focus returns to the selected display's candidate.
