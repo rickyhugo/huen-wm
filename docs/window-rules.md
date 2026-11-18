@@ -15,6 +15,7 @@ rules = {
         geometry = { left = 40, top = 60, width = 800, height = 600 },
     },
     { bundle = { regex = "^com\\.google\\." }, title = { regex = "(?i)devtools" }, floating = true },
+    { bundle = "com.apple.systempreferences", centered = true },
 }
 ```
 
@@ -42,7 +43,7 @@ Native discovery copies at most 511 UTF-8 bytes and reports whether the entire
 title fits. Truncated, unencodable, or NUL-containing titles never satisfy a title predicate.
 Bundle-only rules still match.
 
-Actions are optional `floating`, `workspace`, and `geometry`. Workspace numbers
+Actions are optional `floating`, `workspace`, `geometry`, and `centered`. Workspace numbers
 are one-based in Lua. Geometry requires all four finite point values.
 `left` and `top` range from -10000 to 10000. `width` and `height` range from
 80 to 10000. Geometry implies `floating = true`; combining it with explicit
@@ -56,6 +57,12 @@ so the remaining area is at least one point on each axis.
 Width and height are capped at the remaining area's dimensions.
 The configured minimum is 80 points, but an area smaller than 80 takes priority.
 Position is clamped so the entire window fits inside that area.
+
+`centered = true` centers the window in the same area and implies
+`floating = true`. Without geometry, the window keeps its own size, which suits
+applications with a fixed window size. With geometry, the geometry supplies the
+size and `centered` replaces its position. Combining it with explicit
+`floating = false` in the same rule is invalid.
 
 Each matching rule replaces only its supplied actions. Geometry also supplies
 `floating = true`. A later explicit `floating = false` overrides that decision

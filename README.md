@@ -98,7 +98,7 @@ The example binds Control+Option+H/J/K/L to directional focus. Names identify ph
 
 Lua must return a table. `config/example.lua` provides basic settings. The [AeroSpace preset](docs/aerospace.md) adds Alt shortcuts, ten workspaces, resize mode, application actions, and external-monitor preference. Each evaluation runs in a fresh child of the same executable. Invalid fields, types, commands, duplicate bindings, and hotkey collisions reject the reload. Consumed tables cannot have metatables. Collections must be dense arrays without extra keys. The previous configuration and hotkeys stay active on failure. File changes trigger reload automatically.
 
-[Window rules](docs/window-rules.md) match a bundle ID and an optional title, each by exact text, glob, or regular expression. They set floating state, a numbered workspace, or floating geometry on first discovery. Later matching rules replace only the actions they specify.
+[Window rules](docs/window-rules.md) match a bundle ID and an optional title, each by exact text, glob, or regular expression. They set floating state, a numbered workspace, floating geometry, or centering on first discovery. Later matching rules replace only the actions they specify.
 
 `border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count.
 

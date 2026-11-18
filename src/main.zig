@@ -1137,12 +1137,19 @@ export fn wm_tick() void {
             const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
             window.floating = decision.floating orelse false;
             if (decision.workspace) |workspace| window.workspace = workspace;
-            if (window.floating) if (decision.geometry) |geometry| {
+            if (window.floating and (decision.geometry != null or decision.centered)) {
                 const destination = resolvePlacements()[window.workspace] orelse display;
                 const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
-                window.floating_frame = boundedFloating(.{ .left = area.left + geometry.left, .top = area.top + geometry.top, .width = geometry.width, .height = geometry.height }, area);
+                var frame = observation.frame;
+                if (decision.geometry) |geometry| frame = .{ .left = area.left + geometry.left, .top = area.top + geometry.top, .width = geometry.width, .height = geometry.height };
+                // A centered window keeps its size, so an application with a fixed window size still accepts the placement.
+                if (decision.centered) {
+                    frame.left = area.left + (area.width - frame.width) / 2;
+                    frame.top = area.top + (area.height - frame.height) / 2;
+                }
+                window.floating_frame = boundedFloating(frame, area);
                 window.floating_restore = true;
-            };
+            }
             window.discovered = native.platform_monotonic();
             windows.append(allocator, window) catch return;
         }

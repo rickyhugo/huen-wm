@@ -14,12 +14,14 @@ pub const Rule = struct {
     floating: ?bool = null,
     workspace: ?usize = null,
     geometry: ?Geometry = null,
+    centered: bool = false,
 };
 pub const Facts = struct { bundle: []const u8, title: []const u8, title_complete: bool = true };
 pub const Decision = struct {
     floating: ?bool = null,
     workspace: ?usize = null,
     geometry: ?Geometry = null,
+    centered: bool = false,
 };
 
 pub fn resolve(rules: []const Rule, facts: Facts) Decision {
@@ -31,6 +33,10 @@ pub fn resolve(rules: []const Rule, facts: Facts) Decision {
         if (rule.workspace) |workspace| decision.workspace = workspace;
         if (rule.geometry) |geometry| {
             decision.geometry = geometry;
+            decision.floating = true;
+        }
+        if (rule.centered) {
+            decision.centered = true;
             decision.floating = true;
         }
     }

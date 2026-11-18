@@ -171,6 +171,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
         candidate.rules[index].floating = rule.floating;
         candidate.rules[index].workspace = rule.workspace;
         candidate.rules[index].geometry = rule.geometry;
+        candidate.rules[index].centered = rule.centered;
         if (rule.title) |title| {
             candidate.rules[index].title = .{ .kind = title.kind };
             try copyText(&candidate.rules[index].title.?.pattern, title.pattern);
@@ -184,7 +185,7 @@ const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, mon
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
-const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry };
+const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry, centered: bool };
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
@@ -546,7 +547,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         result.rule_count = try arrayCount(state, 64);
         for (0..result.rule_count) |index| {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
-            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry" });
+            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry", "centered" });
             const rule = &result.rules[index];
             if (rawField(state, "bundle") == native.LUA_TTABLE) {
                 const pattern = try patternField(state);
@@ -580,6 +581,11 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
                 rule.floating = true;
             }
             pop(state);
+            rule.centered = try fieldBool(state, "centered", false);
+            if (rule.centered) {
+                if (rule.floating == false) return error.CenteredRequiresFloating;
+                rule.floating = true;
+            }
             const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
             if (@floor(workspace) != workspace) return error.InvalidWorkspace;
             if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
@@ -613,6 +619,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .floating = rule.floating,
         .workspace = rule.workspace,
         .geometry = rule.geometry,
+        .centered = rule.centered,
     };
     const buffer = try allocator.alloc(u8, max_response);
     defer allocator.free(buffer);
