@@ -2040,7 +2040,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .swap_cycle => |step| {
                     if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
                     var identities: [1024]u64 = undefined;
-                    const target = selector.cycleTarget(readingOrder(source.display, .tiled, &identities), source.identity, step).?;
+                    const target = selector.cycleTarget(readingOrder(source.display, .tiled, &identities), source.identity, step) orelse return failure("NoWindowToCycle");
                     if (target == source.identity) return json(.{ .ok = true, .changed = false });
                     return swapWindows(sourceIndex, windowIndex(target).?);
                 },
