@@ -18,6 +18,7 @@ typedef enum {
     HuenHitTile = 1,
     HuenHitBoundary = 2,
     HuenHitHeader = 3,
+    HuenHitFloating = 4,
 } HuenHitKind;
 
 typedef struct {
@@ -58,6 +59,8 @@ typedef enum {
     HuenGestureNone,
     HuenGestureReorder,
     HuenGestureResize,
+    HuenGestureMoveFloating,
+    HuenGestureResizeFloating,
 } HuenGestureKind;
 
 typedef enum {

@@ -3,7 +3,7 @@ pub const title_bytes = 256;
 pub const Rect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const Point = extern struct { left: f64, top: f64 };
 pub const NodeRef = extern struct { slot: u32, generation: u64 };
-pub const HitKind = enum(c_uint) { tile = 1, boundary = 2, header = 3 };
+pub const HitKind = enum(c_uint) { tile = 1, boundary = 2, header = 3, floating = 4 };
 pub const HitRegion = extern struct {
     kind: HitKind,
     rect: Rect,
@@ -22,7 +22,7 @@ pub const Snapshot = extern struct {
 };
 pub const Availability = enum(c_uint) { disabled, available, permission_denied, tap_unavailable, stopping };
 pub const EventKind = enum(c_uint) { start = 1, update, end, cancel, group_select };
-pub const Gesture = enum(c_uint) { none, reorder, resize };
+pub const Gesture = enum(c_uint) { none, reorder, resize, move_floating, resize_floating };
 pub const CancelReason = enum(c_uint) { none, publication, modifiers, escape, tap_disabled, permission, configuration, shutdown };
 pub const Event = extern struct {
     kind: EventKind,

@@ -51,7 +51,9 @@ Queued events retain their original generation.
 The caller rejects events whose generation, node references, native identities, or eligibility are no longer current.
 
 Only supplied hits are eligible. Native input does not independently inspect foreign windows or stacking.
-The caller excludes obscured, minimized, fullscreen, floating, inactive, stale, and otherwise ineligible windows.
+The caller excludes obscured, minimized, fullscreen, inactive, stale, and otherwise ineligible windows.
+Floating windows are not tile hits. Each visible floating window has its own floating hit with its native identity and CG window ID.
+The caller supplies floating hits after the tile, header, and boundary hits, with the focused floating window last.
 For overlapping hits of the same kind, the last supplied hit wins.
 Header rectangles block modified left-down from reaching tile hits underneath.
 The caller includes visible header rectangles in the hit map even though their clicks use AppKit buttons.
@@ -74,6 +76,10 @@ The main caller polls on its normal bounded main-loop tick.
 
 Modified left-down on a tile starts reorder.
 Modified right-down on a boundary starts resize.
+Modified left-down on a floating hit starts a floating move. Modified right-down on a floating hit starts a floating resize.
+A floating hit above a tile or boundary wins.
+The main caller moves the floating window on each update. A floating resize moves the edges nearest the press point, as in Hyprland.
+Cancellation returns the window to its frame at the start.
 Down is claimed only with enabled input, an available tap, a ready projection, no transition, and queue capacity.
 Unclaimed events pass through unchanged.
 The native bridge never injects replacement clicks.
@@ -85,7 +91,7 @@ Timestamps come from `CLOCK_MONOTONIC_RAW`, not wall time or foreign-window moti
 The `crossed_threshold` flag latches after a displacement of at least four points.
 The main caller can show a preview immediately but commits no edit on an end event with a false threshold flag.
 A modified click therefore consumes its paired down and up without a reorder.
-The bridge does not move foreign windows during a gesture.
+The bridge does not move foreign windows during a gesture. The main caller moves floating windows.
 
 Modifier loss, Escape, tap disable, permission loss, reconfiguration, publication invalidation, and shutdown cancel an active gesture.
 Modifier loss is read from the owned drag and release events, so the tap does not observe modifier changes.

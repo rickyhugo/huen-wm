@@ -10,6 +10,9 @@ pub const Window = struct {
     public_id: u32,
     eligible: bool,
     title: []const u8,
+    // The on-screen frame of a floating window that modified drags can move or resize.
+    floating: ?layout.Rect = null,
+    focused: bool = false,
 };
 pub const Edit = union(enum) {
     group: struct { group: layout.NodeRef, child: layout.NodeRef },
@@ -120,6 +123,12 @@ pub const Controls = struct {
                 try hits.append(allocator, .{ .kind = .boundary, .rect = rect(boundary.rect), .node = none, .group = none, .boundary = reference(boundary.node), .window_identity = 0, .window_id = 0 });
             }
         };
+        // Floating hits come last, and the focused one after the others, so they win over the tiles below them.
+        if (ready) for ([_]bool{ false, true }) |focused| for (windows) |window| {
+            const frame = window.floating orelse continue;
+            if (window.focused != focused or window.public_id == 0 or frame.width <= 0 or frame.height <= 0) continue;
+            try hits.append(allocator, .{ .kind = .floating, .rect = rect(frame), .node = none, .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
+        };
         const changed = self.ready != ready or self.revision != store.revision or hits.items.len != self.hits.items.len or for (hits.items, self.hits.items) |next, previous| {
             if (!std.meta.eql(next, previous)) break true;
         } else false;
@@ -193,7 +202,7 @@ pub const Controls = struct {
         } else {
             var target: ?bridge.HitRegion = null;
             for (self.hits.items) |hit| {
-                if (hit.kind == .boundary or !(sample.point.left >= hit.rect.left and sample.point.left <= hit.rect.left + hit.rect.width and sample.point.top >= hit.rect.top and sample.point.top <= hit.rect.top + hit.rect.height)) continue;
+                if (hit.kind == .boundary or hit.kind == .floating or !(sample.point.left >= hit.rect.left and sample.point.left <= hit.rect.left + hit.rect.width and sample.point.top >= hit.rect.top and sample.point.top <= hit.rect.top + hit.rect.height)) continue;
                 if (hit.kind == .header or target == null) target = hit;
             }
             const hit = target orelse return null;

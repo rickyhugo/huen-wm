@@ -104,7 +104,7 @@ Lua must return a table. `config/example.lua` provides basic settings. The [Aero
 
 `border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count.
 
-Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](docs/mouse-controls.md).
+Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. On a floating window, the left button moves it and the right button resizes it from the nearest corner, as in Hyprland. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](docs/mouse-controls.md).
 
 Set `session = { enabled = true }` to save logical layout after clean original-frame restoration. A normal manager restart can restore uniquely identified windows while their applications remain open. Missing or ambiguous public identities remain unmatched. This does not restore arbitrary application relaunches or reboots. See [session continuity](docs/session.md).
 

@@ -159,9 +159,11 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
     for (size_t index = 0; left && index < input.hit_count; index++) {
         if (input.hits[index].kind == HuenHitHeader && contains(input.hits[index].rect, point)) return event;
     }
+    // Floating hits follow tile and boundary hits, so the last match is the window on top.
     const HuenHitRegion *hit = NULL;
     for (size_t index = input.hit_count; index > 0 && !hit; index--) {
-        if (input.hits[index - 1].kind == (left ? HuenHitTile : HuenHitBoundary) &&
+        HuenHitKind kind = input.hits[index - 1].kind;
+        if ((kind == HuenHitFloating || kind == (left ? HuenHitTile : HuenHitBoundary)) &&
             contains(input.hits[index - 1].rect, point)) hit = &input.hits[index - 1];
     }
     if (!hit) return event;
@@ -172,7 +174,8 @@ static CGEventRef input_callback(CGEventTapProxy proxy, CGEventType type,
     if (++input.next_gesture == 0) input.next_gesture++;
     input.drag.sample = (HuenInteractionEvent){
         .kind = HuenInteractionStart,
-        .gesture = left ? HuenGestureReorder : HuenGestureResize,
+        .gesture = hit->kind == HuenHitFloating ? (left ? HuenGestureMoveFloating : HuenGestureResizeFloating) :
+            (left ? HuenGestureReorder : HuenGestureResize),
         .generation = input.generation,
         .gesture_id = input.next_gesture,
         .monotonic_ns = monotonic_ns(),
@@ -244,9 +247,10 @@ bool huen_input_publish(const HuenInputSnapshot *snapshot) {
         HuenInteractionRect rect = hit->rect;
         if (!isfinite(rect.left) || !isfinite(rect.top) || !isfinite(rect.width) || !isfinite(rect.height) ||
             rect.width <= 0 || rect.height <= 0 || !isfinite(rect.left + rect.width) ||
-            !isfinite(rect.top + rect.height) || hit->kind < HuenHitTile || hit->kind > HuenHitHeader ||
-            (hit->kind == HuenHitTile &&
-             (hit->window_identity == 0 || hit->window_id == 0 || hit->node.generation == 0)) ||
+            !isfinite(rect.top + rect.height) || hit->kind < HuenHitTile || hit->kind > HuenHitFloating ||
+            ((hit->kind == HuenHitTile || hit->kind == HuenHitFloating) &&
+             (hit->window_identity == 0 || hit->window_id == 0)) ||
+            (hit->kind == HuenHitTile && hit->node.generation == 0) ||
             (hit->kind == HuenHitBoundary && hit->boundary.generation == 0) ||
             (hit->kind == HuenHitHeader && (hit->node.generation == 0 || hit->group.generation == 0))) return false;
     }

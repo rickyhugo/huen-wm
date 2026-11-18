@@ -61,6 +61,9 @@ const StatusPresentation = union(enum) {
 var published_status: StatusPresentation = .disabled;
 var status_active = false;
 var pointer_controls: pointer.Controls = .{};
+// A modified drag that moves or resizes a floating window. A resize moves the edges nearest the press, as in Hyprland.
+const FloatingDrag = struct { gesture_id: u64, identity: u64, origin: interaction.Point, frame: Rect, from_left: bool, from_top: bool };
+var floating_drag: ?FloatingDrag = null;
 var session_config_hash: [64]u8 = @splat(0);
 var session_boot: [128]u8 = @splat(0);
 var session_loaded = false;
@@ -165,11 +168,66 @@ fn pointerWindows(output: []pointer.Window) []pointer.Window {
         .public_id = window.observation.public_window_id,
         .eligible = visible(window) and !window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle and framesNear(window.observation.frame, targetFrame(window), 2),
         .title = text(&windows.items[index].observation.title),
+        .floating = if (visible(window) and window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle) window.observation.frame else null,
+        .focused = focused == window.identity,
     };
     return output[0..windows.items.len];
 }
+fn dragFloating(sample: interaction.Event) void {
+    switch (sample.kind) {
+        .start => {
+            if (sample.generation != pointer_controls.generation) return;
+            const window = windows.items[windowIndex(sample.target.window_identity) orelse return];
+            if (!window.floating or window.parked or !visible(window) or managedFullscreen(window)) return;
+            const frame = window.observation.frame;
+            floating_drag = .{
+                .gesture_id = sample.gesture_id,
+                .identity = window.identity,
+                .origin = sample.origin,
+                .frame = frame,
+                .from_left = sample.origin.left < frame.left + frame.width / 2,
+                .from_top = sample.origin.top < frame.top + frame.height / 2,
+            };
+            _ = focusVerified(window.identity);
+        },
+        .update, .end, .cancel => {
+            const drag = floating_drag orelse return;
+            if (drag.gesture_id != sample.gesture_id) return;
+            if (sample.kind != .update) floating_drag = null;
+            defer if (floating_drag == null) {
+                native.platform_config_changed();
+                publishPointer();
+            };
+            const window = &windows.items[windowIndex(drag.identity) orelse return];
+            if (!window.floating) return;
+            if (sample.kind != .cancel and !sample.crossed_threshold) return;
+            const frame = if (sample.kind == .cancel) drag.frame else draggedFrame(drag, sample.gesture, sample.point);
+            window.floating_frame = frame;
+            window.floating_restore = false;
+            _ = native.platform_frame(window.identity, frame, 0, .visible_goal);
+        },
+        .group_select => {},
+    }
+}
+fn draggedFrame(drag: FloatingDrag, gesture: interaction.Gesture, point: interaction.Point) Rect {
+    const horizontal = point.left - drag.origin.left;
+    const vertical = point.top - drag.origin.top;
+    var frame = drag.frame;
+    if (gesture == .move_floating) {
+        frame.left += horizontal;
+        frame.top += vertical;
+        return frame;
+    }
+    const minimum = tiling.minimum_tile_extent;
+    frame.width = @max(minimum, drag.frame.width + if (drag.from_left) -horizontal else horizontal);
+    frame.height = @max(minimum, drag.frame.height + if (drag.from_top) -vertical else vertical);
+    if (drag.from_left) frame.left = drag.frame.left + drag.frame.width - frame.width;
+    if (drag.from_top) frame.top = drag.frame.top + drag.frame.height - frame.height;
+    return frame;
+}
 fn publishPointer() void {
-    if (!initialized or pointer_controls.stop_deadline != null) return;
+    // A new publication cancels the active gesture, and the dragged window's hit changes with every update.
+    if (!initialized or pointer_controls.stop_deadline != null or floating_drag != null) return;
     var observed: [1024]pointer.Window = undefined;
     var active: [32]*tiling.WorkspaceLayout = undefined;
     for (displays.items, 0..) |display, index| active[index] = workspaceLayout(display.identity, display.workspace);
@@ -189,6 +247,10 @@ export fn wm_input_poll() void {
     var sample: interaction.Event = undefined;
     var count: usize = 0;
     poll: while (count < 64 and interaction.huen_input_poll(&sample)) : (count += 1) {
+        if (sample.gesture == .move_floating or sample.gesture == .resize_floating) {
+            dragFloating(sample);
+            continue;
+        }
         if (sample.kind == .start or sample.kind == .end or sample.kind == .group_select) {
             refreshObservations();
             if (!deriveGoals()) continue;
