@@ -42,6 +42,11 @@ static NSMutableDictionary<NSNumber *, NSRunningApplication *> *applications;
 static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutCounts;
 static NSMutableDictionary<NSNumber *, NSNumber *> *timeoutRetryTimes;
 static void forgetTimeouts(pid_t process) { [timeoutCounts removeObjectForKey:@(process)]; [timeoutRetryTimes removeObjectForKey:@(process)]; }
+static void countTimeout(NSNumber *process) {
+    NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
+    timeoutCounts[process] = @(count);
+    if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
+}
 static uint64_t nextIdentity = 1;
 // The first scan of every application also finds windows on other native Spaces. Later scans find only windows created since.
 static BOOL initialScanComplete = NO;
@@ -282,11 +287,7 @@ static void scanWindows(pid_t onlyProcess) {
             if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
                 if (windowValues) CFRelease(windowValues);
                 for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
-                if (scanResult == kAXErrorCannotComplete) {
-                    NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
-                    timeoutCounts[process] = @(count);
-                    if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
-                }
+                if (scanResult == kAXErrorCannotComplete) countTimeout(process);
                 CFRelease(appElement); continue;
             }
             forgetTimeouts(application.processIdentifier);
@@ -376,9 +377,7 @@ static void scanWindows(pid_t onlyProcess) {
             if (readTimedOut) {
                 // The application stopped answering partway, usually while it launches or is busy. Keep its records as they
                 // are: the windows not reached are unknown, not gone.
-                NSUInteger count = timeoutCounts[process].unsignedIntegerValue + 1;
-                timeoutCounts[process] = @(count);
-                if (count >= 2) timeoutRetryTimes[process] = @(CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(count - 2, (NSUInteger)6))));
+                countTimeout(process);
                 if (onlyProcess) processScanRetryTime = CACurrentMediaTime() + 0.05;
                 CFRelease(appElement); continue;
             }

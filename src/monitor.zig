@@ -7,7 +7,6 @@ pub const Screen = struct { identity: u32, full_bounds: Rect, built_in: bool, na
 
 pub fn resolve(selection: commands.MonitorSelector, screens: []const Screen, current: ?u32) !u32 {
     if (screens.len == 0) return error.NoDisplays;
-    if (screens.len > capacity) return error.TooManyDisplays;
     switch (selection) {
         .direction => |direction| {
             const source = find(screens, current orelse return error.NoSelectedMonitor) orelse return error.NoMonitorInDirection;

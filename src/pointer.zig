@@ -132,7 +132,7 @@ pub const Controls = struct {
             if (!std.meta.eql(next, previous)) break true;
         } else false;
         if (changed or self.generation == 0) {
-            self.generation = std.math.add(u64, self.generation, 1) catch return error.InputGenerationExhausted;
+            self.generation += 1;
             self.gesture = null;
         }
         if (!bridge.huen_input_publish(&.{ .generation = self.generation, .hits = hits.items.ptr, .hit_count = hits.items.len, .ready = ready, .transitioning = !ready })) return error.InputPublicationRejected;

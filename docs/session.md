@@ -111,16 +111,17 @@ Public AX attributes cannot eliminate that risk.
 
 `load(allocator, scope)` returns `Loaded` with `none`, `ready`, or `rejected`.
 A rejected result includes `storage`, `schema`, `scope`, or `unclean`.
-`Loaded.snapshot()` borrows the bounded, validated snapshot.
-`Loaded.deinit()` releases its allocation.
+`Loaded.parsed` holds the bounded, validated snapshot when the result is `ready`.
+The caller releases it with `parsed.deinit()`.
 
-`save(allocator, checkpoint, outcome)` returns an error on failure.
-It requires both `checkpoint.clean == true` and `outcome == .clean`.
-It rejects zero-window snapshots, so an empty bootstrap cannot replace the last good checkpoint.
+`save(allocator, checkpoint)` returns an error on failure.
+It does not check the checkpoint.
+The caller saves only a checkpoint from `continuity.freeze`, which validates it and sets its clean marker.
+The caller skips a zero-window checkpoint, so an empty bootstrap cannot replace the last good checkpoint.
 The clean marker is not proof of a native recovery outcome.
-Only the caller can supply that outcome.
+Only the caller knows that outcome.
 The caller freezes logical intent, captures the checkpoint, restores physical original frames, and then publishes the frozen checkpoint only after clean recovery.
-A failed physical restore uses `.failed` or omits the save.
+A failed physical restore omits the save.
 A storage error never blocks or replaces native geometry recovery.
 An interruption before successful save retains the previous checkpoint.
 There is no guaranteed crash recovery.
@@ -131,14 +132,14 @@ The following skeleton shows the ownership order.
 ```zig
 const frozen = try engine.freezeCheckpoint(scope);
 const recovery = native_adapter.restoreOriginalFrames();
-session.save(allocator, frozen, if (recovery.clean) .clean else .failed) catch |failure| {
+if (recovery.clean and frozen.windows.len > 0) session.save(allocator, frozen) catch |failure| {
     reportSessionSave(failure);
 };
 
 var loaded = session.load(allocator, scope);
-defer loaded.deinit();
-if (loaded.snapshot()) |snapshot| {
-    const imported = try continuity.restore(snapshot, current_windows, screens, &config, placements);
+defer if (loaded.parsed) |*parsed| parsed.deinit();
+if (loaded.parsed) |*parsed| {
+    const imported = try continuity.restore(&parsed.value, current_windows, screens, &config, placements);
 }
 ```
 

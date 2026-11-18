@@ -18,10 +18,6 @@ pub const Ring = struct {
         self.count -= 1;
     }
 
-    pub fn latest(self: *const Ring) ?u64 {
-        return if (self.count > 0) self.entries[0] else null;
-    }
-
     pub fn pick(self: *const Ring, current: ?u64, eligible: *const fn (u64) bool) ?u64 {
         for (self.entries[0..self.count]) |identity| if (current != identity and eligible(identity)) return identity;
         return null;

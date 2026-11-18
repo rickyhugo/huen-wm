@@ -553,10 +553,6 @@ fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) 
     const back_and_forth = config.workspace_back_and_forth and (placedWorkspace(display) != null or workspaceOwner() != null);
     return selector.resolve(selection, .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied, .back_and_forth = back_and_forth });
 }
-fn selectionSlot(window_index: usize, display_slot: usize) usize {
-    if (config.workspace_monitors != null) return display_slot;
-    return displayIndex(windows.items[window_index].display).?;
-}
 fn workspaceLayout(display: u32, workspace: usize) *tiling.WorkspaceLayout {
     const defaults = config.workspaces[workspace];
     return layouts.workspace(display, workspace, defaults.layout, defaults.ratio);
@@ -618,9 +614,8 @@ fn selectDisplay(identity: u32) void {
     if (!native.platform_warp_pointer(.{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 })) native.platform_error("Mouse warp failed");
 }
 fn monitorScreens(output: []monitor.Screen) []monitor.Screen {
-    const count = @min(output.len, displays.items.len);
-    for (displays.items[0..count], output[0..count]) |*display, *screen| screen.* = .{ .identity = display.identity, .full_bounds = display.full_bounds, .built_in = display.built_in, .name = text(&display.name) };
-    return output[0..count];
+    for (displays.items, output[0..displays.items.len]) |*display, *screen| screen.* = .{ .identity = display.identity, .full_bounds = display.full_bounds, .built_in = display.built_in, .name = text(&display.name) };
+    return output[0..displays.items.len];
 }
 fn workspaceOwner() ?u32 {
     const first = placements[0].display orelse return null;
@@ -924,7 +919,7 @@ fn observeFocus(observed: ?u64, settle: bool) void {
     // A new window that a rule placed there is not a request. Neither is focus that macOS moves there because the focused
     // window went away, nor focus that comes back to the window that had it last, such as one that a command sent there.
     const requested = if (observed) |identity| requested: {
-        if (suspended or focus_history.latest() == identity) break :requested false;
+        if (suspended or (focus_history.count > 0 and focus_history.entries[0] == identity)) break :requested false;
         const window = windows.items[windowIndex(identity) orelse break :requested false];
         const slot = displayIndex(window.display) orelse break :requested false;
         if (!externallyEligible(window) or window.workspace == displays.items[slot].workspace) break :requested false;
@@ -1441,7 +1436,7 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
                 return;
             };
             defer transaction.deinit();
-            if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
+            layouts.reveal(state, identity) catch |err| {
                 transaction.rollback(0);
                 transition_error = @errorName(err);
                 return;
@@ -1466,7 +1461,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     displays.items[displaySlot].workspace = workspace;
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
-    if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| if (layouts.nodeForIdentity(identity) != null) layouts.reveal(state, identity) catch |err| {
+    if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| layouts.reveal(state, identity) catch |err| {
         transaction.rollback(0);
         transition_error = @errorName(err);
         return false;
@@ -1907,7 +1902,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 },
                 .send_to_workspace, .move_to_workspace => |selection| {
                     const resolved = resolvePlacements();
-                    const workspace = resolveWorkspace(selection, selectionSlot(sourceIndex, displaySlot)) catch |err| return failure(@errorName(err));
+                    const workspace = resolveWorkspace(selection, if (config.workspace_monitors != null) displaySlot else displayIndex(source.display).?) catch |err| return failure(@errorName(err));
                     const destination = resolved[workspace] orelse source.display;
                     if (workspace == source.workspace and destination == source.display) return json(.{ .ok = true, .changed = false });
                     if (command == .send_to_workspace) {

@@ -218,7 +218,5 @@ void huen_scene_finish(uint64_t generation) {
 
 void huen_scene_cancel(void) {
     NSCAssert(NSThread.isMainThread, @"Scene calls require the main thread");
-    HuenSceneTransition *transition = currentTransition;
-    currentTransition = nil;
-    [transition retireAndSettleCallback];
+    retire_and_settle_callback(currentTransition);
 }

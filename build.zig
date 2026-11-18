@@ -20,11 +20,7 @@ pub fn build(builder: *std.Build) void {
     native.addFileArg(builder.path("native/platform.m"));
     native.addArg("-o");
     module.addObjectFile(native.addOutputFileArg("platform.o"));
-    const scene = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
-    scene.addFileArg(builder.path("native/scene.m"));
-    scene.addArg("-o");
-    module.addObjectFile(scene.addOutputFileArg("scene.o"));
-    for ([_][]const u8{ "input", "groups", "session" }) |unit| {
+    for ([_][]const u8{ "scene", "input", "groups", "session" }) |unit| {
         const compilation = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
         compilation.addFileArg(builder.path(builder.fmt("native/{s}.m", .{unit})));
         compilation.addArg("-o");

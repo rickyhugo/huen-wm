@@ -389,7 +389,7 @@ fn fieldString(state: *native.lua_State, key: [*:0]const u8) !?[]const u8 {
     return luaText(state);
 }
 
-fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: bool) !bool {
+fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: anytype) !@TypeOf(default) {
     const kind = rawField(state, key);
     defer pop(state);
     if (kind == native.LUA_TNIL) return default;
@@ -568,11 +568,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
                 pop(state);
                 try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
             }
-            if (rawField(state, "floating") != native.LUA_TNIL) {
-                if (native.lua_type(state, -1) != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
-                rule.floating = native.lua_toboolean(state, -1) != 0;
-            }
-            pop(state);
+            rule.floating = try fieldBool(state, "floating", @as(?bool, null));
             if (rawField(state, "title") != native.LUA_TNIL) {
                 const pattern = try patternField(state);
                 rule.title = .{ .kind = pattern.kind };
@@ -596,11 +592,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
                 if (rule.floating == false) return error.CenteredRequiresFloating;
                 rule.floating = true;
             }
-            if (rawField(state, "focus_on_activate") != native.LUA_TNIL) {
-                if (native.lua_type(state, -1) != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
-                rule.focus_on_activate = native.lua_toboolean(state, -1) != 0;
-            }
-            pop(state);
+            rule.focus_on_activate = try fieldBool(state, "focus_on_activate", @as(?bool, null));
             const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
             if (@floor(workspace) != workspace) return error.InvalidWorkspace;
             if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
