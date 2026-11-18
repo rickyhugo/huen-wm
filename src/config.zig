@@ -141,7 +141,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .border_single_window = wire.border_single_window };
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .floating_size = wire.floating_size, .border_single_window = wire.border_single_window };
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -196,6 +196,7 @@ const WireConfig = struct {
     status_bar: StatusBar,
     session: Session,
     mouse: Mouse,
+    floating_size: FloatingSize,
     gap: f64,
     border_width: f64,
     border_color: u32,
@@ -640,6 +641,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .status_bar = result.status_bar,
         .session = result.session,
         .mouse = result.mouse,
+        .floating_size = result.floating_size,
         .gap = result.gap,
         .border_width = result.border_width,
         .border_color = result.border_color,
