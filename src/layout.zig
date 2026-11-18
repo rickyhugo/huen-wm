@@ -34,7 +34,7 @@ pub const WorkspaceLayout = struct {
     projected_layout: ?commands.Layout = null,
 };
 pub const Visibility = union(enum) { visible: Rect, hidden_by_group, unavailable };
-pub const Header = struct { group: NodeRef, child: NodeRef, rect: Rect, selected: bool, eligible: bool, revision: u64 };
+pub const Header = struct { group: NodeRef, child: NodeRef, rect: Rect, selected: bool, eligible: bool };
 pub const Boundary = struct { node: NodeRef, axis: Axis, rect: Rect, revision: u64 };
 pub const Drop = enum { left, right, up, down, join, swap };
 pub const ResizePreview = struct { boundary: Boundary, ratio: f64, applied_delta: f64 };
@@ -812,7 +812,7 @@ pub const Store = struct {
                     rect.top = row.start;
                     rect.height = row.size;
                 }
-                output[count] = .{ .group = self.reference(@intCast(index)), .child = self.reference(current), .rect = rect, .selected = current == container.selected, .eligible = self.nodes[current].active, .revision = self.revision };
+                output[count] = .{ .group = self.reference(@intCast(index)), .child = self.reference(current), .rect = rect, .selected = current == container.selected, .eligible = self.nodes[current].active };
                 count += 1;
                 offset += 1;
             }

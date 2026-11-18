@@ -34,7 +34,6 @@ pub const Controls = struct {
     generation: u64 = 0,
     revision: u64 = 0,
     hits: std.ArrayList(bridge.HitRegion) = .empty,
-    headers: std.ArrayList(bridge.HeaderItem) = .empty,
     gesture: ?Gesture = null,
     ready: bool = false,
     error_message: ?[]const u8 = null,
@@ -74,7 +73,7 @@ pub const Controls = struct {
                 const node = store.nodeForIdentity(window.identity) orelse continue;
                 if (!belongs(store, node, state)) continue;
                 const frame = store.goal(window.identity) orelse continue;
-                try hits.append(allocator, .{ .kind = .tile, .rect = rect(frame), .node = reference(node), .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
+                try hits.append(allocator, .{ .kind = .tile, .rect = frame, .node = reference(node), .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
             }
             var projected_headers: [2047]layout.Header = undefined;
             const header_count = try store.headers(state, &projected_headers);
@@ -95,7 +94,7 @@ pub const Controls = struct {
                 var item = std.mem.zeroes(bridge.HeaderItem);
                 item.group = reference(header.group);
                 item.child = reference(header.child);
-                item.rect = rect(header.rect);
+                item.rect = header.rect;
                 item.selected = header.selected;
                 item.eligible = header.eligible;
                 const identity = try store.labelIdentity(header.child);
@@ -120,14 +119,14 @@ pub const Controls = struct {
                 const identity = (try store.representative(boundary.node)) orelse continue;
                 const window = findWindow(windows, identity) orelse continue;
                 if (!native.platform_input_rect_unobscured(window.public_id, boundary.rect)) continue;
-                try hits.append(allocator, .{ .kind = .boundary, .rect = rect(boundary.rect), .node = none, .group = none, .boundary = reference(boundary.node), .window_identity = 0, .window_id = 0 });
+                try hits.append(allocator, .{ .kind = .boundary, .rect = boundary.rect, .node = none, .group = none, .boundary = reference(boundary.node), .window_identity = 0, .window_id = 0 });
             }
         };
         // Floating hits come last, and the focused one after the others, so they win over the tiles below them.
         if (ready) for ([_]bool{ false, true }) |focused| for (windows) |window| {
             const frame = window.floating orelse continue;
             if (window.focused != focused or window.public_id == 0 or frame.width <= 0 or frame.height <= 0) continue;
-            try hits.append(allocator, .{ .kind = .floating, .rect = rect(frame), .node = none, .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
+            try hits.append(allocator, .{ .kind = .floating, .rect = frame, .node = none, .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
         };
         const changed = self.ready != ready or self.revision != store.revision or hits.items.len != self.hits.items.len or for (hits.items, self.hits.items) |next, previous| {
             if (!std.meta.eql(next, previous)) break true;
@@ -142,8 +141,6 @@ pub const Controls = struct {
         if (!ready) bridge.huen_groups_clear();
         self.hits.clearRetainingCapacity();
         try self.hits.appendSlice(allocator, hits.items);
-        self.headers.clearRetainingCapacity();
-        try self.headers.appendSlice(allocator, headers.items);
         self.ready = ready;
         self.revision = store.revision;
         if (!headers_published) return error.HeaderPublicationRejected;
@@ -161,7 +158,7 @@ pub const Controls = struct {
             const child = try coreReference(sample.target.node);
             _ = try store.resolve(group);
             _ = try store.resolve(child);
-            if (!safeSubtree(store, group, windows) or !unobscured(store, group, windows, coreRect(sample.target.rect))) return error.ObscuredGroup;
+            if (!safeSubtree(store, group, windows) or !unobscured(store, group, windows, sample.target.rect)) return error.ObscuredGroup;
             return .{ .group = .{ .group = group, .child = child } };
         }
         if (sample.kind == .start) {
@@ -170,11 +167,11 @@ pub const Controls = struct {
             const workspace = for (&store.roots) |*slot| {
                 if (slot.*) |*candidate| if (belongs(store, source, candidate)) break candidate;
             } else return error.StaleNode;
-            if (!safeSubtree(store, source, windows) or !unobscured(store, source, windows, coreRect(sample.target.rect))) return error.ObscuredSource;
+            if (!safeSubtree(store, source, windows) or !unobscured(store, source, windows, sample.target.rect)) return error.ObscuredSource;
             var boundary: ?layout.Boundary = null;
             if (sample.gesture == .resize) {
                 if (store.nodes[handle].content != .branch) return error.InvalidBoundary;
-                boundary = .{ .node = source, .axis = store.nodes[handle].content.branch.axis, .rect = coreRect(sample.target.rect), .revision = store.revision };
+                boundary = .{ .node = source, .axis = store.nodes[handle].content.branch.axis, .rect = sample.target.rect, .revision = store.revision };
             }
             self.gesture = .{ .id = sample.gesture_id, .generation = sample.generation, .revision = store.revision, .origin = sample.origin, .source = source, .boundary = boundary, .display = workspace.display, .workspace = workspace.workspace };
         }
@@ -214,7 +211,7 @@ pub const Controls = struct {
                 bridge.huen_groups_preview(null);
                 return null;
             }
-            if (!safeSubtree(store, target_ref, windows) or !unobscured(store, target_ref, windows, coreRect(hit.rect))) return error.ObscuredTarget;
+            if (!safeSubtree(store, target_ref, windows) or !unobscured(store, target_ref, windows, hit.rect)) return error.ObscuredTarget;
             const placement: layout.Drop = if (hit.kind == .header) .join else placement: {
                 const horizontal = (sample.point.left - hit.rect.left) / hit.rect.width;
                 const vertical = (sample.point.top - hit.rect.top) / hit.rect.height;
@@ -230,7 +227,7 @@ pub const Controls = struct {
             preview_rect = preview.rect;
         }
         if (sample.kind == .end) return edit;
-        bridge.huen_groups_preview(&.{ .generation = self.generation, .kind = preview_kind, .rect = rect(preview_rect), .border_color = color, .border_width = @max(1, width) });
+        bridge.huen_groups_preview(&.{ .generation = self.generation, .kind = preview_kind, .rect = preview_rect, .border_color = color, .border_width = @max(1, width) });
         return null;
     }
 };
@@ -269,10 +266,4 @@ fn reference(node: layout.NodeRef) bridge.NodeRef {
 fn coreReference(node: bridge.NodeRef) !layout.NodeRef {
     if (node.slot >= 2047 or node.generation == 0) return error.StaleNode;
     return .{ .slot = @intCast(node.slot), .generation = node.generation };
-}
-fn rect(frame: layout.Rect) bridge.Rect {
-    return .{ .left = frame.left, .top = frame.top, .width = frame.width, .height = frame.height };
-}
-fn coreRect(frame: bridge.Rect) layout.Rect {
-    return .{ .left = frame.left, .top = frame.top, .width = frame.width, .height = frame.height };
 }

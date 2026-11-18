@@ -48,7 +48,6 @@ pub const NativeAttributes = extern struct {
         return result;
     }
 };
-pub extern "c" fn huen_session_identify(element: *const anyopaque, pid: i32, output: *NativeAttributes) bool;
 pub extern "c" fn huen_session_display_uuid(display: u32, output: [*]u8, capacity: usize) bool;
 pub extern "c" fn huen_session_boot_identity(output: [*]u8, capacity: usize) bool;
 extern "c" fn huen_session_read(hash: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize) c_int;
@@ -122,7 +121,6 @@ pub const Loaded = struct {
         self.* = .{ .diagnostic = .none };
     }
 };
-pub const RecoveryOutcome = enum { clean, failed };
 
 pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
     const hash = scopeHash(scope) catch return .{ .diagnostic = .rejected, .rejection = .scope };
@@ -147,10 +145,7 @@ pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
     return .{ .diagnostic = .rejected, .rejection = rejection };
 }
 
-pub fn save(allocator: std.mem.Allocator, checkpoint: Snapshot, outcome: RecoveryOutcome) !void {
-    if (outcome != .clean or !checkpoint.clean) return error.Unclean;
-    try validate(checkpoint);
-    if (checkpoint.windows.len == 0) return error.EmptyBootstrap;
+pub fn save(allocator: std.mem.Allocator, checkpoint: Snapshot) !void {
     const hash = try scopeHash(checkpoint.scope);
     const bytes = try std.json.Stringify.valueAlloc(allocator, checkpoint, .{});
     defer allocator.free(bytes);

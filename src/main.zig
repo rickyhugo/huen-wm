@@ -157,7 +157,7 @@ fn saveSession(clean: bool) void {
         session_status.save = .skipped;
         return;
     }
-    session.save(allocator, checkpoint.snapshot, .clean) catch |err| {
+    session.save(allocator, checkpoint.snapshot) catch |err| {
         sessionError(@errorName(err));
         session_status.save = .failed;
         return;
@@ -422,7 +422,7 @@ fn failure(message: []const u8) [*:0]const u8 {
     return json(.{ .err_message = message, .@"error" = true });
 }
 export fn wm_initialize(path: [*:0]const u8) bool {
-    const candidate = configuration.load(path) catch |err| {
+    const candidate = configuration.evaluate(path, null, null) catch |err| {
         native.platform_error(@errorName(err));
         return false;
     };

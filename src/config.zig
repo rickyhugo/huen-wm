@@ -120,11 +120,7 @@ pub const Request = struct {
     }
 };
 
-pub fn load(path: [*:0]const u8) !ConfigCandidate {
-    return evaluate(path, null, null);
-}
-
-fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c) bool, context: ?*anyopaque) !ConfigCandidate {
+pub fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c) bool, context: ?*anyopaque) !ConfigCandidate {
     const response = try allocator.alloc(u8, max_response);
     defer allocator.free(response);
     var diagnostic: [4096]u8 = @splat(0);

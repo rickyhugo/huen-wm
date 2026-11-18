@@ -21,7 +21,6 @@ pub const Imported = struct {
     assignments: []Assignment,
     active: []Active,
     matched: usize,
-    missing: usize,
     ambiguous: usize,
 
     pub fn deinit(self: Imported) void {
@@ -172,7 +171,6 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
     for (windows, 0..) |*window, index| current_keys[index] = try window.attributes.key();
     // Every duplicate saved or current candidate is skipped, not only later duplicates.
     var mapping: [1024]?usize = @splat(null);
-    var missing: usize = 0;
     var ambiguous: usize = 0;
     for (snapshot.windows, 0..) |saved, saved_index| {
         var saved_count: usize = 0;
@@ -185,11 +183,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
             current_count += 1;
             current_index = index;
         };
-        if (saved_count != 1 or current_count > 1) {
-            ambiguous += 1;
-        } else if (current_count == 0) {
-            missing += 1;
-        } else mapping[saved_index] = current_index;
+        if (saved_count != 1 or current_count > 1) ambiguous += 1 else if (current_count == 1) mapping[saved_index] = current_index;
     }
     const logical = try allocator.create(layout.Snapshot);
     defer allocator.destroy(logical);
@@ -274,7 +268,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
     const matched = assignments.items.len;
     const owned_assignments = try assignments.toOwnedSlice(allocator);
     errdefer allocator.free(owned_assignments);
-    return .{ .store = store, .assignments = owned_assignments, .active = try active.toOwnedSlice(allocator), .matched = matched, .missing = missing, .ambiguous = ambiguous };
+    return .{ .store = store, .assignments = owned_assignments, .active = try active.toOwnedSlice(allocator), .matched = matched, .ambiguous = ambiguous };
 }
 
 fn equalKey(first: session.StableKey, second: session.StableKey) bool {

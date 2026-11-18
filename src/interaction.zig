@@ -1,7 +1,7 @@
 pub const title_bytes = 256;
 
-pub const Rect = extern struct { left: f64, top: f64, width: f64, height: f64 };
-pub const Point = extern struct { left: f64, top: f64 };
+pub const Rect = @import("native.zig").WMRect;
+pub const Point = @import("native.zig").WMPoint;
 pub const NodeRef = extern struct { slot: u32, generation: u64 };
 pub const HitKind = enum(c_uint) { tile = 1, boundary = 2, header = 3, floating = 4 };
 pub const HitRegion = extern struct {
