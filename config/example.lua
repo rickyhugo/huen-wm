@@ -32,6 +32,7 @@ return {
     border_width = 2,
     border_color = "#9BAFFF",
     border_single_window = true,
+    floating_size = { width = 0.5, height = 0.5 },
     motion_duration = 0.12,
     workspaces = { "Build", "Browse", "Write", "Talk", "Quiet" },
     bindings = bindings,

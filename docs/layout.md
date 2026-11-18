@@ -26,7 +26,7 @@ The first split uses the workspace ratio. Later splits start at one half.
 Closing a window or making it floating removes its leaf and collapses its parent.
 Returning a floating window to tiling inserts a new leaf.
 `toggle-floating` floats a tiled window at its last floating frame. A window that never floated
-floats at half the usable display area, centered.
+floats centered at `floating_size`, a fraction of the usable display area that defaults to half.
 Minimized windows retain their leaves but occupy no layout space.
 Native fullscreen, stale, and unparked offscreen windows also omit geometry without
 losing their leaves. Parked workspaces retain their topology and ratios.

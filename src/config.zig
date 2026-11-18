@@ -18,6 +18,8 @@ pub const WorkspaceMonitors = struct {
 pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55, monitor: WorkspaceMonitors = .{} };
 pub const Rule = Rules.Rule;
 pub const Session = struct { enabled: bool = false };
+// Fractions of the usable display area for a window that toggle-floating floats for the first time.
+pub const FloatingSize = struct { width: f64 = 0.5, height: f64 = 0.5 };
 pub const Mouse = struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 };
 pub const StatusLabel = enum { name, index, index_and_name };
 pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
@@ -35,6 +37,7 @@ pub const ConfigCandidate = struct {
     status_bar: StatusBar = .{},
     session: Session = .{},
     mouse: Mouse = .{},
+    floating_size: FloatingSize = .{},
     gap: f64 = 12,
     border_width: f64 = 2,
     border_color: u32 = 0x9bafff,
@@ -443,7 +446,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "session", "mouse" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "session", "mouse", "floating_size" });
     if (rawField(state, "session") != native.LUA_TNIL) {
         try checkKeys(state, &.{"enabled"});
         result.session.enabled = try fieldBool(state, "enabled", false);
@@ -456,6 +459,12 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
             result.mouse.modifiers = try modifiers(mods);
             if (result.mouse.modifiers == 0) return error.ModifierRequired;
         }
+    }
+    pop(state);
+    if (rawField(state, "floating_size") != native.LUA_TNIL) {
+        try checkKeys(state, &.{ "width", "height" });
+        result.floating_size.width = try fieldNumber(state, "width", 0.5, 0.1, 1);
+        result.floating_size.height = try fieldNumber(state, "height", 0.5, 0.1, 1);
     }
     pop(state);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);

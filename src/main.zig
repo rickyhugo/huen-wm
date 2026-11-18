@@ -1778,14 +1778,16 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         source.last_floating_frame = source.floating_frame;
                         source.floating = false;
                     } else {
-                        // Like Hyprland: return to the last floating frame, or float at half the usable area, centered.
+                        // Like Hyprland: return to the last floating frame, or float at `floating_size`, centered.
                         const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
+                        const width = area.width * config.floating_size.width;
+                        const height = area.height * config.floating_size.height;
                         source.floating = true;
                         source.floating_frame = boundedFloating(source.last_floating_frame orelse .{
-                            .left = area.left + area.width / 4,
-                            .top = area.top + area.height / 4,
-                            .width = area.width / 2,
-                            .height = area.height / 2,
+                            .left = area.left + (area.width - width) / 2,
+                            .top = area.top + (area.height - height) / 2,
+                            .width = width,
+                            .height = height,
                         }, area);
                     }
                 },

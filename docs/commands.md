@@ -315,7 +315,7 @@ Verbs reject extra arguments.
 | `resize` | One finite ratio delta with absolute value at most `0.5`, or `width`/`height` and a finite point delta with absolute value at most `10000`. |
 | `split` | `horizontal`, `vertical`, or `toggle`. |
 | `fullscreen` | None. Toggles managed fullscreen without creating a macOS Space. |
-| `toggle-floating` | None. Floats at the last floating frame, or at half the display, centered. |
+| `toggle-floating` | None. Floats at the last floating frame, or centered at `floating_size`. |
 | `layout` | `dwindle` or `master`. |
 | `workspace`, `send-to-workspace`, `move-to-workspace` | One workspace selector. |
 | `mode` | One configured mode name. |
