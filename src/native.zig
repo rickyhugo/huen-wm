@@ -48,6 +48,7 @@ pub extern "c" fn platform_settle_budget_begin() void;
 pub extern "c" fn platform_config_path() [*:0]const u8;
 pub extern "c" fn platform_filter() [*:0]const u8;
 pub extern "c" fn platform_config_changed() void;
+pub extern "c" fn platform_drag_active(active: bool) void;
 pub extern "c" fn lua_close(state: *lua_State) void;
 pub extern "c" fn lua_settop(state: *lua_State, index: c_int) void;
 pub extern "c" fn lua_tonumberx(state: *lua_State, index: c_int, valid: ?*c_int) f64;

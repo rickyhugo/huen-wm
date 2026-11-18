@@ -80,6 +80,9 @@ static NSString *configPath;
 static NSString *bundleFilter;
 static NSPanel *borderPanel;
 static BOOL pointerPressed, pointerMoving;
+// Set while huen's own modified drag moves or resizes a floating window. Its frame writes would otherwise trigger scans,
+// and each scan would redraw the border behind the window.
+static BOOL dragActive;
 static CGWindowID pressedWindow;
 static CGRect pressedBounds;
 static int serverSocket = -1;
@@ -681,7 +684,7 @@ static void scanAndTick(pid_t process) {
 }
 
 void platform_border(uint64_t identity, double width, uint32_t color) {
-    if (pointerMoving) return;
+    if (pointerMoving || dragActive) return;
     WindowRecord *focused = nil;
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) focused = record;
     if (!focused || width <= 0) { [borderPanel orderOut:nil]; return; }
@@ -815,6 +818,14 @@ void platform_quit(void) { stopping = YES; platform_status_present(NULL); }
 const char *platform_config_path(void) { return configPath.fileSystemRepresentation; }
 const char *platform_filter(void) { return bundleFilter.UTF8String ?: ""; }
 void platform_config_changed(void) { markChanged(); }
+void platform_drag_active(bool active) {
+    if (active == dragActive) return;
+    dragActive = active;
+    if (active) { [borderPanel orderOut:nil]; return; }
+    // The next timer tick scans and redraws the border at the final frame.
+    markChanged();
+    lastScan = 0;
+}
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
 
 int platform_main(int argc, char **argv) {
@@ -953,7 +964,7 @@ int platform_main(int argc, char **argv) {
             pointerPressed = pressed;
             BOOL settling = now < settleScanDeadline;
             // Slightly under three 60 Hz ticks, so settle scans of every application run every 50 ms instead of every fourth tick.
-            if (pointerMoving) {
+            if (pointerMoving || dragActive) {
             } else if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
             else if (settling && settleProcess && now - lastProcessScan > 0.012 && now > processScanRetryTime) scanAndTick(settleProcess);
             if (now - lastConfigCheck > 0.25) {

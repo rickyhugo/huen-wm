@@ -80,6 +80,7 @@ Modified left-down on a floating hit starts a floating move. Modified right-down
 A floating hit above a tile or boundary wins.
 The main caller moves the floating window on each update. A floating resize moves the edges nearest the press point, as in Hyprland.
 Cancellation returns the window to its frame at the start.
+The focus border hides when a floating move or resize starts and returns at the final frame when the button is released.
 Down is claimed only with enabled input, an available tap, a ready projection, no transition, and queue capacity.
 Unclaimed events pass through unchanged.
 The native bridge never injects replacement clicks.

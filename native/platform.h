@@ -52,6 +52,8 @@ void platform_settle_budget_begin(void);
 const char *platform_config_path(void);
 const char *platform_filter(void);
 void platform_config_changed(void);
+// Hides the border and pauses scans while a modified drag moves a floating window. Ending it redraws the border.
+void platform_drag_active(bool active);
 extern bool wm_initialize(const char *path);
 extern bool wm_activate_config(void);
 extern void wm_config_poll(void);

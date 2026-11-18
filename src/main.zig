@@ -189,6 +189,8 @@ fn dragFloating(sample: interaction.Event) void {
                 .from_top = sample.origin.top < frame.top + frame.height / 2,
             };
             _ = focusVerified(window.identity);
+            // The border stays hidden from the press to the release, so it never trails the window.
+            native.platform_drag_active(true);
         },
         .update, .end, .cancel => {
             const drag = floating_drag orelse return;
@@ -196,6 +198,7 @@ fn dragFloating(sample: interaction.Event) void {
             if (sample.kind != .update) floating_drag = null;
             defer if (floating_drag == null) {
                 native.platform_config_changed();
+                native.platform_drag_active(false);
                 publishPointer();
             };
             const window = &windows.items[windowIndex(drag.identity) orelse return];
@@ -239,6 +242,9 @@ fn publishPointer() void {
 export fn wm_input_poll() void {
     if (!initialized) return;
     if (suspended or pointer_controls.stop_deadline != null) {
+        // The end of an active drag is discarded below, and an active drag pauses scans.
+        floating_drag = null;
+        native.platform_drag_active(false);
         var discarded: interaction.Event = undefined;
         var count: usize = 0;
         while (count < 64 and interaction.huen_input_poll(&discarded)) : (count += 1) {}
