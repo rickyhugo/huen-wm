@@ -182,23 +182,6 @@ pub const Store = struct {
         self.nodes[handle] = .{};
     }
 
-    fn insertionTarget(self: *const Store, root: Handle, preferred: Handle, gap: f64) Handle {
-        const preferred_node = &self.nodes[preferred];
-        if (preferred == root or !preferred_node.visible or !preferred_node.active or fitsPair(preferred_node.frame, gap)) return preferred;
-        var target = preferred;
-        var largest: f64 = 0;
-        for (&self.nodes, 0..) |*node, index| {
-            if (node.content != .leaf or !node.active or !node.visible or !fitsPair(node.frame, gap)) continue;
-            const area = node.frame.width * node.frame.height;
-            const handle: Handle = @intCast(index);
-            if (area > largest and self.rootOf(handle) == root) {
-                target = handle;
-                largest = area;
-            }
-        }
-        return target;
-    }
-
     pub fn sync(self: *Store, members: []const Member, focused: ?u64, gap: f64) !void {
         for (&self.roots) |*slot| if (slot.*) |*state| for ([_]*?u64{ &state.last_focused, &state.fullscreen }) |field| if (field.*) |identity| {
             for (members) |member| {
@@ -240,7 +223,19 @@ pub const Store = struct {
                     .group => |group| group.selected,
                     else => first,
                 };
-                if (destination.layout == .dwindle and member.active) target = self.insertionTarget(root, target, gap);
+                // A visible tile that is too small to split gives its place to the largest tile that can hold two.
+                const preferred = self.nodes[target];
+                if (destination.layout == .dwindle and member.active and target != root and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
+                    var largest: f64 = 0;
+                    for (&self.nodes, 0..) |*node, index| {
+                        if (node.content != .leaf or !node.active or !node.visible or !fitsPair(node.frame, gap)) continue;
+                        const area = node.frame.width * node.frame.height;
+                        if (area > largest and self.rootOf(@intCast(index)) == root) {
+                            target = @intCast(index);
+                            largest = area;
+                        }
+                    }
+                }
                 const frame = self.nodes[target].frame;
                 const bounds = if (frame.width > 0 and frame.height > 0) frame else member.area;
                 const branch = available[1];

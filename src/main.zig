@@ -175,61 +175,6 @@ fn pointerWindows(output: []pointer.Window) []pointer.Window {
     };
     return output[0..windows.items.len];
 }
-fn dragFloating(sample: interaction.Event) void {
-    switch (sample.kind) {
-        .start => {
-            if (sample.generation != pointer_controls.generation) return;
-            const window = windows.items[windowIndex(sample.target.window_identity) orelse return];
-            if (!window.floating or window.parked or !visible(window) or managedFullscreen(window)) return;
-            const frame = window.observation.frame;
-            floating_drag = .{
-                .gesture_id = sample.gesture_id,
-                .identity = window.identity,
-                .origin = sample.origin,
-                .frame = frame,
-                .from_left = sample.origin.left < frame.left + frame.width / 2,
-                .from_top = sample.origin.top < frame.top + frame.height / 2,
-            };
-            _ = focusVerified(window.identity);
-            // The border stays hidden from the press to the release, so it never trails the window.
-            native.platform_drag_active(true);
-        },
-        .update, .end, .cancel => {
-            const drag = floating_drag orelse return;
-            if (drag.gesture_id != sample.gesture_id) return;
-            if (sample.kind != .update) floating_drag = null;
-            defer if (floating_drag == null) {
-                native.platform_config_changed();
-                native.platform_drag_active(false);
-                publishPointer();
-            };
-            const window = &windows.items[windowIndex(drag.identity) orelse return];
-            if (!window.floating) return;
-            if (sample.kind != .cancel and !sample.crossed_threshold) return;
-            const frame = if (sample.kind == .cancel) drag.frame else draggedFrame(drag, sample.gesture, sample.point);
-            window.floating_frame = frame;
-            window.floating_restore = false;
-            _ = native.platform_frame(window.identity, frame, 0, .visible_goal);
-        },
-        .group_select => {},
-    }
-}
-fn draggedFrame(drag: FloatingDrag, gesture: interaction.Gesture, point: interaction.Point) Rect {
-    const horizontal = point.left - drag.origin.left;
-    const vertical = point.top - drag.origin.top;
-    var frame = drag.frame;
-    if (gesture == .move_floating) {
-        frame.left += horizontal;
-        frame.top += vertical;
-        return frame;
-    }
-    const minimum = tiling.minimum_tile_extent;
-    frame.width = @max(minimum, drag.frame.width + if (drag.from_left) -horizontal else horizontal);
-    frame.height = @max(minimum, drag.frame.height + if (drag.from_top) -vertical else vertical);
-    if (drag.from_left) frame.left = drag.frame.left + drag.frame.width - frame.width;
-    if (drag.from_top) frame.top = drag.frame.top + drag.frame.height - frame.height;
-    return frame;
-}
 fn publishPointer() void {
     // A new publication cancels the active gesture, and the dragged window's hit changes with every update.
     if (!initialized or pointer_controls.stop_deadline != null or floating_drag != null) return;
@@ -256,7 +201,57 @@ export fn wm_input_poll() void {
     var count: usize = 0;
     poll: while (count < 64 and interaction.huen_input_poll(&sample)) : (count += 1) {
         if (sample.gesture == .move_floating or sample.gesture == .resize_floating) {
-            dragFloating(sample);
+            switch (sample.kind) {
+                .start => {
+                    if (sample.generation != pointer_controls.generation) continue;
+                    const window = windows.items[windowIndex(sample.target.window_identity) orelse continue];
+                    if (!window.floating or window.parked or !visible(window) or managedFullscreen(window)) continue;
+                    const frame = window.observation.frame;
+                    floating_drag = .{
+                        .gesture_id = sample.gesture_id,
+                        .identity = window.identity,
+                        .origin = sample.origin,
+                        .frame = frame,
+                        .from_left = sample.origin.left < frame.left + frame.width / 2,
+                        .from_top = sample.origin.top < frame.top + frame.height / 2,
+                    };
+                    _ = focusVerified(window.identity);
+                    // The border stays hidden from the press to the release, so it never trails the window.
+                    native.platform_drag_active(true);
+                },
+                .update, .end, .cancel => {
+                    const drag = floating_drag orelse continue;
+                    if (drag.gesture_id != sample.gesture_id) continue;
+                    if (sample.kind != .update) floating_drag = null;
+                    defer if (floating_drag == null) {
+                        native.platform_config_changed();
+                        native.platform_drag_active(false);
+                        publishPointer();
+                    };
+                    const window = &windows.items[windowIndex(drag.identity) orelse continue];
+                    if (!window.floating) continue;
+                    if (sample.kind != .cancel and !sample.crossed_threshold) continue;
+                    const frame = if (sample.kind == .cancel) drag.frame else dragged: {
+                        const horizontal = sample.point.left - drag.origin.left;
+                        const vertical = sample.point.top - drag.origin.top;
+                        var dragged = drag.frame;
+                        if (sample.gesture == .move_floating) {
+                            dragged.left += horizontal;
+                            dragged.top += vertical;
+                            break :dragged dragged;
+                        }
+                        dragged.width = @max(tiling.minimum_tile_extent, drag.frame.width + if (drag.from_left) -horizontal else horizontal);
+                        dragged.height = @max(tiling.minimum_tile_extent, drag.frame.height + if (drag.from_top) -vertical else vertical);
+                        if (drag.from_left) dragged.left = drag.frame.left + drag.frame.width - dragged.width;
+                        if (drag.from_top) dragged.top = drag.frame.top + drag.frame.height - dragged.height;
+                        break :dragged dragged;
+                    };
+                    window.floating_frame = frame;
+                    window.floating_restore = false;
+                    _ = native.platform_frame(window.identity, frame, 0, .visible_goal);
+                },
+                .group_select => {},
+            }
             continue;
         }
         if (sample.kind == .start or sample.kind == .end or sample.kind == .group_select) {
@@ -766,19 +761,7 @@ fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: 
     return true;
 }
 const PlacementTransaction = struct {
-    const Scope = union(enum) {
-        all,
-        display: u32,
-        pair: [2]u32,
-
-        fn contains(self: Scope, display: u32) bool {
-            return switch (self) {
-                .all => true,
-                .display => |identity| identity == display,
-                .pair => |identities| identities[0] == display or identities[1] == display,
-            };
-        }
-    };
+    const Scope = union(enum) { all, display: u32, pair: [2]u32 };
 
     store: *tiling.Store,
     intent: []Window,
@@ -798,7 +781,12 @@ const PlacementTransaction = struct {
         errdefer allocator.free(originals);
         for (windows.items, 0..) |window, index| {
             originals[index] = null;
-            if (!scope.contains(window.display)) continue;
+            const included = switch (scope) {
+                .all => true,
+                .display => |identity| identity == window.display,
+                .pair => |identities| identities[0] == window.display or identities[1] == window.display,
+            };
+            if (!included) continue;
             if (displayBlocked(window.display)) return error.NativeFullscreenBlocksPlacement;
             if (window.observation.stale and (window.observation.onscreen or window.parked)) return error.StaleWindowBlocksPlacement;
             if (!externallyEligible(window)) continue;
@@ -919,33 +907,6 @@ fn focusVerified(identity: u64) bool {
     }
     return true;
 }
-// An application took focus for a window on a hidden workspace, as when a link opens in a browser there.
-// A new window that a rule placed there is not a request. Neither is focus that macOS moves there because the focused
-// window went away, nor focus that comes back to the window that had it last, such as one that a command sent there.
-fn activationRequested(identity: u64, previous: ?u64) bool {
-    if (suspended or focus_history.latest() == identity) return false;
-    const window = windows.items[windowIndex(identity) orelse return false];
-    const slot = displayIndex(window.display) orelse return false;
-    if (!externallyEligible(window) or window.workspace == displays.items[slot].workspace) return false;
-    const now = native.platform_monotonic();
-    if (now - window.discovered < 1.0) return false;
-    if (previous) |holder| return focusable(holder);
-    return now - focus_lost > 1.0;
-}
-// Like Hyprland's `focus_on_activate`: follows the request to the window's workspace, or marks the window urgent and
-// asks for focus to return to the window that had it. Returns whether it asked. Activation of another application
-// completes later, so the next observation records the returned focus.
-fn settleActivation(identity: u64, previous: ?u64) bool {
-    const window = &windows.items[windowIndex(identity).?];
-    window.urgent = true;
-    const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .title_complete = window.observation.title_complete });
-    if (decision.focus_on_activate orelse config.focus_on_activate) {
-        _ = jumpToWindow(identity, activeDisplay());
-        return false;
-    }
-    const holder = windows.items[windowIndex(previous orelse return false) orelse return false];
-    return visible(holder) and !holder.parked and native.platform_focus(holder.identity);
-}
 // Records a native focus change. A command leaves an activation request to the next tick, and so does a tick during a
 // workspace transition. A tick reads focus from the last scan, and a scan of one application leaves the focus of the
 // others as it was, so a tick confirms a request against live focus.
@@ -956,16 +917,41 @@ fn observeFocus(observed: ?u64, settle: bool) void {
     };
     if (observed == last_observed_focus) return;
     const previous = last_observed_focus;
-    const requested = if (observed) |identity| activationRequested(identity, previous) and (!settle or native.platform_focused_window() == identity) else false;
+    // A request is focus that an application took for a window on a hidden workspace, as when a link opens in a browser there.
+    // A new window that a rule placed there is not a request. Neither is focus that macOS moves there because the focused
+    // window went away, nor focus that comes back to the window that had it last, such as one that a command sent there.
+    const requested = if (observed) |identity| requested: {
+        if (suspended or focus_history.latest() == identity) break :requested false;
+        const window = windows.items[windowIndex(identity) orelse break :requested false];
+        const slot = displayIndex(window.display) orelse break :requested false;
+        if (!externallyEligible(window) or window.workspace == displays.items[slot].workspace) break :requested false;
+        const now = native.platform_monotonic();
+        if (now - window.discovered < 1.0) break :requested false;
+        const asked = if (previous) |holder| focusable(holder) else now - focus_lost > 1.0;
+        break :requested asked and (!settle or native.platform_focused_window() == identity);
+    } else false;
     if (requested and (!settle or transition != null)) return;
     if (previous) |holder| if (!focusable(holder)) {
         focus_lost = native.platform_monotonic();
     };
     last_observed_focus = observed;
     const identity = observed orelse return;
-    if (requested and settleActivation(identity, previous)) {
-        focused = previous;
-        return;
+    // Like Hyprland's `focus_on_activate`: follows the request to the window's workspace, or marks the window urgent and
+    // asks for focus to return to the window that had it. Activation of another application completes later, so the
+    // next observation records the returned focus.
+    if (requested) {
+        const taker = &windows.items[windowIndex(identity).?];
+        taker.urgent = true;
+        const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&taker.observation.bundle), .title = text(&taker.observation.title), .title_complete = taker.observation.title_complete });
+        if (decision.focus_on_activate orelse config.focus_on_activate) {
+            _ = jumpToWindow(identity, activeDisplay());
+        } else if (previous) |holder_identity| if (windowIndex(holder_identity)) |holder_index| {
+            const holder = windows.items[holder_index];
+            if (visible(holder) and !holder.parked and native.platform_focus(holder.identity)) {
+                focused = previous;
+                return;
+            }
+        };
     }
     const window = windows.items[windowIndex(identity) orelse return];
     rememberFocus(identity);
@@ -986,26 +972,6 @@ fn boundedFloating(frame: Rect, area: Rect) Rect {
     bounded.left = std.math.clamp(frame.left, area.left, area.left + area.width - bounded.width);
     bounded.top = std.math.clamp(frame.top, area.top, area.top + area.height - bounded.height);
     return bounded;
-}
-// Shifts a frame down and right by the same distance until its top-left corner is clear of every other floating window on the workspace,
-// so windows floated at the same frame all stay visible. At the area's edge the cascade restarts from the top left.
-fn cascadedFloating(source: Window, frame: Rect, area: Rect) Rect {
-    var cascaded = boundedFloating(frame, area);
-    const step = 32;
-    var attempts: usize = 0;
-    while (attempts < windows.items.len) : (attempts += 1) {
-        const taken = for (windows.items) |other| {
-            if (other.identity != source.identity and other.floating and !other.parked and other.display == source.display and other.workspace == source.workspace and visible(other) and @abs(other.floating_frame.left - cascaded.left) < step / 2 and @abs(other.floating_frame.top - cascaded.top) < step / 2) break true;
-        } else false;
-        if (!taken) break;
-        cascaded.left += step;
-        cascaded.top += step;
-        if (cascaded.left + cascaded.width > area.left + area.width or cascaded.top + cascaded.height > area.top + area.height) {
-            cascaded.left = area.left;
-            cascaded.top = area.top;
-        }
-    }
-    return cascaded;
 }
 fn floatRejectedTile(window: *Window) void {
     if (managedFullscreen(window.*)) {
@@ -1143,32 +1109,28 @@ fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome
     return outcome;
 }
 fn parkWindow(window: *Window) PlacementOutcome {
-    var actual: Rect = undefined;
-    if (!native.platform_read_frame(window.identity, &actual)) {
-        reportPlacementOutcome(window, .unreadable);
-        return .unreadable;
-    }
-    const slot = displayIndex(window.display) orelse {
-        reportPlacementOutcome(window, .no_corner);
-        return .no_corner;
+    const outcome: PlacementOutcome = outcome: {
+        var actual: Rect = undefined;
+        if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
+        const area = displays.items[displayIndex(window.display) orelse break :outcome .no_corner].frame;
+        var right = if (window.parked) window.parking_frame else actual;
+        right.top = area.top + area.height - 1;
+        right.left = area.left + area.width - 1;
+        var left = right;
+        left.left = area.left + 1 - right.width;
+        const candidates = [2]Rect{ right, left };
+        if (window.parked) for (candidates) |candidate| if (parkedFrameAccepted(actual, candidate, window.display)) {
+            window.placement_error = null;
+            return .applied;
+        };
+        var attempted: PlacementOutcome = .no_corner;
+        for (candidates) |candidate| {
+            if (overlapsOtherDisplays(candidate, window.display)) continue;
+            attempted = attemptVisibility(window, candidate, true);
+            if (attempted != .rolled_back) break;
+        }
+        break :outcome attempted;
     };
-    const area = displays.items[slot].frame;
-    var right = if (window.parked) window.parking_frame else actual;
-    right.top = area.top + area.height - 1;
-    right.left = area.left + area.width - 1;
-    var left = right;
-    left.left = area.left + 1 - right.width;
-    const candidates = [2]Rect{ right, left };
-    if (window.parked) for (candidates) |candidate| if (parkedFrameAccepted(actual, candidate, window.display)) {
-        window.placement_error = null;
-        return .applied;
-    };
-    var outcome: PlacementOutcome = .no_corner;
-    for (candidates) |candidate| {
-        if (overlapsOtherDisplays(candidate, window.display)) continue;
-        outcome = attemptVisibility(window, candidate, true);
-        if (outcome != .rolled_back) break;
-    }
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
@@ -1316,14 +1278,14 @@ export fn wm_tick() void {
         session_loaded = true;
         if (!config.session.enabled) break :load;
         var loaded = session.load(allocator, sessionScope());
-        defer loaded.deinit();
+        defer if (loaded.parsed) |*parsed| parsed.deinit();
         session_status.load = switch (loaded.diagnostic) {
             .none => .none,
             .ready => .pending,
             .rejected => .rejected,
         };
         if (loaded.rejection) |rejection| sessionError(@tagName(rejection));
-        const checkpoint = loaded.snapshot() orelse break :load;
+        const checkpoint = if (loaded.parsed) |*parsed| &parsed.value else break :load;
         const current = sessionWindows() catch |err| {
             sessionError(@errorName(err));
             session_status.load = .failed;
@@ -1918,13 +1880,30 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
                         const width = area.width * config.floating_size.width;
                         const height = area.height * config.floating_size.height;
-                        source.floating = true;
-                        source.floating_frame = cascadedFloating(source.*, source.last_floating_frame orelse .{
+                        var frame = boundedFloating(source.last_floating_frame orelse .{
                             .left = area.left + (area.width - width) / 2,
                             .top = area.top + (area.height - height) / 2,
                             .width = width,
                             .height = height,
                         }, area);
+                        // Shifts the frame down and right by the same distance until its top-left corner is clear of every other floating window
+                        // on the workspace, so windows floated at the same frame all stay visible. At the area's edge the cascade restarts from the top left.
+                        const step = 32;
+                        var attempts: usize = 0;
+                        while (attempts < windows.items.len) : (attempts += 1) {
+                            const taken = for (windows.items) |other| {
+                                if (other.identity != source.identity and other.floating and !other.parked and other.display == source.display and other.workspace == source.workspace and visible(other) and @abs(other.floating_frame.left - frame.left) < step / 2 and @abs(other.floating_frame.top - frame.top) < step / 2) break true;
+                            } else false;
+                            if (!taken) break;
+                            frame.left += step;
+                            frame.top += step;
+                            if (frame.left + frame.width > area.left + area.width or frame.top + frame.height > area.top + area.height) {
+                                frame.left = area.left;
+                                frame.top = area.top;
+                            }
+                        }
+                        source.floating = true;
+                        source.floating_frame = frame;
                     }
                 },
                 .send_to_workspace => |selection| {

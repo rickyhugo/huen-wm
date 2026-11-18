@@ -110,16 +110,6 @@ pub const Loaded = struct {
     diagnostic: Diagnostic,
     rejection: ?Rejection = null,
     parsed: ?std.json.Parsed(Snapshot) = null,
-
-    pub fn snapshot(self: *const Loaded) ?*const Snapshot {
-        if (self.parsed) |*parsed| return &parsed.value;
-        return null;
-    }
-
-    pub fn deinit(self: *Loaded) void {
-        if (self.parsed) |*parsed| parsed.deinit();
-        self.* = .{ .diagnostic = .none };
-    }
 };
 
 pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
