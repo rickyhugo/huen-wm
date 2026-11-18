@@ -21,8 +21,11 @@ const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [1
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
 var layouts: tiling.Store = .{};
-var windows: std.ArrayList(Window) = .empty;
-var displays: std.ArrayList(Display) = .empty;
+// The native layer reports at most 1024 windows, and wm_tick reads at most monitor.capacity displays, so neither list allocates.
+var window_buffer: [1024]Window = undefined;
+var windows: std.ArrayList(Window) = .initBuffer(&window_buffer);
+var display_buffer: [monitor.capacity]Display = undefined;
+var displays: std.ArrayList(Display) = .initBuffer(&display_buffer);
 var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var active_mode: usize = 0;
@@ -1193,25 +1196,22 @@ export fn wm_tick() void {
     defer publishPointer();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
-    var updated: std.ArrayList(Display) = .empty;
+    var updated: [monitor.capacity]Display = undefined;
     var topology_changed = displayCount != displays.items.len;
     for (&placements, 0..) |*placement, workspace| if (placement.display) |identity| if (displayIndex(identity)) |index| {
         placement.shown = displays.items[index].workspace == workspace;
     };
-    for (observedDisplays[0..displayCount]) |observation| {
+    for (observedDisplays[0..displayCount], updated[0..displayCount]) |observation, *display| {
         const previous: ?Display = if (displayIndex(observation.identity)) |index| displays.items[index] else null;
         if (previous == null or !std.meta.eql(previous.?.full_bounds, observation.full_bounds) or !std.meta.eql(previous.?.frame, observation.frame) or previous.?.built_in != observation.built_in) topology_changed = true;
-        updated.append(allocator, .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |display| display.workspace else 0, .previous_workspace = if (previous) |display| display.previous_workspace else null }) catch {
-            updated.deinit(allocator);
-            return;
-        };
+        display.* = .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |known| known.workspace else 0, .previous_workspace = if (previous) |known| known.previous_workspace else null };
     }
     if (topology_changed) {
         generation += 1;
         cancelTransition();
     }
-    displays.deinit(allocator);
-    displays = updated;
+    displays.clearRetainingCapacity();
+    displays.appendSliceAssumeCapacity(updated[0..displayCount]);
     if (displays.items.len == 0) return;
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
@@ -1226,42 +1226,42 @@ export fn wm_tick() void {
                     if (framesNear(observation.frame, window.floating_frame, 2)) window.floating_restore = false;
                 } else window.floating_frame = observation.frame;
             }
-        } else {
-            if (windows.items.len == 1024) continue;
-            var best: f64 = std.math.inf(f64);
-            var displaySlot: usize = 0;
-            for (displays.items, 0..) |candidate, slot| {
-                const horizontal = observation.frame.left + observation.frame.width / 2 - candidate.frame.left - candidate.frame.width / 2;
-                const vertical = observation.frame.top + observation.frame.height / 2 - candidate.frame.top - candidate.frame.height / 2;
-                const distance = horizontal * horizontal + vertical * vertical;
-                if (distance < best) {
-                    best = distance;
-                    displaySlot = slot;
-                }
-            }
-            const display = displays.items[displaySlot].identity;
-            // With global routing, a window on an empty display joins the current workspace.
-            const joined = placedWorkspace(displays.items[displaySlot]) orelse currentWorkspace(displaySlot);
-            var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
-            const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
-            window.floating = decision.floating orelse false;
-            if (decision.workspace) |workspace| window.workspace = workspace;
-            if (window.floating and (decision.geometry != null or decision.centered)) {
-                const destination = resolvePlacements()[window.workspace] orelse display;
-                const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
-                var frame = observation.frame;
-                if (decision.geometry) |geometry| frame = .{ .left = area.left + geometry.left, .top = area.top + geometry.top, .width = geometry.width, .height = geometry.height };
-                // A centered window keeps its size, so an application with a fixed window size still accepts the placement.
-                if (decision.centered) {
-                    frame.left = area.left + (area.width - frame.width) / 2;
-                    frame.top = area.top + (area.height - frame.height) / 2;
-                }
-                window.floating_frame = boundedFloating(frame, area);
-                window.floating_restore = true;
-            }
-            window.discovered = native.platform_monotonic();
-            windows.append(allocator, window) catch return;
+            continue;
         }
+        if (windows.items.len == 1024) continue;
+        var best: f64 = std.math.inf(f64);
+        var displaySlot: usize = 0;
+        for (displays.items, 0..) |candidate, slot| {
+            const horizontal = observation.frame.left + observation.frame.width / 2 - candidate.frame.left - candidate.frame.width / 2;
+            const vertical = observation.frame.top + observation.frame.height / 2 - candidate.frame.top - candidate.frame.height / 2;
+            const distance = horizontal * horizontal + vertical * vertical;
+            if (distance < best) {
+                best = distance;
+                displaySlot = slot;
+            }
+        }
+        const display = displays.items[displaySlot].identity;
+        // With global routing, a window on an empty display joins the current workspace.
+        const joined = placedWorkspace(displays.items[displaySlot]) orelse currentWorkspace(displaySlot);
+        var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
+        const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
+        window.floating = decision.floating orelse false;
+        if (decision.workspace) |workspace| window.workspace = workspace;
+        if (window.floating and (decision.geometry != null or decision.centered)) {
+            const destination = resolvePlacements()[window.workspace] orelse display;
+            const area = inset(displays.items[displayIndex(destination).?].frame, config.gap);
+            var frame = observation.frame;
+            if (decision.geometry) |geometry| frame = .{ .left = area.left + geometry.left, .top = area.top + geometry.top, .width = geometry.width, .height = geometry.height };
+            // A centered window keeps its size, so an application with a fixed window size still accepts the placement.
+            if (decision.centered) {
+                frame.left = area.left + (area.width - frame.width) / 2;
+                frame.top = area.top + (area.height - frame.height) / 2;
+            }
+            window.floating_frame = boundedFloating(frame, area);
+            window.floating_restore = true;
+        }
+        window.discovered = native.platform_monotonic();
+        windows.appendAssumeCapacity(window);
     }
     var index: usize = 0;
     while (index < windows.items.len) {
@@ -1634,45 +1634,44 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
         },
         .exec_and_forget => |shell| {
             if (suspended) return failure("RuntimeSuspendedRestartToResume");
-            const terminated = allocator.dupeSentinel(u8, shell, 0) catch return failure("OutOfMemory");
-            defer allocator.free(terminated);
-            if (!native.platform_exec(terminated)) return failure("ProcessLaunchFailed");
+            var terminated: [512:0]u8 = @splat(0);
+            @memcpy(terminated[0..shell.len], shell);
+            if (!native.platform_exec(&terminated)) return failure("ProcessLaunchFailed");
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
             const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
-            var items: std.ArrayList(Item) = .empty;
-            defer items.deinit(allocator);
-            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group }) catch return failure("OutOfMemory");
-            return json(items.items);
+            var items: [1024]Item = undefined;
+            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group };
+            return json(items[0..windows.items.len]);
         },
         .monitors => {
             const Item = struct { id: u32, uuid: ?[]const u8, name: []const u8, frame: Rect, full_bounds: Rect, built_in: bool, workspace: ?usize, selected: bool, blocked_by_fullscreen: bool };
-            var items: std.ArrayList(Item) = .empty;
-            defer items.deinit(allocator);
+            var items: [monitor.capacity]Item = undefined;
             var uuids: [monitor.capacity][64]u8 = undefined;
-            const count = @min(displays.items.len, uuids.len);
-            for (displays.items[0..count], uuids[0..count]) |*display, *uuid| {
+            const count = displays.items.len;
+            for (displays.items, uuids[0..count], items[0..count]) |*display, *uuid, *item| {
                 uuid.* = @splat(0);
                 const known = session.huen_session_display_uuid(display.identity, uuid, uuid.len);
                 const placed = placedWorkspace(display.*);
-                items.append(allocator, .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = selected_display == display.identity, .blocked_by_fullscreen = displayBlocked(display.identity) }) catch return failure("OutOfMemory");
+                item.* = .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = selected_display == display.identity, .blocked_by_fullscreen = displayBlocked(display.identity) };
             }
-            return json(items.items);
+            return json(items[0..count]);
         },
         .workspaces => {
             const Item = struct { display: u32, index: usize, name: []const u8, active: bool, urgent: bool, layout: Layout };
-            var items: std.ArrayList(Item) = .empty;
-            defer items.deinit(allocator);
+            var items: [monitor.capacity * 10]Item = undefined;
+            var count: usize = 0;
             for (displays.items) |display| for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
                 if (config.workspace_monitors != null and placements[index].display != display.identity) continue;
                 const layout = if (layouts.lookup(display.identity, index)) |state| state.layout else workspace.layout;
                 const urgent = for (windows.items) |window| {
                     if (window.urgent and window.display == display.identity and window.workspace == index) break true;
                 } else false;
-                items.append(allocator, .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .urgent = urgent, .layout = layout }) catch return failure("OutOfMemory");
+                items[count] = .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .urgent = urgent, .layout = layout };
+                count += 1;
             };
-            return json(items.items);
+            return json(items[0..count]);
         },
         .reload => {
             if (transition != null) return failure("WorkspaceTransitionPending");
@@ -1906,23 +1905,19 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         source.floating_frame = frame;
                     }
                 },
-                .send_to_workspace => |selection| {
+                .send_to_workspace, .move_to_workspace => |selection| {
                     const resolved = resolvePlacements();
                     const workspace = resolveWorkspace(selection, selectionSlot(sourceIndex, displaySlot)) catch |err| return failure(@errorName(err));
                     const destination = resolved[workspace] orelse source.display;
                     if (workspace == source.workspace and destination == source.display) return json(.{ .ok = true, .changed = false });
-                    if (!route(resolved, &.{}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
-                    if (!visible(source.*)) focused = null;
-                    native.platform_config_changed();
-                    return json(.{ .ok = true });
-                },
-                .move_to_workspace => |selection| {
-                    const resolved = resolvePlacements();
-                    const workspace = resolveWorkspace(selection, selectionSlot(sourceIndex, displaySlot)) catch |err| return failure(@errorName(err));
-                    const destination = resolved[workspace] orelse source.display;
+                    if (command == .send_to_workspace) {
+                        if (!route(resolved, &.{}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
+                        if (!visible(source.*)) focused = null;
+                        native.platform_config_changed();
+                        return json(.{ .ok = true });
+                    }
                     const destination_slot = displayIndex(destination).?;
                     const from = currentWorkspace(if (config.workspace_monitors != null) displaySlot else destination_slot);
-                    if (workspace == source.workspace and destination == source.display) return json(.{ .ok = true, .changed = false });
                     const identity = source.identity;
                     generation += 1;
                     snapshot_presentation = .instant;
