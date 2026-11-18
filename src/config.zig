@@ -34,6 +34,7 @@ pub const ConfigCandidate = struct {
     workspace_monitors: ?MonitorPreferences = null,
     mouse_follows_monitor: bool = false,
     workspace_back_and_forth: bool = false,
+    focus_on_activate: bool = false,
     status_bar: StatusBar = .{},
     session: Session = .{},
     mouse: Mouse = .{},
@@ -141,7 +142,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .floating_size = wire.floating_size, .border_single_window = wire.border_single_window };
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .focus_on_activate = wire.focus_on_activate, .floating_size = wire.floating_size, .border_single_window = wire.border_single_window };
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -175,6 +176,7 @@ fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callconv(.c
         candidate.rules[index].workspace = rule.workspace;
         candidate.rules[index].geometry = rule.geometry;
         candidate.rules[index].centered = rule.centered;
+        candidate.rules[index].focus_on_activate = rule.focus_on_activate;
         if (rule.title) |title| {
             candidate.rules[index].title = .{ .kind = title.kind };
             try copyText(&candidate.rules[index].title.?.pattern, title.pattern);
@@ -188,11 +190,12 @@ const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, mon
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
-const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry, centered: bool };
+const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry, centered: bool, focus_on_activate: ?bool };
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
     workspace_back_and_forth: bool,
+    focus_on_activate: bool,
     status_bar: StatusBar,
     session: Session,
     mouse: Mouse,
@@ -447,7 +450,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "session", "mouse", "floating_size" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "focus_on_activate", "session", "mouse", "floating_size" });
     if (rawField(state, "session") != native.LUA_TNIL) {
         try checkKeys(state, &.{"enabled"});
         result.session.enabled = try fieldBool(state, "enabled", false);
@@ -470,6 +473,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     pop(state);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
     result.workspace_back_and_forth = try fieldBool(state, "workspace_back_and_forth", false);
+    result.focus_on_activate = try fieldBool(state, "focus_on_activate", false);
     result.border_single_window = try fieldBool(state, "border_single_window", true);
     if (rawField(state, "workspace_monitors") != native.LUA_TNIL) {
         const count = try arrayCount(state, 2);
@@ -557,7 +561,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         result.rule_count = try arrayCount(state, 64);
         for (0..result.rule_count) |index| {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
-            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry", "centered" });
+            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry", "centered", "focus_on_activate" });
             const rule = &result.rules[index];
             if (rawField(state, "bundle") == native.LUA_TTABLE) {
                 const pattern = try patternField(state);
@@ -596,6 +600,11 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
                 if (rule.floating == false) return error.CenteredRequiresFloating;
                 rule.floating = true;
             }
+            if (rawField(state, "focus_on_activate") != native.LUA_TNIL) {
+                if (native.lua_type(state, -1) != native.LUA_TBOOLEAN) return error.ExpectedBoolean;
+                rule.focus_on_activate = native.lua_toboolean(state, -1) != 0;
+            }
+            pop(state);
             const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
             if (@floor(workspace) != workspace) return error.InvalidWorkspace;
             if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
@@ -630,6 +639,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .workspace = rule.workspace,
         .geometry = rule.geometry,
         .centered = rule.centered,
+        .focus_on_activate = rule.focus_on_activate,
     };
     const buffer = try allocator.alloc(u8, max_response);
     defer allocator.free(buffer);
@@ -638,6 +648,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .workspace_monitors = if (result.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
         .mouse_follows_monitor = result.mouse_follows_monitor,
         .workspace_back_and_forth = result.workspace_back_and_forth,
+        .focus_on_activate = result.focus_on_activate,
         .status_bar = result.status_bar,
         .session = result.session,
         .mouse = result.mouse,

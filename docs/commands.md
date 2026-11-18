@@ -135,6 +135,29 @@ Without a candidate, `focus last` returns `NoPreviousWindow`.
 With `workspace_monitors`, the target's workspace is shown on its display, and that display is selected.
 A target that routing has not moved yet is routed first.
 
+### Activation requests
+
+An application can take focus for a window on a hidden workspace, as when a link opens in a browser there.
+This is an activation request.
+By default, the workspace does not change.
+The window becomes urgent, and focus returns to the window that had it if that window is visible.
+Set `focus_on_activate = true` to show the window's workspace and keep focus on the window instead.
+A window rule's `focus_on_activate` overrides the setting for its windows.
+macOS does not report why an application became active, so Command+Tab and a Dock click are also requests.
+
+These focus changes are not requests:
+
+- A window that was discovered less than one second ago, such as a new window that a rule sent to a hidden workspace.
+- Focus that macOS moves after the focused window closed, minimized, or hid.
+- Focus that returns to the window that had it last, such as a window that `send-to-workspace` sent to a hidden workspace.
+
+An urgent window stays urgent until it has focus on a visible workspace.
+`windows` and `workspaces` report `urgent`.
+The menu marks a workspace that holds an urgent window with a dot, and the menu-bar title shows a dot while any workspace does.
+
+`focus urgent` focuses an urgent window in the same way as `focus last` focuses its target.
+Without an urgent window, it behaves as `focus last`.
+
 `cycle next` and `cycle previous` focus through the active display's visible windows.
 `cycle next tiled` and `cycle next floating` restrict the candidates to one kind.
 Tiled windows come before floating windows.
@@ -302,7 +325,7 @@ Verbs reject extra arguments.
 | `reload`, `quit`, `stop`, `restore`, `recover` | None. |
 | `swap` | One direction, `next`, or `previous`. |
 | `move` | One direction. |
-| `focus` | `last`, or an optional `--wrap` and one direction. |
+| `focus` | `last`, `urgent`, or an optional `--wrap` and one direction. |
 | `focus-monitor`, `send-to-monitor`, `move-to-monitor` | One monitor selector. |
 | `move-workspace-to-monitor`, `swap-monitor-workspaces` | One monitor selector. Need `workspace_monitors`. |
 | `cycle` | `next` or `previous`, then optionally `tiled` or `floating`. |

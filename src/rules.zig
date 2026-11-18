@@ -15,6 +15,7 @@ pub const Rule = struct {
     workspace: ?usize = null,
     geometry: ?Geometry = null,
     centered: bool = false,
+    focus_on_activate: ?bool = null,
 };
 pub const Facts = struct { bundle: []const u8, title: []const u8, title_complete: bool = true };
 pub const Decision = struct {
@@ -22,6 +23,7 @@ pub const Decision = struct {
     workspace: ?usize = null,
     geometry: ?Geometry = null,
     centered: bool = false,
+    focus_on_activate: ?bool = null,
 };
 
 pub fn resolve(rules: []const Rule, facts: Facts) Decision {
@@ -39,6 +41,7 @@ pub fn resolve(rules: []const Rule, facts: Facts) Decision {
             decision.centered = true;
             decision.floating = true;
         }
+        if (rule.focus_on_activate) |follow| decision.focus_on_activate = follow;
     }
     return decision;
 }

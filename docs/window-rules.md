@@ -43,8 +43,8 @@ Native discovery copies at most 511 UTF-8 bytes and reports whether the entire
 title fits. Truncated, unencodable, or NUL-containing titles never satisfy a title predicate.
 Bundle-only rules still match.
 
-Actions are optional `floating`, `workspace`, `geometry`, and `centered`. Workspace numbers
-are one-based in Lua. Geometry requires all four finite point values.
+Actions are optional `floating`, `workspace`, `geometry`, `centered`, and
+`focus_on_activate`. Workspace numbers are one-based in Lua. Geometry requires all four finite point values.
 `left` and `top` range from -10000 to 10000. `width` and `height` range from
 80 to 10000. Geometry implies `floating = true`; combining it with explicit
 `floating = false` in the same rule is invalid.
@@ -63,6 +63,12 @@ Position is clamped so the entire window fits inside that area.
 applications with a fixed window size. With geometry, the geometry supplies the
 size and `centered` replaces its position. Combining it with explicit
 `floating = false` in the same rule is invalid.
+
+`focus_on_activate` accepts a boolean and replaces the global
+`focus_on_activate` setting for the window. It applies when an application
+takes focus for the window on a hidden workspace, not on discovery, and uses
+the title at that time. See
+[activation requests](commands.md#activation-requests).
 
 Each matching rule replaces only its supplied actions. Geometry also supplies
 `floating = true`. A later explicit `floating = false` overrides that decision

@@ -16,7 +16,7 @@ const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -31,6 +31,8 @@ var pending_close: ?PendingClose = null;
 var close_state: enum { idle, pending, closed, termination_requested, termination_rejected, expired, cancelled } = .idle;
 var selected_display: ?u32 = null;
 var last_observed_focus: ?u64 = null;
+// When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
+var focus_lost: f64 = -std.math.inf(f64);
 // `shown` caches whether the workspace was active on its display at the start of the tick, so a
 // workspace on a display that just vanished keeps that fact until routing moves it. `shown_when_lost`
 // keeps it while the workspace waits on a fallback display, so a reconnect shows it again.
@@ -338,7 +340,18 @@ fn publishStatus() void {
             .index => index_text,
             .index_and_name => if (std.mem.eql(u8, name, index_text)) name else std.fmt.bufPrint(&label_buffer, "{s}  {s}", .{ index_text, name }) catch unreachable,
         };
+        // A dot marks a workspace that holds an urgent window, and the title while any workspace does.
+        var urgent: [10]bool = @splat(false);
+        var alert = false;
+        for (windows.items) |window| if (window.urgent) {
+            urgent[window.workspace] = true;
+            alert = true;
+        };
         statusText(&presentation.title, if (active_mode != 0 and !suspended) text(&config.modes[active_mode].name) else label, 24);
+        if (alert) {
+            const mark = " •";
+            @memcpy(presentation.title[text(&presentation.title).len..][0..mark.len], mark);
+        }
         var tooltip_buffer: [512]u8 = undefined;
         const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s} · Mode {s}{s}", .{
             if (display) |current| text(&current.name) else "No display",
@@ -349,11 +362,12 @@ fn publishStatus() void {
         statusText(&presentation.tooltip, tooltip, 255);
         for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
             const row = &presentation.rows[index];
-            var row_buffer: [80]u8 = undefined;
+            var row_buffer: [96]u8 = undefined;
             var number_buffer: [8]u8 = undefined;
             const number = std.fmt.bufPrint(&number_buffer, "{d}", .{index + 1}) catch unreachable;
             const workspace_name = text(&workspace.name);
-            const title = if (std.mem.eql(u8, number, workspace_name)) workspace_name else std.fmt.bufPrint(&row_buffer, "{s}  {s}", .{ number, workspace_name }) catch unreachable;
+            const mark = if (urgent[index]) " •" else "";
+            const title = if (std.mem.eql(u8, number, workspace_name)) std.fmt.bufPrint(&row_buffer, "{s}{s}", .{ workspace_name, mark }) catch unreachable else std.fmt.bufPrint(&row_buffer, "{s}  {s}{s}", .{ number, workspace_name, mark }) catch unreachable;
             statusText(&row.title, title, 79);
             const command = std.fmt.bufPrint(&row.command, "workspace {d}", .{index + 1}) catch unreachable;
             row.command[command.len] = 0;
@@ -909,8 +923,63 @@ fn focusVerified(identity: u64) bool {
     focused = identity;
     last_observed_focus = identity;
     rememberFocus(identity);
-    if (windowIndex(identity)) |index| selectDisplay(windows.items[index].display);
+    if (windowIndex(identity)) |index| {
+        windows.items[index].urgent = false;
+        selectDisplay(windows.items[index].display);
+    }
     return true;
+}
+// An application took focus for a window on a hidden workspace, as when a link opens in a browser there.
+// A new window that a rule placed there is not a request. Neither is focus that macOS moves there because the focused
+// window went away, nor focus that comes back to the window that had it last, such as one that a command sent there.
+fn activationRequested(identity: u64, previous: ?u64) bool {
+    if (suspended or focus_history.latest() == identity) return false;
+    const window = windows.items[windowIndex(identity) orelse return false];
+    const slot = displayIndex(window.display) orelse return false;
+    if (!externallyEligible(window) or window.workspace == displays.items[slot].workspace) return false;
+    const now = native.platform_monotonic();
+    if (now - window.discovered < 1.0) return false;
+    if (previous) |holder| return focusable(holder);
+    return now - focus_lost > 1.0;
+}
+// Like Hyprland's `focus_on_activate`: follows the request to the window's workspace, or marks the window urgent and
+// asks for focus to return to the window that had it. Returns whether it asked. Activation of another application
+// completes later, so the next observation records the returned focus.
+fn settleActivation(identity: u64, previous: ?u64) bool {
+    const window = &windows.items[windowIndex(identity).?];
+    window.urgent = true;
+    const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .title_complete = window.observation.title_complete });
+    if (decision.focus_on_activate orelse config.focus_on_activate) {
+        _ = jumpToWindow(identity, activeDisplay());
+        return false;
+    }
+    const holder = windows.items[windowIndex(previous orelse return false) orelse return false];
+    return visible(holder) and !holder.parked and native.platform_focus(holder.identity);
+}
+// Records a native focus change. A command leaves an activation request to the next tick, and so does a tick during a
+// workspace transition. A tick reads focus from the last scan, and a scan of one application leaves the focus of the
+// others as it was, so a tick confirms a request against live focus.
+fn observeFocus(observed: ?u64, settle: bool) void {
+    focused = observed;
+    if (observed) |identity| if (windowIndex(identity)) |slot| if (visible(windows.items[slot])) {
+        windows.items[slot].urgent = false;
+    };
+    if (observed == last_observed_focus) return;
+    const previous = last_observed_focus;
+    const requested = if (observed) |identity| activationRequested(identity, previous) and (!settle or native.platform_focused_window() == identity) else false;
+    if (requested and (!settle or transition != null)) return;
+    if (previous) |holder| if (!focusable(holder)) {
+        focus_lost = native.platform_monotonic();
+    };
+    last_observed_focus = observed;
+    const identity = observed orelse return;
+    if (requested and settleActivation(identity, previous)) {
+        focused = previous;
+        return;
+    }
+    const window = windows.items[windowIndex(identity) orelse return];
+    rememberFocus(identity);
+    if (displayIndex(window.display) != null) selectDisplay(window.display);
 }
 fn displayBlocked(identity: u32) bool {
     for (windows.items) |window| if (window.display == identity and window.observation.fullscreen) return true;
@@ -1305,14 +1374,7 @@ export fn wm_tick() void {
         session_focus_pending = imported.matched > 0;
     }
     if (!suspended and transition == null) routing_blocked = !routeMembership();
-    focused = observed_focus;
-    if (observed_focus != last_observed_focus) {
-        if (observed_focus) |identity| if (windowIndex(identity)) |slot| {
-            rememberFocus(identity);
-            if (displayIndex(windows.items[slot].display) != null) selectDisplay(windows.items[slot].display);
-        };
-        last_observed_focus = observed_focus;
-    }
+    observeFocus(observed_focus, true);
     if (focused) |identity| if (windowIndex(identity) == null) {
         focused = null;
     };
@@ -1527,6 +1589,15 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
     if (verified) recordPrevious(destination_slot, from, workspace);
     return json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
+// Shows the window's workspace if it is hidden, and focuses the window.
+fn jumpToWindow(identity: u64, display_slot: usize) [*:0]const u8 {
+    const window = windows.items[windowIndex(identity).?];
+    if (config.workspace_monitors != null) return showWorkspace(window.workspace, currentWorkspace(display_slot), identity);
+    const slot = displayIndex(window.display).?;
+    if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, displays.items[slot].workspace, identity);
+    focusWorkspace(window.display, identity);
+    return json(.{ .ok = true, .verified = focused == identity, .target = identity });
+}
 // Global mode: sets each moved workspace's runtime home to its destination display and shows it
 // there. A display in `vacated` that loses its shown workspace shows the global previous workspace
 // if it is placed there, else its lowest placed workspace, else nothing. Selects `follow`.
@@ -1623,10 +1694,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
-            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group }) catch return failure("OutOfMemory");
+            for (windows.items) |*window| items.append(allocator, .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group }) catch return failure("OutOfMemory");
             return json(items.items);
         },
         .monitors => {
@@ -1644,13 +1715,16 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(items.items);
         },
         .workspaces => {
-            const Item = struct { display: u32, index: usize, name: []const u8, active: bool, layout: Layout };
+            const Item = struct { display: u32, index: usize, name: []const u8, active: bool, urgent: bool, layout: Layout };
             var items: std.ArrayList(Item) = .empty;
             defer items.deinit(allocator);
             for (displays.items) |display| for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
                 if (config.workspace_monitors != null and placements[index].display != display.identity) continue;
                 const layout = if (layouts.lookup(display.identity, index)) |state| state.layout else workspace.layout;
-                items.append(allocator, .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .layout = layout }) catch return failure("OutOfMemory");
+                const urgent = for (windows.items) |window| {
+                    if (window.urgent and window.display == display.identity and window.workspace == index) break true;
+                } else false;
+                items.append(allocator, .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .urgent = urgent, .layout = layout }) catch return failure("OutOfMemory");
             };
             return json(items.items);
         },
@@ -1693,14 +1767,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     if (displays.items.len == 0) return failure("NoDisplays");
     refreshObservations();
     const observed_focus = native.platform_focused_window();
-    focused = if (observed_focus != 0) observed_focus else null;
-    if (focused != last_observed_focus) {
-        last_observed_focus = focused;
-        if (focused) |identity| if (windowIndex(identity)) |index| {
-            rememberFocus(identity);
-            if (displayIndex(windows.items[index].display) != null) selectDisplay(windows.items[index].display);
-        };
-    }
+    observeFocus(if (observed_focus != 0) observed_focus else null, false);
     trackCurrentDisplay();
     const displaySlot = activeDisplay();
     const display = &displays.items[displaySlot];
@@ -1734,14 +1801,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return failure("NoWindowToCycle");
             return json(.{ .ok = true, .accepted = true, .verified = focusVerified(target), .target = target });
         },
-        .focus_last => {
-            const identity = focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow");
-            const window = windows.items[windowIndex(identity).?];
-            if (config.workspace_monitors != null) return showWorkspace(window.workspace, currentWorkspace(displaySlot), identity);
-            const slot = displayIndex(window.display).?;
-            if (window.workspace != displays.items[slot].workspace) return switchWorkspace(slot, window.workspace, displays.items[slot].workspace, identity);
-            focusWorkspace(window.display, identity);
-            return json(.{ .ok = true, .verified = focused == identity, .target = identity });
+        .focus_last, .focus_urgent => {
+            const urgent: ?u64 = if (command == .focus_urgent) for (windows.items) |window| {
+                if (window.urgent and focusable(window.identity)) break window.identity;
+            } else null else null;
+            return jumpToWindow(urgent orelse focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow"), displaySlot);
         },
         .layout => |layout| {
             if (placedWorkspace(display.*) == null) return failure("NoWorkspaceOnMonitor");

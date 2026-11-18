@@ -33,6 +33,7 @@ The preset has 37 main bindings and six resize-mode bindings.
 Ten workspaces remain configured even when empty. Slack routes to workspace 3.
 All workspaces prefer one external monitor, with the built-in display as fallback.
 Monitor selection moves the pointer to the monitor center only when outside it.
+An application that takes focus for a window on a hidden workspace shows that workspace, as in AeroSpace.
 The status bar shows the workspace name. Gaps are 10 points.
 The preset inherits the default 0.12-second motion duration.
 

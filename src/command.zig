@@ -53,6 +53,7 @@ pub const Command = union(enum) {
     restore,
     focus: Focus,
     focus_last,
+    focus_urgent,
     cycle: Cycle,
     mode: Name,
     launch: Launch,
@@ -176,10 +177,10 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         return .{ .launch = .{ .bundle = bundle, .new_instance = new_instance, .hidden = hidden } };
     }
     if (std.mem.eql(u8, verb, "focus")) {
-        if (argument != null and std.mem.eql(u8, argument.?, "last")) {
+        inline for (.{ .{ "last", "focus_last" }, .{ "urgent", "focus_urgent" } }) |target_tag| if (argument != null and std.mem.eql(u8, argument.?, target_tag[0])) {
             if (tokens.next() != null) return error.ExtraArgument;
-            return .focus_last;
-        }
+            return @unionInit(Command, target_tag[1], {});
+        };
         const wrap = argument != null and std.mem.eql(u8, argument.?, "--wrap");
         if (wrap) argument = tokens.next();
         const direction = std.meta.stringToEnum(Direction, argument orelse return error.MissingArgument) orelse return error.InvalidDirection;

@@ -16,6 +16,7 @@ bind("ctrl+alt", "]", "workspace occupied+1")
 bind("ctrl+alt+shift", "[", "move-to-workspace -1")
 bind("ctrl+alt+shift", "]", "move-to-workspace +1")
 bind("ctrl+alt", "tab", "focus last")
+bind("ctrl+alt", "u", "focus urgent")
 bind("ctrl+alt", "c", "center")
 bind("ctrl+alt", "space", "toggle-floating")
 bind("ctrl+alt", "=", "resize 0.05")
@@ -32,6 +33,7 @@ return {
     border_width = 2,
     border_color = "#9BAFFF",
     border_single_window = true,
+    focus_on_activate = false,
     floating_size = { width = 0.5, height = 0.5 },
     motion_duration = 0.12,
     workspaces = { "Build", "Browse", "Write", "Talk", "Quiet" },
