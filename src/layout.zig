@@ -39,11 +39,6 @@ pub const Boundary = struct { node: NodeRef, axis: Axis, rect: Rect, revision: u
 pub const Drop = enum { left, right, up, down, join, swap };
 pub const ResizePreview = struct { boundary: Boundary, ratio: f64, applied_delta: f64 };
 pub const MovePreview = struct { source: NodeRef, target: NodeRef, placement: Drop, rect: Rect, revision: u64 };
-pub const Snapshot = struct {
-    nodes: [2047]Node,
-    roots: [320]?WorkspaceLayout,
-};
-
 pub const Store = struct {
     nodes: [2047]Node = @splat(.{}),
     roots: [320]?WorkspaceLayout = @splat(null),
@@ -912,93 +907,6 @@ pub const Store = struct {
         if (preview.revision != self.revision) return error.StaleGesture;
         _ = try self.pointerDropHandles(state, preview.source, preview.target, preview.placement);
         try self.drop(state, preview.source, preview.target, preview.placement);
-    }
-
-    fn validateNode(snapshot: *const Snapshot, handle: Handle, parent: ?Handle, seen: *[2047]bool) error{InvalidSnapshot}!void {
-        if (handle >= snapshot.nodes.len or seen[handle]) return error.InvalidSnapshot;
-        seen[handle] = true;
-        const node = snapshot.nodes[handle];
-        if (node.parent != parent) return error.InvalidSnapshot;
-        switch (node.content) {
-            .free => return error.InvalidSnapshot,
-            .leaf => {},
-            .branch => |branch| {
-                if (!std.math.isFinite(branch.ratio) or branch.ratio <= 0 or branch.ratio >= 1) return error.InvalidSnapshot;
-                for (branch.children) |child| {
-                    if (child >= snapshot.nodes.len or snapshot.nodes[child].previous != null or snapshot.nodes[child].next != null) return error.InvalidSnapshot;
-                    try validateNode(snapshot, child, handle, seen);
-                }
-            },
-            .group => |container| {
-                if (container.count < 2 or container.count > 1024) return error.InvalidSnapshot;
-                var previous: ?Handle = null;
-                var child: ?Handle = container.first;
-                var count: usize = 0;
-                var selected_found = false;
-                while (child) |current| {
-                    if (current >= snapshot.nodes.len or count >= container.count) return error.InvalidSnapshot;
-                    if (snapshot.nodes[current].previous != previous) return error.InvalidSnapshot;
-                    try validateNode(snapshot, current, handle, seen);
-                    if (current == container.selected) selected_found = true;
-                    previous = current;
-                    child = snapshot.nodes[current].next;
-                    count += 1;
-                }
-                if (count != container.count or previous != container.last or !selected_found) return error.InvalidSnapshot;
-            },
-        }
-        if (node.last_child) |child| {
-            if (child >= snapshot.nodes.len or snapshot.nodes[child].parent != handle) return error.InvalidSnapshot;
-            switch (node.content) {
-                .branch => |branch| if (child != branch.children[0] and child != branch.children[1]) return error.InvalidSnapshot,
-                .group => {},
-                else => return error.InvalidSnapshot,
-            }
-        }
-    }
-
-    pub fn importSnapshot(self: *Store, snapshot: *const Snapshot) !void {
-        var seen: [2047]bool = @splat(false);
-        for (snapshot.roots, 0..) |slot, index| if (slot) |state| {
-            if (state.workspace >= 10 or !std.math.isFinite(state.ratio) or state.ratio <= 0 or state.ratio >= 1) return error.InvalidSnapshot;
-            for (snapshot.roots[0..index]) |earlier| if (earlier) |other| if (state.display == other.display and state.workspace == other.workspace) return error.InvalidSnapshot;
-            if (state.root) |root| {
-                if (root >= snapshot.nodes.len or snapshot.nodes[root].previous != null or snapshot.nodes[root].next != null) return error.InvalidSnapshot;
-                try validateNode(snapshot, root, null, &seen);
-            }
-        };
-        var leaf_count: usize = 0;
-        for (snapshot.nodes, 0..) |node, index| {
-            if ((node.content != .free) != seen[index]) return error.InvalidSnapshot;
-            if (node.content == .leaf) {
-                leaf_count += 1;
-                if (leaf_count > 1024 or node.content.leaf == 0) return error.InvalidSnapshot;
-                for (snapshot.nodes[0..index]) |earlier| if (earlier.content == .leaf and earlier.content.leaf == node.content.leaf) return error.InvalidSnapshot;
-            }
-        }
-        for (snapshot.roots) |slot| if (slot) |state| if (state.selection) |selection| {
-            if (selection.slot >= snapshot.nodes.len or !seen[selection.slot]) return error.InvalidSnapshot;
-            var current = selection.slot;
-            while (snapshot.nodes[current].parent) |parent| current = parent;
-            if (state.root != current) return error.InvalidSnapshot;
-        };
-        self.nodes = snapshot.nodes;
-        self.roots = snapshot.roots;
-        for (&self.nodes) |*node| {
-            if (node.content == .free) continue;
-            self.serial +%= 1;
-            node.generation = self.serial;
-            node.active = false;
-            node.visible = false;
-            node.frame = std.mem.zeroes(Rect);
-            node.minimum = .{ 0, 0 };
-        }
-        for (&self.roots) |*slot| if (slot.*) |*state| {
-            if (state.selection) |selection| state.selection = self.reference(selection.slot);
-            state.projection_gap = 0;
-            state.projected_layout = null;
-        };
-        self.revision +%= 1;
     }
 
     pub fn swap(self: *Store, first: u64, second: u64) void {

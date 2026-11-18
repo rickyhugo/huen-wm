@@ -256,10 +256,11 @@ Native event handling and gesture ownership are outside this module.
 
 ### Checkpoints and native transactions
 
-`importSnapshot(snapshot)` validates the entire candidate before publication.
-It rejects invalid indices, cycles, shared nodes, duplicate identities, unreachable nodes, malformed sibling lists, invalid ratios, and invalid selections.
-The limits are 1024 leaves, 2047 nodes, 320 roots, and workspace indices below ten.
-Successful import regenerates every live node generation and clears cached eligibility and geometry.
+`continuity.restore` builds a restored `Store` from a checkpoint that `session.validate` accepted at load.
+That validator rejects invalid indices, cycles, shared nodes, duplicate leaves, unreachable nodes, invalid group selections, invalid ratios, and invalid selections.
+The limits are 1024 windows, 2047 nodes, and 320 roots.
+`restore` does not check the graph again.
+It gives every node a new generation, and eligibility and geometry start empty.
 The caller then runs `sync` and `arrange`.
 
 Snapshot indices are local logical references, not native pointers or durable window identifiers.

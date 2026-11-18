@@ -185,36 +185,36 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         };
         if (saved_count != 1 or current_count > 1) ambiguous += 1 else if (current_count == 1) mapping[saved_index] = current_index;
     }
-    const logical = try allocator.create(layout.Snapshot);
-    defer allocator.destroy(logical);
-    logical.* = .{ .nodes = @splat(.{}), .roots = @splat(null) };
+    // session.validate accepted the snapshot when it was loaded, so every index below is in range and the nodes form trees.
+    const store = try allocator.create(layout.Store);
+    errdefer allocator.destroy(store);
+    store.* = .{};
     for (snapshot.nodes, 0..) |shape, index| {
-        logical.nodes[index].generation = 1;
+        store.serial +%= 1;
+        store.nodes[index].generation = store.serial;
         switch (shape) {
-            .leaf => |window_index| logical.nodes[index].content = .{ .leaf = if (mapping[window_index]) |current| windows[current].identity else @as(u64, std.math.maxInt(u64)) - window_index },
+            .leaf => |window_index| store.nodes[index].content = .{ .leaf = if (mapping[window_index]) |current| windows[current].identity else @as(u64, std.math.maxInt(u64)) - window_index },
             .split => |split| {
-                logical.nodes[index].content = .{ .branch = .{ .axis = @fromBackingInt(@intCast(@backingInt(split.axis))), .ratio = split.ratio, .children = split.children } };
-                logical.nodes[index].last_child = split.children[split.selected];
-                for (split.children) |child| logical.nodes[child].parent = @intCast(index);
+                store.nodes[index].content = .{ .branch = .{ .axis = @fromBackingInt(@intCast(@backingInt(split.axis))), .ratio = split.ratio, .children = split.children } };
+                store.nodes[index].last_child = split.children[split.selected];
+                for (split.children) |child| store.nodes[child].parent = @intCast(index);
             },
             .group => |group| {
-                logical.nodes[index].content = .{ .group = .{ .mode = @fromBackingInt(@intCast(@backingInt(group.mode))), .first = group.children[0], .last = group.children[group.children.len - 1], .selected = group.children[group.selected], .count = @intCast(group.children.len) } };
-                logical.nodes[index].last_child = group.children[group.selected];
+                store.nodes[index].content = .{ .group = .{ .mode = @fromBackingInt(@intCast(@backingInt(group.mode))), .first = group.children[0], .last = group.children[group.children.len - 1], .selected = group.children[group.selected], .count = @intCast(group.children.len) } };
+                store.nodes[index].last_child = group.children[group.selected];
                 for (group.children, 0..) |child, ordinal| {
-                    logical.nodes[child].parent = @intCast(index);
-                    logical.nodes[child].previous = if (ordinal > 0) group.children[ordinal - 1] else null;
-                    logical.nodes[child].next = if (ordinal + 1 < group.children.len) group.children[ordinal + 1] else null;
+                    store.nodes[child].parent = @intCast(index);
+                    store.nodes[child].previous = if (ordinal > 0) group.children[ordinal - 1] else null;
+                    store.nodes[child].next = if (ordinal + 1 < group.children.len) group.children[ordinal + 1] else null;
                 }
             },
         }
     }
+    // Each root gets a placeholder display until its real destination is known below.
     for (snapshot.roots, 0..) |root, index| {
-        logical.roots[index] = .{ .display = @intCast(index + 1), .workspace = 0, .layout = @fromBackingInt(@intCast(@backingInt(root.layout))), .ratio = root.ratio, .root = root.node, .selection = if (root.selection) |selection| .{ .slot = selection, .generation = 1 } else null, .last_focused = mappedIdentity(windows, &mapping, root.focused), .fullscreen = mappedIdentity(windows, &mapping, root.fullscreen) };
+        store.roots[index] = .{ .display = @intCast(index + 1), .workspace = 0, .layout = @fromBackingInt(@intCast(@backingInt(root.layout))), .ratio = root.ratio, .root = root.node, .selection = if (root.selection) |selection| store.reference(selection) else null, .last_focused = mappedIdentity(windows, &mapping, root.focused), .fullscreen = mappedIdentity(windows, &mapping, root.fullscreen) };
     }
-    const store = try allocator.create(layout.Store);
-    errdefer allocator.destroy(store);
-    store.* = .{};
-    try store.importSnapshot(logical);
+    store.revision +%= 1;
     for (snapshot.windows, 0..) |_, index| if (mapping[index] == null) store.removeIdentity(std.math.maxInt(u64) - index);
     var destinations: [320]?struct { display: u32, workspace: usize } = @splat(null);
     for (&store.roots, 0..) |*slot, index| {
