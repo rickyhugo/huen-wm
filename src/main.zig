@@ -928,6 +928,26 @@ fn boundedFloating(frame: Rect, area: Rect) Rect {
     bounded.top = std.math.clamp(frame.top, area.top, area.top + area.height - bounded.height);
     return bounded;
 }
+// Shifts a frame down and right by the same distance until its top-left corner is clear of every other floating window on the workspace,
+// so windows floated at the same frame all stay visible. At the area's edge the cascade restarts from the top left.
+fn cascadedFloating(source: Window, frame: Rect, area: Rect) Rect {
+    var cascaded = boundedFloating(frame, area);
+    const step = 32;
+    var attempts: usize = 0;
+    while (attempts < windows.items.len) : (attempts += 1) {
+        const taken = for (windows.items) |other| {
+            if (other.identity != source.identity and other.floating and !other.parked and other.display == source.display and other.workspace == source.workspace and visible(other) and @abs(other.floating_frame.left - cascaded.left) < step / 2 and @abs(other.floating_frame.top - cascaded.top) < step / 2) break true;
+        } else false;
+        if (!taken) break;
+        cascaded.left += step;
+        cascaded.top += step;
+        if (cascaded.left + cascaded.width > area.left + area.width or cascaded.top + cascaded.height > area.top + area.height) {
+            cascaded.left = area.left;
+            cascaded.top = area.top;
+        }
+    }
+    return cascaded;
+}
 fn floatRejectedTile(window: *Window) void {
     if (managedFullscreen(window.*)) {
         workspaceLayout(window.display, window.workspace).fullscreen = null;
@@ -1851,7 +1871,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         const width = area.width * config.floating_size.width;
                         const height = area.height * config.floating_size.height;
                         source.floating = true;
-                        source.floating_frame = boundedFloating(source.last_floating_frame orelse .{
+                        source.floating_frame = cascadedFloating(source.*, source.last_floating_frame orelse .{
                             .left = area.left + (area.width - width) / 2,
                             .top = area.top + (area.height - height) / 2,
                             .width = width,
