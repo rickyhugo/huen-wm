@@ -6,7 +6,7 @@ pub const Ring = struct {
 
     pub fn push(self: *Ring, identity: u64) void {
         self.forget(identity);
-        const kept = @min(self.count, self.entries.len - 1);
+        const kept: usize = @min(self.count, self.entries.len - 1);
         std.mem.copyBackwards(u64, self.entries[1 .. kept + 1], self.entries[0..kept]);
         self.entries[0] = identity;
         self.count = kept + 1;

@@ -17,6 +17,9 @@ Leaves contain live window identities. Each binary branch stores an axis, ratio,
 children, and a parent link. Ordered groups share the same node pool.
 New windows split the focused leaf in their destination
 tree when that leaf exists. Otherwise, insertion splits the last leaf.
+If splitting that visible tile would put either window below 80 points in
+width or height, dwindle splits the largest visible tile on that workspace
+that can fit both windows. Existing split ratios are preserved.
 The longer dimension selects the insertion axis.
 The first split uses the workspace ratio. Later splits start at one half.
 

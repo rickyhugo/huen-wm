@@ -1029,7 +1029,7 @@ fn reconcile() void {
     if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
     if (!deriveGoals()) return;
     for (windows.items) |*window| {
-        if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < 80 or window.goal.height < 80)) {
+        if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
             window.floating = true;
             window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
             window.goal = window.floating_frame;
