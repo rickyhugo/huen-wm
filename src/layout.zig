@@ -134,7 +134,7 @@ pub const Store = struct {
         return null;
     }
 
-    pub fn workspace(self: *Store, display: u32, index: usize, default_layout: commands.Layout, default_ratio: f64) *WorkspaceLayout {
+    pub fn ensureWorkspace(self: *Store, display: u32, index: usize, default_layout: commands.Layout, default_ratio: f64) *WorkspaceLayout {
         if (self.lookup(display, index)) |state| return state;
         for (&self.roots) |*slot| if (slot.* == null) {
             slot.* = .{ .display = display, .workspace = index, .layout = default_layout, .ratio = default_ratio };
@@ -218,7 +218,6 @@ pub const Store = struct {
                     .group => |group| group.selected,
                     else => first,
                 };
-                // A visible tile that is too small to split gives its place to the largest tile that can hold two.
                 const preferred = self.nodes[target];
                 if (destination.layout == .dwindle and member.active and target != root and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
                     var largest: f64 = 0;

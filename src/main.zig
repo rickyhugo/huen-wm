@@ -21,7 +21,6 @@ const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [1
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
 var layouts: tiling.Store = .{};
-// The native layer reports at most 1024 windows, and wm_tick reads at most monitor.capacity displays, so neither list allocates.
 var window_buffer: [1024]Window = undefined;
 var windows: std.ArrayList(Window) = .initBuffer(&window_buffer);
 var display_buffer: [monitor.capacity]Display = undefined;
@@ -555,7 +554,7 @@ fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) 
 }
 fn workspaceLayout(display: u32, workspace: usize) *tiling.WorkspaceLayout {
     const defaults = config.workspaces[workspace];
-    return layouts.workspace(display, workspace, defaults.layout, defaults.ratio);
+    return layouts.ensureWorkspace(display, workspace, defaults.layout, defaults.ratio);
 }
 fn managedFullscreen(window: Window) bool {
     const state = layouts.lookup(window.display, window.workspace) orelse return false;
@@ -653,9 +652,6 @@ fn resolvePlacements() [10]?u32 {
     return resolved;
 }
 const Activation = struct { display: u32, workspace: usize };
-// Moves each workspace and its windows to the display that `resolved` gives it, and `send` moves one window to
-// another workspace. Each `forced` display shows its workspace. Any other display that gained or lost a workspace
-// picks one to show. A failure changes nothing.
 fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: usize, display: u32, workspace: usize }) bool {
     const workspace_count = config.workspace_count;
     var activations: [11]Activation = undefined;

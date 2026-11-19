@@ -74,13 +74,11 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     const memory = arena.allocator();
     const temporary = try memory.create(layout.Store);
     temporary.* = store.*;
-    // The leaf of a window that is gone or that floats is stale until the next sync, so the checkpoint leaves it out.
     for (store.nodes) |node| if (node.content == .leaf) {
         const window = indexOfWindow(windows, node.content.leaf);
         if (window == null or windows[window.?].floating) temporary.removeIdentity(node.content.leaf);
     };
-    // A workspace that was never arranged has no root yet.
-    for (windows) |window| _ = temporary.workspace(window.display, window.workspace, config.workspaces[window.workspace].layout, config.workspaces[window.workspace].ratio);
+    for (windows) |window| _ = temporary.ensureWorkspace(window.display, window.workspace, config.workspaces[window.workspace].layout, config.workspaces[window.workspace].ratio);
     const nodes = try memory.alloc(session.NodeShape, 2047);
     const roots = try memory.alloc(session.Root, 320);
     const saved_windows = try memory.alloc(session.Window, windows.len);
@@ -95,8 +93,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     for (temporary.roots, 0..) |slot, index| if (slot) |state| {
         const screen = screenFor(screens, state.display) orelse continue;
         const defaults = config.workspaces[state.workspace];
-        // Removing a floating window's stale leaf also forgets its focus, so focus comes from the original root.
-        const remembered = store.roots[index] orelse state;
+        const unpruned = store.roots[index] orelse state;
         root_map[index] = @intCast(root_count);
         roots[root_count] = .{
             .workspace = try memory.dupe(u8, text(&defaults.name)),
@@ -110,8 +107,8 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
             .ratio = state.ratio,
             .node = if (state.root) |root| node_map[root] else null,
             .selection = if (state.selection) |selection| if (temporary.resolve(selection)) |handle| node_map[handle] else |_| null else null,
-            .focused = indexOfWindow(windows, remembered.last_focused),
-            .fullscreen = indexOfWindow(windows, remembered.fullscreen),
+            .focused = indexOfWindow(windows, unpruned.last_focused),
+            .fullscreen = indexOfWindow(windows, unpruned.fullscreen),
         };
         root_count += 1;
     };
@@ -191,7 +188,6 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         };
         if (saved_count != 1 or current_count > 1) ambiguous += 1 else if (current_count == 1) mapping[saved_index] = current_index;
     }
-    // session.validate accepted the snapshot when it was loaded, so every index below is in range and the nodes form trees.
     const store = try allocator.create(layout.Store);
     errdefer allocator.destroy(store);
     store.* = .{};
@@ -216,7 +212,6 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
             },
         }
     }
-    // Each root gets a placeholder display until its real destination is known below.
     for (snapshot.roots, 0..) |root, index| {
         store.roots[index] = .{ .display = @intCast(index + 1), .workspace = 0, .layout = @fromBackingInt(@intCast(@backingInt(root.layout))), .ratio = root.ratio, .root = root.node, .selection = if (root.selection) |selection| store.reference(selection) else null, .last_focused = mappedIdentity(windows, &mapping, root.focused), .fullscreen = mappedIdentity(windows, &mapping, root.fullscreen) };
     }
