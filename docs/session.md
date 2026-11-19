@@ -97,6 +97,8 @@ The caller retains that object until encoding or copies the strings into checkpo
 `continuity.restore` matches the saved keys with the keys of the current windows.
 Both key arrays must contain valid keys and at most 1024 entries.
 The caller omits windows whose native metadata is unavailable and retains a separate index map for that compact array.
+It also omits a window whose display is gone, so one such window does not stop the save.
+The checkpoint leaves out the tree leaf of a floating window, and it adds a root for a workspace that was never arranged.
 Each complete key must occur exactly once on both sides.
 Every duplicate saved candidate is skipped, not only later duplicates.
 Counts describe saved records.

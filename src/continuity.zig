@@ -74,9 +74,13 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     const memory = arena.allocator();
     const temporary = try memory.create(layout.Store);
     temporary.* = store.*;
-    for (store.nodes) |node| {
-        if (node.content == .leaf and indexOfWindow(windows, node.content.leaf) == null) temporary.removeIdentity(node.content.leaf);
-    }
+    // The leaf of a window that is gone or that floats is stale until the next sync, so the checkpoint leaves it out.
+    for (store.nodes) |node| if (node.content == .leaf) {
+        const window = indexOfWindow(windows, node.content.leaf);
+        if (window == null or windows[window.?].floating) temporary.removeIdentity(node.content.leaf);
+    };
+    // A workspace that was never arranged has no root yet.
+    for (windows) |window| _ = temporary.workspace(window.display, window.workspace, config.workspaces[window.workspace].layout, config.workspaces[window.workspace].ratio);
     const nodes = try memory.alloc(session.NodeShape, 2047);
     const roots = try memory.alloc(session.Root, 320);
     const saved_windows = try memory.alloc(session.Window, windows.len);
@@ -91,6 +95,8 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     for (temporary.roots, 0..) |slot, index| if (slot) |state| {
         const screen = screenFor(screens, state.display) orelse continue;
         const defaults = config.workspaces[state.workspace];
+        // Removing a floating window's stale leaf also forgets its focus, so focus comes from the original root.
+        const remembered = store.roots[index] orelse state;
         root_map[index] = @intCast(root_count);
         roots[root_count] = .{
             .workspace = try memory.dupe(u8, text(&defaults.name)),
@@ -104,8 +110,8 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
             .ratio = state.ratio,
             .node = if (state.root) |root| node_map[root] else null,
             .selection = if (state.selection) |selection| if (temporary.resolve(selection)) |handle| node_map[handle] else |_| null else null,
-            .focused = indexOfWindow(windows, state.last_focused),
-            .fullscreen = indexOfWindow(windows, state.fullscreen),
+            .focused = indexOfWindow(windows, remembered.last_focused),
+            .fullscreen = indexOfWindow(windows, remembered.fullscreen),
         };
         root_count += 1;
     };

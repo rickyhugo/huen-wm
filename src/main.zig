@@ -113,7 +113,7 @@ fn sessionWindows() ![]continuity.LiveWindow {
     session_status.unavailable = 0;
     for (windows.items) |window| {
         var attributes: session.NativeAttributes = undefined;
-        if (externallyEligible(window) and native.platform_session_attributes(window.identity, &attributes)) if (attributes.key()) |_| {
+        if (externallyEligible(window) and displayIndex(window.display) != null and native.platform_session_attributes(window.identity, &attributes)) if (attributes.key()) |_| {
             try result.append(allocator, .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .floating = window.floating, .frame = window.floating_frame, .attributes = attributes });
             continue;
         } else |_| {};
