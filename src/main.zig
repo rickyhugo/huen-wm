@@ -56,6 +56,10 @@ var snapshot_presentation: SnapshotPresentation = .idle;
 var transition_error: ?[]const u8 = null;
 var shortcut_buffer: [64]commands.WorkspaceSelector = undefined;
 var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer(&shortcut_buffer);
+// A workspace switch within about 250 ms of an activation makes the applications involved wait on WindowServer for 300
+// to 500 ms. Every AX call to them times out meanwhile, so their windows go stale and block placement.
+const activation_settle = 0.3;
+var activated: f64 = -std.math.inf(f64);
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
@@ -896,6 +900,7 @@ fn rememberFocus(identity: u64) void {
     };
 }
 fn focusVerified(identity: u64) bool {
+    activated = native.platform_monotonic();
     if (!native.platform_focus(identity) or native.platform_focused_window() != identity) return false;
     focused = identity;
     last_observed_focus = identity;
@@ -1586,7 +1591,10 @@ fn observeCommandState() void {
     observeFocus(if (observed_focus != 0) observed_focus else null, false);
     trackCurrentDisplay();
 }
-export fn wm_hotkey_flush() void {
+export fn wm_hotkey_poll() void {
+    if (native.platform_monotonic() - activated >= activation_settle) placeShortcuts();
+}
+fn placeShortcuts() void {
     if (workspace_shortcuts.items.len == 0) return;
     defer workspace_shortcuts.clearRetainingCapacity();
     if (suspended or displays.items.len == 0 or transition != null) return;
@@ -1628,7 +1636,7 @@ export fn wm_hotkey(commandText: [*:0]const u8) void {
         _ = wm_command(commandText);
         return;
     }
-    if (workspace_shortcuts.items.len == workspace_shortcuts.capacity) wm_hotkey_flush();
+    if (workspace_shortcuts.items.len == workspace_shortcuts.capacity) placeShortcuts();
     workspace_shortcuts.appendAssumeCapacity(command.workspace);
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
@@ -1638,7 +1646,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     switch (command) {
         .status, .windows, .monitors, .workspaces => {},
         .quit, .restore => workspace_shortcuts.clearRetainingCapacity(),
-        else => wm_hotkey_flush(),
+        else => placeShortcuts(),
     }
     switch (command) {
         .status => {

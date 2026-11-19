@@ -61,5 +61,5 @@ extern void wm_tick(void);
 extern void wm_input_poll(void);
 extern const char *wm_command(const char *command);
 extern void wm_hotkey(const char *command);
-extern void wm_hotkey_flush(void);
+extern void wm_hotkey_poll(void);
 extern bool wm_shutdown(void);

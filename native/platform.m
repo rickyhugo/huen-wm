@@ -937,7 +937,7 @@ int platform_main(int argc, char **argv) {
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
-            wm_hotkey_flush();
+            wm_hotkey_poll();
             wm_config_poll();
             if (interrupted) platform_quit();
             wm_input_poll();

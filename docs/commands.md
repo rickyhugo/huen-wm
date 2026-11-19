@@ -270,7 +270,7 @@ Without `workspace_monitors`, selectors resolve against the active display and n
 Each display has its own previous workspace.
 The previous workspace changes only after a switch commits.
 
-When switching without a snapshot, the WM reads consecutive workspace shortcuts in order but can skip intermediate placements on the same display. For example, two `occupied+1` shortcuts still advance two steps. After placement, `previous` returns to the workspace that was on screen before the switch.
+When switching without a snapshot, the WM reads consecutive workspace shortcuts in order but can skip intermediate placements on the same display. For example, two `occupied+1` shortcuts still advance two steps. After placement, `previous` returns to the workspace that was on screen before the switch. A workspace shortcut waits until 300 ms have passed since the WM last focused a window, because a switch during an activation stalls the applications involved. Shortcuts pressed in that time still apply in order.
 
 With `workspace_monitors` (global mode), every workspace is on one display:
 
