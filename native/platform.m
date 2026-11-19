@@ -775,7 +775,7 @@ void platform_status_present(const WMStatusPresentation *presentation) {
 static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
     (void)next; (void)context;
     EventHotKeyID identity;
-    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_command(currentBindings[identity.id].command); }
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_hotkey(currentBindings[identity.id].command); }
     return noErr;
 }
 
@@ -937,6 +937,7 @@ int platform_main(int argc, char **argv) {
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
+            wm_hotkey_flush();
             wm_config_poll();
             if (interrupted) platform_quit();
             wm_input_poll();

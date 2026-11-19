@@ -54,6 +54,8 @@ var transition: ?Transition = null;
 var generation: u64 = 0;
 var snapshot_presentation: SnapshotPresentation = .idle;
 var transition_error: ?[]const u8 = null;
+var shortcut_buffer: [64]commands.WorkspaceSelector = undefined;
+var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer(&shortcut_buffer);
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
@@ -543,14 +545,17 @@ fn trackCurrentDisplay() void {
     const index = displayIndex(identity) orelse return;
     if (placedWorkspace(displays.items[index]) != null) current_display = identity;
 }
-fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) !usize {
+fn workspaceView(display_slot: usize) selector.View {
     var occupied: selector.Occupancy = .empty;
     const display = displays.items[display_slot];
     for (windows.items) |window| if (externallyEligible(window) and (config.workspace_monitors != null or window.display == display.identity)) occupied.set(window.workspace);
     // `workspace N` from an empty display does not flip to the previous workspace, except in owner
     // mode, where the owner's workspace is the current one for every display.
     const back_and_forth = config.workspace_back_and_forth and (placedWorkspace(display) != null or workspaceOwner() != null);
-    return selector.resolve(selection, .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied, .back_and_forth = back_and_forth });
+    return .{ .config = &config, .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied, .back_and_forth = back_and_forth };
+}
+fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) !usize {
+    return selector.resolve(selection, workspaceView(display_slot));
 }
 fn workspaceLayout(display: u32, workspace: usize) *tiling.WorkspaceLayout {
     const defaults = config.workspaces[workspace];
@@ -1200,6 +1205,7 @@ export fn wm_tick() void {
     if (topology_changed) {
         generation += 1;
         cancelTransition();
+        workspace_shortcuts.clearRetainingCapacity();
     }
     displays.clearRetainingCapacity();
     displays.appendSliceAssumeCapacity(updated[0..displayCount]);
@@ -1574,10 +1580,66 @@ fn rehomeWorkspaces(moves: []const Activation, vacated: ?u32, follow: u32) [*:0]
     native.platform_config_changed();
     return json(.{ .ok = true, .monitor = follow, .verified = selected_display == follow, .focused = focused });
 }
+fn observeCommandState() void {
+    refreshObservations();
+    const observed_focus = native.platform_focused_window();
+    observeFocus(if (observed_focus != 0) observed_focus else null, false);
+    trackCurrentDisplay();
+}
+export fn wm_hotkey_flush() void {
+    if (workspace_shortcuts.items.len == 0) return;
+    defer workspace_shortcuts.clearRetainingCapacity();
+    if (suspended or displays.items.len == 0 or transition != null) return;
+    defer publishStatus();
+    defer publishPointer();
+    var remaining = workspace_shortcuts.items;
+    while (remaining.len != 0) {
+        observeCommandState();
+        const slot = activeDisplay();
+        var view = workspaceView(slot);
+        const from = view.current;
+        const owners = resolvePlacements();
+        var destination: ?u32 = null;
+        while (remaining.len != 0) {
+            const target = selector.resolve(remaining[0], view) catch {
+                remaining = remaining[1..];
+                continue;
+            };
+            const owner = owners[target] orelse displays.items[slot].identity;
+            if (destination != null and destination != owner) break;
+            destination = owner;
+            if (target != view.current) view.previous = view.current;
+            view.current = target;
+            view.back_and_forth = config.workspace_back_and_forth;
+            remaining = remaining[1..];
+        }
+        if (destination != null) {
+            if (config.workspace_monitors != null) {
+                _ = showWorkspace(view.current, from, null);
+            } else {
+                _ = switchWorkspace(slot, view.current, from, null);
+            }
+        }
+    }
+}
+export fn wm_hotkey(commandText: [*:0]const u8) void {
+    const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch return;
+    if (command != .workspace or suspended or transition != null or displays.items.len == 0 or (config.duration != 0 and native.huen_scene_capture_allowed())) {
+        _ = wm_command(commandText);
+        return;
+    }
+    if (workspace_shortcuts.items.len == workspace_shortcuts.capacity) wm_hotkey_flush();
+    workspace_shortcuts.appendAssumeCapacity(command.workspace);
+}
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
     defer publishPointer();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
+    switch (command) {
+        .status, .windows, .monitors, .workspaces => {},
+        .quit, .restore => workspace_shortcuts.clearRetainingCapacity(),
+        else => wm_hotkey_flush(),
+    }
     switch (command) {
         .status => {
             const launch = native.platform_launch_status();
@@ -1701,10 +1763,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     if (suspended) return failure("RuntimeSuspendedRestartToResume");
     if (transition != null) return failure("WorkspaceTransitionPending");
     if (displays.items.len == 0) return failure("NoDisplays");
-    refreshObservations();
-    const observed_focus = native.platform_focused_window();
-    observeFocus(if (observed_focus != 0) observed_focus else null, false);
-    trackCurrentDisplay();
+    observeCommandState();
     const displaySlot = activeDisplay();
     const display = &displays.items[displaySlot];
     switch (command) {
