@@ -241,6 +241,12 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
 // A nonzero process limits AX reads to that application. Other applications keep their last observations.
 // AX can reflect our placement before WindowServer publishes the matching CG bounds, so a scan with an unmatched placement retries.
 static void scanWindows(pid_t onlyProcess) {
+    // While the screen is locked, AX reports every window element invalid, so a scan would forget every window.
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    if ([session[@"CGSSessionScreenIsLocked"] boolValue]) {
+        for (WindowRecord *record in records) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+        return;
+    }
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
         if (attempt) usleep(10000);
         BOOL unmatched = NO;
