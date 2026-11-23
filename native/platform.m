@@ -13,6 +13,8 @@
 #include "platform.h"
 #include "scene.h"
 
+typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedNotified, WMRecordInvalidPending };
+
 @interface WindowRecord : NSObject
 @property AXUIElementRef element;
 @property WMWindow observation;
@@ -26,6 +28,8 @@
 @property double assumedVisibleDeadline;
 @property BOOL changed;
 @property WMMotionState motion;
+@property WMRecordLiveness liveness;
+@property double invalidSince;
 @end
 @implementation WindowRecord
 - (void)dealloc { if (_element) CFRelease(_element); }
@@ -128,12 +132,15 @@ lua_State *platform_lua_open(void) {
     return state;
 }
 
+static const double kInvalidConfirmDelay = 0.5;
+static BOOL readInvalidElement = NO;
 // Set when an AX read times out. A scan stops reading that application, or each further read would wait for the timeout again.
 static BOOL readTimedOut = NO;
 static id attribute(AXUIElementRef element, CFStringRef name) {
     CFTypeRef result = NULL;
     AXError error = AXUIElementCopyAttributeValue(element, name, &result);
     if (error == kAXErrorCannotComplete) readTimedOut = YES;
+    if (error == kAXErrorInvalidUIElement) readInvalidElement = YES;
     if (error != kAXErrorSuccess) return nil;
     return CFBridgingRelease(result);
 }
@@ -212,8 +219,16 @@ static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
     return fabs(first.left - second.left) <= tolerance && fabs(first.top - second.top) <= tolerance && fabs(first.width - second.width) <= tolerance && fabs(first.height - second.height) <= tolerance;
 }
 
+static BOOL sessionUnavailable(void);
+
 static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
-    (void)observer; (void)context;
+    (void)observer;
+    if (CFEqual(notification, kAXUIElementDestroyedNotification)) {
+        uint64_t identity = (uint64_t)(uintptr_t)context;
+        if (!sessionUnavailable()) for (WindowRecord *record in records) if (record.observation.identity == identity) { record.liveness = WMRecordDestroyedNotified; break; }
+        markChanged();
+        return;
+    }
     if (CFEqual(notification, kAXWindowCreatedNotification) || CFEqual(notification, kAXApplicationShownNotification)) {
         pid_t process = 0;
         AXUIElementGetPid(element, &process);
@@ -238,18 +253,40 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
     commandScanNeeded = YES;
 }
 
+// AX reports every window element invalid while the session is locked or off console.
+static BOOL sessionUnavailable(void) {
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    if (!session || [session[@"CGSSessionScreenIsLocked"] boolValue]) return YES;
+    NSNumber *onConsole = session[(__bridge NSString *)kCGSessionOnConsoleKey];
+    return onConsole && !onConsole.boolValue;
+}
+
+static void freezeRecordsForUnavailableSession(void) {
+    for (WindowRecord *record in records) {
+        WMWindow observation = record.observation; observation.stale = true; record.observation = observation;
+        record.animationDuration = 0; record.motion = WMMotionIdle;
+        if (record.liveness == WMRecordInvalidPending) { record.liveness = WMRecordAlive; record.invalidSince = 0; }
+    }
+}
+
+static BOOL confirmInvalidRecordRemoval(WindowRecord *record, double now) {
+    if (record.liveness == WMRecordDestroyedNotified) return YES;
+    if (record.liveness == WMRecordInvalidPending) return now - record.invalidSince >= kInvalidConfirmDelay;
+    record.liveness = WMRecordInvalidPending;
+    record.invalidSince = now;
+    requestSettleScans(record.observation.pid);
+    return NO;
+}
+
 // A nonzero process limits AX reads to that application. Other applications keep their last observations.
 // AX can reflect our placement before WindowServer publishes the matching CG bounds, so a scan with an unmatched placement retries.
 static void scanWindows(pid_t onlyProcess) {
-    // While the screen is locked, AX reports every window element invalid, so a scan would forget every window.
-    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
-    if ([session[@"CGSSessionScreenIsLocked"] boolValue]) {
-        for (WindowRecord *record in records) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
-        return;
-    }
+    if (sessionUnavailable()) { freezeRecordsForUnavailableSession(); return; }
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
         if (attempt) usleep(10000);
+        if (sessionUnavailable()) { freezeRecordsForUnavailableSession(); return; }
         BOOL unmatched = NO;
+        NSMutableArray<WindowRecord *> *pendingRemovals = [NSMutableArray array];
         NSArray *visibleWindows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
         inputWindowOrdering = visibleWindows;
         NSMutableSet<NSNumber *> *livePids = [NSMutableSet set];
@@ -292,19 +329,35 @@ static void scanWindows(pid_t onlyProcess) {
             AXError scanResult = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windowValues);
             if (scanResult != kAXErrorSuccess || !windowValues || CFGetTypeID(windowValues) != CFArrayGetTypeID()) {
                 if (windowValues) CFRelease(windowValues);
-                for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) { WMWindow observation = record.observation; observation.stale = true; record.observation = observation; }
+                for (WindowRecord *record in records) if (record.observation.pid == application.processIdentifier) {
+                    WMWindow observation = record.observation; observation.stale = true; record.observation = observation;
+                    if (record.liveness == WMRecordInvalidPending) { record.liveness = WMRecordAlive; record.invalidSince = 0; }
+                }
                 if (scanResult == kAXErrorCannotComplete) countTimeout(process);
                 CFRelease(appElement); continue;
             }
             forgetTimeouts(application.processIdentifier);
             NSArray *windows = CFBridgingRelease(windowValues);
             NSMutableDictionary<NSValue *, NSValue *> *frames = [NSMutableDictionary dictionary];
+            NSUInteger invalidCount = 0;
             for (id object in windows) {
                 AXUIElementRef element = (__bridge AXUIElementRef)object;
                 AXUIElementSetMessagingTimeout(element, 0.08);
                 WMRect frame;
+                readInvalidElement = NO;
                 if (readFrame(element, &frame)) frames[[NSValue valueWithPointer:element]] = [NSValue valueWithBytes:&frame objCType:@encode(WMRect)];
+                else if (readInvalidElement) invalidCount++;
                 if (readTimedOut) break;
+            }
+            // Every listed window of a tracked application reading invalid is the lock revoking AX before the session reports it.
+            if (!readTimedOut && windows.count > 0 && invalidCount == windows.count && !application.terminated) {
+                BOOL hasTrackedRecord = NO;
+                for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier) { hasTrackedRecord = YES; break; }
+                if (hasTrackedRecord) {
+                    CFRelease(appElement);
+                    freezeRecordsForUnavailableSession();
+                    return;
+                }
             }
             id focused = readTimedOut ? nil : attribute(appElement, kAXFocusedWindowAttribute);
             NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
@@ -314,6 +367,7 @@ static void scanWindows(pid_t onlyProcess) {
                 AXUIElementSetMessagingTimeout(element, 0.08);
                 WindowRecord *record = nil;
                 for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier && CFEqual(candidate.element, element)) { record = candidate; break; }
+                if (record) { record.liveness = WMRecordAlive; record.invalidSince = 0; }
                 NSString *subrole = attribute(element, kAXSubroleAttribute);
                 BOOL standard = [subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole];
                 NSValue *cachedFrame = frames[[NSValue valueWithPointer:element]];
@@ -340,7 +394,7 @@ static void scanWindows(pid_t onlyProcess) {
                     [records addObject:record];
                     AXUIElementSetMessagingTimeout(element, 0.08);
                     observer = [observers[process] pointerValue];
-                    if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, NULL);
+                    if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, (void *)(uintptr_t)initial.identity);
                 }
                 WMWindow observation = record.observation;
                 observation.frame = frame; observation.stale = false; observation.public_window_id = 0;
@@ -387,14 +441,14 @@ static void scanWindows(pid_t onlyProcess) {
                 if (onlyProcess) processScanRetryTime = CACurrentMediaTime() + 0.05;
                 CFRelease(appElement); continue;
             }
-            NSIndexSet *removed = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) {
-                (void)index; (void)stop;
-                if (record.observation.pid != application.processIdentifier || [seen containsObject:@(record.observation.identity)]) return NO;
+            double now = CACurrentMediaTime();
+            for (WindowRecord *record in records) {
+                if (record.observation.pid != application.processIdentifier || [seen containsObject:@(record.observation.identity)]) continue;
                 CFTypeRef role = NULL, minimized = NULL;
                 AXError roleResult = AXUIElementCopyAttributeValue(record.element, kAXRoleAttribute, &role);
                 AXError minimizedResult = AXUIElementCopyAttributeValue(record.element, kAXMinimizedAttribute, &minimized);
-                BOOL destroyed = roleResult == kAXErrorInvalidUIElement || minimizedResult == kAXErrorInvalidUIElement;
-                if (roleResult == kAXErrorSuccess && role && !CFEqual(role, kAXWindowRole)) destroyed = YES;
+                BOOL invalidHandle = roleResult == kAXErrorInvalidUIElement || minimizedResult == kAXErrorInvalidUIElement;
+                BOOL nonWindowRole = roleResult == kAXErrorSuccess && role && !CFEqual(role, kAXWindowRole);
                 WMWindow observation = record.observation;
                 observation.stale = true; observation.onscreen = false; observation.focused = false;
                 if (minimizedResult == kAXErrorSuccess && minimized && CFGetTypeID(minimized) == CFBooleanGetTypeID()) observation.minimized = CFBooleanGetValue(minimized);
@@ -402,11 +456,12 @@ static void scanWindows(pid_t onlyProcess) {
                 record.animationDuration = 0; record.motion = WMMotionIdle;
                 if (role) CFRelease(role);
                 if (minimized) CFRelease(minimized);
-                return destroyed;
-            }];
-            [records removeObjectsAtIndexes:removed];
+                if (nonWindowRole || (invalidHandle && confirmInvalidRecordRemoval(record, now))) [pendingRemovals addObject:record];
+            }
             CFRelease(appElement);
         }
+        if (sessionUnavailable()) { freezeRecordsForUnavailableSession(); return; }
+        if (pendingRemovals.count > 0) [records removeObjectsInArray:pendingRemovals];
         NSIndexSet *dead = [records indexesOfObjectsPassingTest:^BOOL(WindowRecord *record, NSUInteger index, BOOL *stop) { (void)index; (void)stop; return ![livePids containsObject:@(record.observation.pid)]; }];
         [records removeObjectsAtIndexes:dead];
         for (NSNumber *process in observers.allKeys) if (![livePids containsObject:process]) { AXObserverRef observer = [observers[process] pointerValue]; CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), kCFRunLoopCommonModes); CFRelease(observer); [observers removeObjectForKey:process]; }
@@ -657,6 +712,7 @@ bool platform_close(uint64_t identity, bool track, double *process_token) {
 }
 
 int platform_close_state(uint64_t identity, int pid, double process_token) {
+    if (sessionUnavailable()) return -1;
     if (!closingRecord || closingRecord.observation.identity != identity || closingRecord.observation.pid != pid || closingProcessToken != process_token) return -1;
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if (application.terminated || application.launchDate.timeIntervalSinceReferenceDate != process_token) return -1;
@@ -942,6 +998,8 @@ int platform_main(int argc, char **argv) {
         // changes which windows WindowServer lists.
         [workspaceCenter addObserverForName:NSWorkspaceDidTerminateApplicationNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; markChanged(); }];
         [workspaceCenter addObserverForName:NSWorkspaceActiveSpaceDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; markChanged(); }];
+        [NSDistributedNotificationCenter.defaultCenter addObserverForName:@"com.apple.screenIsUnlocked" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(0); }];
+        [workspaceCenter addObserverForName:NSWorkspaceSessionDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification) { (void)notification; requestSettleScans(0); }];
         NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timerValue) {
             (void)timerValue;
             platform_settle_budget_begin();
