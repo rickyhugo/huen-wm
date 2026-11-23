@@ -39,7 +39,7 @@ First native check should manage only the disposable fixture. Do not run another
 open -n -g -a "$HOME/Applications/Huen WM.app" --args start --app dev.huen-wm.fixture
 ```
 
-`open` returns after launch. A direct executable invocation runs in the foreground but can have a different permission context. Omitting `--app` opts into managing all eligible applications. `--config PATH` selects another Lua file. The installed app falls back to its bundled example when the user configuration does not exist.
+`open` returns after launch. A direct executable invocation runs in the foreground but can have a different permission context. Omitting `--app` opts into managing all eligible applications. `--config PATH` selects another Lua file. The installed app falls back to its bundled example when the user configuration does not exist. Opening the app with no arguments, for example from Raycast, Finder, or Spotlight, starts it with the default configuration. A bare terminal invocation prints help.
 
 ## Control
 
