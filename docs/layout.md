@@ -124,20 +124,29 @@ Tiles smaller than 80 points recover as floating windows during reconciliation.
 Projection during a tentative workspace commit does not apply this fallback.
 Application placement failures remain visible in the per-window error fields.
 
-## Application minimum sizes
+## Application size bounds
 
 Every tiled leaf has a minimum of 80 points in each dimension.
-An application can refuse a tile and answer with a larger frame.
-A width or height more than two points above the request becomes the window's learned minimum.
-It is capped at the usable extent of the window's display.
-A refusal in the first second after a window appears teaches nothing, because a launching application can restore its own larger frame.
+An application can refuse a tile and answer with a larger or smaller frame, or expose a standard window whose size macOS reports as not settable.
+A width or height more than two points above the request becomes the window's learned minimum, capped at the usable extent of its display.
+A width or height more than two points below the request becomes the window's learned ceiling, storing both the accepted extent and the offered extent that it refused.
+Offers larger than the refused extent ask the application again so cell-snapping or lagging applications can grow when space opens.
+If a window accepts a tile write and snaps back to a different size within one second, two consecutive idle scans at that snapped size teach the bound.
+Standard windows whose `AXSize` is not settable are admitted as long as `AXPosition` is settable; the manager moves them without writing `AXSize` and learns their fixed bounds from readback.
+A refusal in the first second after a window appears teaches nothing, because a launching application can restore its own frame.
 Windows that the manager's first scan finds are exempt from that wait when their application has run for more than 5 seconds.
-Learned minimums only grow. They last until the window closes or until `toggle-floating` tiles the window again.
-`windows` reports them as `minimum.width` and `minimum.height`, with zero for unknown.
+Learned bounds last until the window closes, until a newer answer contradicts them, or until `toggle-floating` tiles the window again.
+`windows` reports them as `minimum.width`, `minimum.height` (zero for unknown), `maximum.width`, and `maximum.height` (null for unbounded).
 
 A branch gives each child at least its minimum along the branch axis when both minimums fit.
-The rest follows the ratio. The stored ratio does not change, so the requested split returns when the minimum no longer binds.
+When one side has a ceiling that binds its ratio share and the other side can use the surplus, the branch gives the capped side no more than its ceiling and gives the rest to its sibling.
+Minimums win over ceilings, and when both sides are capped with leftover space, the branch falls back to its ratio.
+The stored ratio does not change, so the requested split returns when a bound no longer binds.
 A branch needs the sum of its children's minimums plus the gap along its axis and the larger minimum across it.
+A branch has a ceiling only when both active children have one: the sum plus the gap along its axis, and the larger accepted extent with the smaller offered extent across it.
+
+When a window's ceiling is smaller than its tile slot (for example across a split axis, or in a lone tile), the window keeps its accepted size and sits centered inside the slot on whole points, leaving symmetric margin like a Hyprland pseudotile.
+Focused borders wrap the physical window frame, while pointer hit regions keep the tile slot.
 
 When the minimums do not fit side by side, the two children overlap.
 The first child keeps the leading edge of the branch and the second child keeps the trailing edge.
@@ -149,16 +158,16 @@ An overlapped branch has no resize boundary for the mouse, and `resize` on it ap
 A new window goes beside the overlapped branch, not into it, so it does not cover a window that it does not split.
 A child whose minimum does not fit the branch with the step taken off cannot overlap. That branch splits by ratio.
 
-Master bounds its column split by the master's minimum width and the largest minimum width in the stack.
-The master and the stack overlap by the same rule when those two widths do not fit side by side.
-Stack rows keep minimum heights larger than an equal share, and the other rows share the rest equally.
+Master bounds its column split by the master's and stack's minimums and ceilings using the same rule as dwindle.
+The master and the stack overlap by the same rule when their minimums do not fit side by side.
+Stack rows bind to minimum heights above an equal share and to binding ceiling heights below it, sharing remaining space across unbound rows or spreading leftover margin evenly when every row is capped.
 When the minimum heights do not fit in the column, the rows have equal heights.
 
-Reconciliation learns from a rejected tile, derives the goals again, and places the windows again in the same tick.
+Reconciliation learns from a rejected tile or a confirmed async snap-back, derives the goals again, and places the windows again in the same tick.
 A workspace switch learns from a rolled-back tile and retries that window once.
 A minimum is kept only when the derived layout gives every window on that display its learned minimum, side by side or overlapped.
-Otherwise it is dropped, so the window that does not fit is the one that floats.
-A rejection that teaches no larger minimum floats the window as before, after the one-second grace for new windows.
+Otherwise the new bounds are dropped, so the window that does not fit is the one that floats.
+A rejection that teaches no new bound floats the window as before, after the one-second grace for new windows.
 
 ## Lone window width
 

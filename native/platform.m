@@ -28,6 +28,7 @@ typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedN
 @property double cornerRadius;
 @property double assumedVisibleDeadline;
 @property BOOL changed;
+@property BOOL sizeSettable;
 @property WMMotionState motion;
 @property WMRecordLiveness liveness;
 @property double invalidSince;
@@ -184,7 +185,7 @@ static BOOL writeFrame(WindowRecord *record, WMRect frame, BOOL settle) {
     if (!canMove(record)) return NO;
     WMRect current = {0};
     BOOL priorReadable = readFrame(record.element, &current);
-    BOOL resizeNeeded = !priorReadable || current.width != frame.width || current.height != frame.height;
+    BOOL resizeNeeded = record.sizeSettable && (!priorReadable || current.width != frame.width || current.height != frame.height);
     CGPoint origin = CGPointMake(frame.left, frame.top);
     CGSize extent = CGSizeMake(frame.width, frame.height);
     AXValueRef position = AXValueCreate(kAXValueCGPointType, &origin);
@@ -381,8 +382,8 @@ static void scanWindows(pid_t onlyProcess) {
                     Boolean positionSettable = false, sizeSettable = false;
                     AXUIElementIsAttributeSettable(element, kAXPositionAttribute, &positionSettable);
                     AXUIElementIsAttributeSettable(element, kAXSizeAttribute, &sizeSettable);
-                    if (!positionSettable || !sizeSettable) continue;
-                    record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame;
+                    if (!positionSettable) continue;
+                    record = [WindowRecord new]; record.element = (AXUIElementRef)CFRetain(element); record.original = frame; record.sizeSettable = sizeSettable;
                     // WindowServer can publish a new window tens of milliseconds after AX does. A window created after the first scan
                     // in an application that is not hidden opens on the current Space, so place it at once and let WindowServer
                     // confirm it within the deadline. Without that confirmation it stops being eligible, as before.
