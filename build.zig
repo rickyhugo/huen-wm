@@ -29,4 +29,35 @@ pub fn build(builder: *std.Build) void {
     for ([_][]const u8{ "Cocoa", "ApplicationServices", "Carbon", "QuartzCore", "ScreenCaptureKit", "CoreGraphics" }) |framework| module.linkFramework(framework, .{});
     const executable = builder.addExecutable(.{ .name = "huen-wm", .root_module = module });
     builder.installArtifact(executable);
+
+    // The suite links the manager against a fake adapter in tests/fake, so it takes none of the native objects above.
+    const manager = builder.createModule(.{ .root_source_file = builder.path("src/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const suite = builder.createModule(.{ .root_source_file = builder.path("tests/manager.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "wm", .module = manager }} });
+    const layout = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-Wall", "-Wextra", "-c", "-I" });
+    layout.addDirectoryArg(builder.path("native"));
+    layout.addArg("-I");
+    layout.addDirectoryArg(builder.path("native/vendor/lua-5.5.1"));
+    layout.addFileArg(builder.path("tests/layout.c"));
+    layout.addArg("-o");
+    suite.addObjectFile(layout.addOutputFileArg("layout.o"));
+    const tests = builder.addExecutable(.{ .name = "manager-tests", .root_module = suite });
+    const test_step = builder.step("test", "Run each manager-seam test case in its own process");
+    for (@import("tests/cases.zig").all) |case| {
+        const first = builder.addRunArtifact(tests);
+        first.setName(case.name);
+        first.addArg(case.name);
+        first.has_side_effects = true;
+        if (!case.restart) {
+            test_step.dependOn(&first.step);
+            continue;
+        }
+        first.addArg("--save");
+        const state = first.addOutputFileArg("state.json");
+        const second = builder.addRunArtifact(tests);
+        second.setName(builder.fmt("{s} (after restart)", .{case.name}));
+        second.addArgs(&.{ case.name, "--load" });
+        second.addFileArg(state);
+        second.has_side_effects = true;
+        test_step.dependOn(&second.step);
+    }
 }

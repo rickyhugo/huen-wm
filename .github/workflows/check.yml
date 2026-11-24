@@ -20,3 +20,5 @@ jobs:
         run: mise run check
       - name: Build
         run: mise run build
+      - name: Test
+        run: mise run test

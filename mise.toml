@@ -8,6 +8,10 @@ lua = "5.5.1"
 description = "Build huen-wm"
 run = "zig build"
 
+[tasks.test]
+description = "Run the manager-seam test suite, one process per case"
+run = "zig build test"
+
 [tasks.check]
 description = "Check authored source formatting, names, and Lua syntax"
 run = "hk check --all"

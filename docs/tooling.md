@@ -7,6 +7,7 @@ mise trust
 mise install
 mise run check
 mise run build
+mise run test
 ```
 
 Install the repository's pre-commit and commit-msg hooks.
@@ -15,6 +16,10 @@ Linked worktrees share this Git hook configuration.
 ```sh
 mise exec -- hk install --mise
 ```
+
+`mise run test` builds `manager-tests` and runs each case in its own process.
+The manager keeps its state in globals, so one process is one manager lifetime.
+`mise exec -- zig build test --summary all` lists every case with its result.
 
 `mise run check` checks Zig formatting, Lua syntax, and source names without a build.
 `mise run fmt` formats Zig files and runs the other checks.
@@ -62,3 +67,25 @@ Hook commands and file selection live in `hk.pkl`.
 References are the [mise configuration](https://mise.jdx.dev/configuration.html),
 [hk configuration](https://hk.jdx.dev/configuration.html), and
 [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0/).
+
+## Manager-seam tests
+
+The suite tests one seam, the exported `wm_*` functions.
+Each case acts as a user, an application, or a command-line caller, and asserts on what they observe.
+That is the JSON reply of `windows`, `status`, or another command, or the frame where the fake screen shows a window.
+The suite has no tests of pure modules or of the command line.
+
+`tests/fake/adapter.zig` replaces `native/` and is the only mock.
+It models Accessibility, Carbon, the clock, and the private files, as `native/platform.m` behaves where a case depends on it.
+For example, a window is on screen only when it touches a display and no other window of its application has a frame within 4 points.
+The fake writes every frame at once, so the suite does not cover animation.
+`tests/layout.c` checks the Zig mirrors in `tests/fake/abi.zig` against the C headers, because the linker matches the adapter by name only.
+
+To add a case:
+
+1. Write `pub fn @"what the user can rely on"(manager: *Manager) !void` in a file under `tests/cases/`.
+2. Add the same name to `tests/cases.zig`. The build fails when the two lists differ.
+3. Take expected values from the display size and the gap, or from a relation such as "inside the display". Do not repeat the manager's arithmetic.
+
+A case marked `restart` runs twice. The first process saves the fake world to a state file in the build cache, and the second process loads it.
+`manager.world.restarted` tells the case which process it is in.

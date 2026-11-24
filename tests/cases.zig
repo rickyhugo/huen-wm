@@ -1,0 +1,38 @@
+//! Every manager-seam test case. build.zig runs each in its own process; a `restart` case runs twice, and the
+//! second process meets the world, files and stored frames that the first one left.
+pub const Case = struct { name: []const u8, restart: bool = false };
+
+pub const all = [_]Case{
+    .{ .name = "two windows split the display at the configured gap" },
+    .{ .name = "an application that refuses less than 900 points gets a tile at least 900 wide" },
+    .{ .name = "the neighbour of a window with a learned minimum gets the rest of the display" },
+    .{ .name = "a lone window is centered at single_window_max_width" },
+    .{ .name = "the mouse tile region of a lone window equals its frame" },
+    .{ .name = "a window on a hidden workspace is not visible on screen" },
+    .{ .name = "a hidden window returns to its tile when its workspace shows" },
+    .{ .name = "quit restores every window to the frame it had before the manager started" },
+    .{ .name = "after a crash with parked windows the next manager leaves no window at a corner", .restart = true },
+    .{ .name = "after a crash quit restores the frames from before parking", .restart = true },
+    .{ .name = "a parking journal of an application that exited moves no window", .restart = true },
+    .{ .name = "a parking journal of a process with the same pid and another launch date moves no window", .restart = true },
+    .{ .name = "a window that moves itself back on screen twice within 300 seconds is no longer parked" },
+    .{ .name = "a window that moves itself back on screen 301 seconds apart stays parked" },
+    .{ .name = "a parked floating window whose application raised its minimum shows at the size it accepts" },
+    .{ .name = "switching to the workspace of a window that raised its minimum succeeds" },
+    .{ .name = "the manager writes no frame during quiet ticks after showing a window that raised its minimum" },
+    .{ .name = "a new window at a closed window's frame within half a second keeps its tile" },
+    .{ .name = "a new window at a closed window's frame after one second gets a tile of its own" },
+    .{ .name = "a relaunched application's window returns to its workspace" },
+    .{ .name = "a relaunched application's window joins the shown workspace when placement memory is off" },
+    .{ .name = "a window closed while its application runs is not remembered" },
+    .{ .name = "move-app moves every window of an application and no other window" },
+    .{ .name = "a hotkey press that macOS never delivers runs its command once" },
+    .{ .name = "a hotkey press that macOS delivers runs its command once" },
+    .{ .name = "a hotkey that macOS delivers after the manager ran it from the key press runs once" },
+    .{ .name = "a three-finger swipe switches one workspace" },
+    .{ .name = "a vertical three-finger swipe does not switch the workspace" },
+    .{ .name = "the placement journal records a refused placement without the window title" },
+    .{ .name = "wrong adds a mark to the placement journal" },
+    .{ .name = "the WMWindow mirror matches native/platform.h" },
+    .{ .name = "the other C struct mirrors match their headers" },
+};
