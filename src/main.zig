@@ -21,7 +21,7 @@ const Direction = commands.Direction;
 const parseCommand = commands.parse;
 // Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
 const Escape = union(enum) { settled, escaped: f64, exempt };
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, minimum: [2]f64 = .{ 0, 0 } };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, minimum: [2]f64 = .{ 0, 0 }, discovered_frame: Rect, vanished: ?f64 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -729,6 +729,7 @@ fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: 
         const sent = send != null and send.?.index == index;
         const destination = if (sent) send.?.display else resolved[window.workspace] orelse if (displayIndex(window.display) == null) displays.items[0].identity else window.display;
         staged[index] = destination;
+        if (window.vanished != null) continue;
         if (window.observation.minimized or window.observation.fullscreen or (!window.observation.onscreen and !window.parked)) {
             if (destination != window.display or (window.observation.fullscreen and sent)) {
                 transition_error = "Routing deferred for unavailable or native fullscreen window";
@@ -932,7 +933,7 @@ fn layoutMembers(output: []tiling.Member) []tiling.Member {
     var count: usize = 0;
     for (windows.items) |window| {
         const display = displays.items[displayIndex(window.display) orelse continue];
-        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .minimum = window.minimum };
+        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .minimum = window.minimum, .vanished = window.vanished != null };
         count += 1;
     }
     return output[0..count];
@@ -1432,6 +1433,38 @@ fn recoverParked(observed: []native.WMWindow, output: []parking.Recovery) []park
     if (recoveries.len > 0) native.platform_config_changed();
     return recoveries;
 }
+const replacement_grace = 0.5;
+fn replaces(ghost: Window, successor: Window) bool {
+    const vanished = ghost.vanished orelse return false;
+    return successor.vanished == null and successor.observation.pid == ghost.observation.pid and @abs(successor.discovered - vanished) <= replacement_grace and framesNear(successor.discovered_frame, ghost.observation.frame, 4);
+}
+fn successorIndex(ghost_index: usize) ?usize {
+    var found: ?usize = null;
+    for (windows.items, 0..) |candidate, index| if (replaces(windows.items[ghost_index], candidate)) {
+        if (found != null) return null;
+        found = index;
+    };
+    const successor = windows.items[found orelse return null];
+    for (windows.items, 0..) |other, index| if (index != ghost_index and replaces(other, successor)) return null;
+    return found;
+}
+// The successor takes the ghost's slot because the master layout orders its stack by slot.
+fn replaceWindow(ghost_index: usize, successor_index: usize) void {
+    const ghost = windows.items[ghost_index];
+    var successor = windows.items[successor_index];
+    successor.workspace = ghost.workspace;
+    successor.display = ghost.display;
+    successor.floating = ghost.floating;
+    successor.floating_frame = ghost.floating_frame;
+    successor.floating_restore = ghost.floating;
+    successor.last_floating_frame = ghost.last_floating_frame;
+    successor.minimum = ghost.minimum;
+    layouts.replaceIdentity(ghost.identity, successor.identity);
+    focus_history.rename(ghost.identity, successor.identity);
+    if (last_observed_focus == ghost.identity) last_observed_focus = successor.identity;
+    windows.items[ghost_index] = successor;
+    _ = windows.orderedRemove(successor_index);
+}
 export fn wm_tick() void {
     if (pending_close) |pending| close: {
         const observed = if (native.platform_monotonic() < pending.deadline) native.platform_close_state(pending.identity, pending.pid, pending.process_token) else -1;
@@ -1474,6 +1507,7 @@ export fn wm_tick() void {
         if (windowIndex(observation.identity)) |index| {
             var window = &windows.items[index];
             window.observation = observation;
+            window.vanished = null;
             if (displayIndex(window.display) != null and transition == null and window.floating and !managedFullscreen(window.*) and !window.parked and !observation.stale and observation.motion == .idle) {
                 if (window.floating_restore) {
                     if (framesNear(observation.frame, window.floating_frame, 2)) window.floating_restore = false;
@@ -1496,7 +1530,7 @@ export fn wm_tick() void {
         const display = displays.items[displaySlot].identity;
         // With global routing, a window on an empty display joins the current workspace.
         const joined = placedWorkspace(displays.items[displaySlot]) orelse currentWorkspace(displaySlot);
-        var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
+        var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame, .discovered_frame = observation.frame };
         const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
         window.floating = decision.floating orelse false;
         if (decision.workspace) |workspace| window.workspace = workspace;
@@ -1521,12 +1555,34 @@ export fn wm_tick() void {
         window.discovered = native.platform_monotonic();
         windows.appendAssumeCapacity(window);
     }
+    var now: ?f64 = null;
+    for (windows.items) |*window| {
+        if (window.vanished != null) continue;
+        for (observed[0..count]) |observation| {
+            if (observation.identity == window.identity) break;
+        } else {
+            window.vanished = now orelse native.platform_monotonic();
+            now = window.vanished;
+            window.observation.stale = true;
+            window.observation.onscreen = false;
+            window.observation.focused = false;
+            window.observation.fullscreen = false;
+            window.parked = false;
+            window.urgent = false;
+        }
+    }
     var index: usize = 0;
     while (index < windows.items.len) {
-        const found = for (observed[0..count]) |observation| {
-            if (observation.identity == windows.items[index].identity) break true;
-        } else false;
-        if (!found) {
+        const vanished = windows.items[index].vanished orelse {
+            index += 1;
+            continue;
+        };
+        if (successorIndex(index)) |successor| {
+            replaceWindow(index, successor);
+            continue;
+        }
+        if (now == null) now = native.platform_monotonic();
+        if (now.? - vanished > replacement_grace) {
             layouts.forgetIdentity(windows.items[index].identity);
             focus_history.forget(windows.items[index].identity);
             _ = windows.orderedRemove(index);

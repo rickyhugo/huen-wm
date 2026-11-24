@@ -21,7 +21,7 @@ pub const Node = struct {
     learned: [2]f64 = .{ 0, 0 },
 };
 
-pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect, minimum: [2]f64 };
+pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect, minimum: [2]f64, vanished: bool = false };
 pub const WorkspaceLayout = struct {
     display: u32,
     workspace: usize,
@@ -216,12 +216,12 @@ pub const Store = struct {
                 var target = if (focused) |identity| self.leaf(identity) orelse root else root;
                 if (self.rootOf(target) != root) target = root;
                 while (self.firstChild(target)) |first| target = switch (self.nodes[target].content) {
-                    .branch => |branch| branch.children[1],
+                    .branch => |branch| if (self.vanishedLeaf(members, branch.children[1])) branch.children[0] else branch.children[1],
                     .group => |group| group.selected,
                     else => first,
                 };
                 const preferred = self.nodes[target];
-                if (destination.layout == .dwindle and member.active and target != root and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
+                if (destination.layout == .dwindle and member.active and self.survivingParent(members, target) != null and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
                     var largest: f64 = 0;
                     for (&self.nodes, 0..) |*node, index| {
                         if (node.content != .leaf or !node.active or !node.visible or !fitsPair(node.frame, gap)) continue;
@@ -236,7 +236,7 @@ pub const Store = struct {
                 const bounds = if (frame.width > 0 and frame.height > 0) frame else member.area;
                 const branch = available[1];
                 self.serial +%= 1;
-                self.nodes[branch] = .{ .generation = self.serial, .content = .{ .branch = .{ .axis = if (bounds.width >= bounds.height) .width else .height, .ratio = if (self.nodes[target].parent == null) destination.ratio else 0.5, .children = .{ target, added } } } };
+                self.nodes[branch] = .{ .generation = self.serial, .content = .{ .branch = .{ .axis = if (bounds.width >= bounds.height) .width else .height, .ratio = if (self.survivingParent(members, target) == null) destination.ratio else 0.5, .children = .{ target, added } } } };
                 self.replace(destination, target, branch);
                 self.nodes[target].parent = branch;
                 self.nodes[target].previous = null;
@@ -255,6 +255,29 @@ pub const Store = struct {
             const live = if (self.resolve(selection) catch null) |handle| state.root == self.rootOf(handle) else false;
             if (!live) state.selection = null;
         };
+    }
+
+    fn vanishedLeaf(self: *const Store, members: []const Member, handle: Handle) bool {
+        const identity = switch (self.nodes[handle].content) {
+            .leaf => |leaf_identity| leaf_identity,
+            else => return false,
+        };
+        for (members) |member| if (member.identity == identity) return member.vanished;
+        return false;
+    }
+
+    // A new leaf goes where it would go if vanished leaves were already removed, so a window that is not a
+    // replacement lands as it did before vanished windows kept their leaves.
+    fn survivingParent(self: *const Store, members: []const Member, handle: Handle) ?Handle {
+        var child = handle;
+        while (self.nodes[child].parent) |ancestor| : (child = ancestor) {
+            const branch = switch (self.nodes[ancestor].content) {
+                .branch => |branch| branch,
+                else => return ancestor,
+            };
+            if (!self.vanishedLeaf(members, branch.children[if (branch.children[0] == child) @as(usize, 1) else 0])) return ancestor;
+        }
+        return null;
     }
 
     fn measure(self: *Store, handle: Handle, gap: f64) void {
@@ -508,6 +531,16 @@ pub const Store = struct {
             if (state.last_focused == identity) state.last_focused = null;
             if (state.fullscreen == identity) state.fullscreen = null;
         };
+    }
+
+    pub fn replaceIdentity(self: *Store, old: u64, new: u64) void {
+        self.removeIdentity(new);
+        if (self.leaf(old)) |handle| self.nodes[handle].content.leaf = new;
+        for (&self.roots) |*slot| if (slot.*) |*state| {
+            if (state.last_focused == old) state.last_focused = new;
+            if (state.fullscreen == old) state.fullscreen = new;
+        };
+        self.revision +%= 1;
     }
 
     pub fn removeIdentity(self: *Store, identity: u64) void {
