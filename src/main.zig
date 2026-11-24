@@ -17,7 +17,9 @@ const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null };
+// Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
+const Escape = union(enum) { settled, escaped: f64, exempt };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -36,6 +38,8 @@ var selected_display: ?u32 = null;
 var last_observed_focus: ?u64 = null;
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
+// macOS moves windows when a display goes away, which must not count as an application moving its own window.
+var topology_changed_at: f64 = -std.math.inf(f64);
 // `shown` caches whether the workspace was active on its display at the start of the tick, so a
 // workspace on a display that just vanished keeps that fact until routing moves it. `shown_when_lost`
 // keeps it while the workspace waits on a fallback display, so a reconnect shows it again.
@@ -824,6 +828,7 @@ const PlacementTransaction = struct {
             const intent = &self.intent[original_index];
             if (!intent.parked) intent.parking_frame = original;
             intent.parked = true;
+            intent.parked_at = null;
             intent.placement_error = "Placement rollback rejected; recovery ownership retained";
         }
         layouts = self.store.*;
@@ -1096,6 +1101,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     if (parked and !previouslyParked) saveParkingJournal();
     if (verifiedFrame(window.identity, target, if (parked) window.display else null)) {
         window.parked = parked;
+        window.parked_at = if (parked) native.platform_monotonic() else null;
         window.placement_error = null;
         return .applied;
     }
@@ -1103,6 +1109,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
         window.parked = previouslyParked;
         return .rolled_back;
     }
+    window.parked_at = null;
     return .recovery_required;
 }
 fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
@@ -1120,6 +1127,7 @@ fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome
     return outcome;
 }
 fn parkWindow(window: *Window) PlacementOutcome {
+    if (window.escape == .exempt) return .applied;
     const outcome: PlacementOutcome = outcome: {
         var actual: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
@@ -1129,6 +1137,24 @@ fn parkWindow(window: *Window) PlacementOutcome {
             window.placement_error = null;
             return .applied;
         };
+        // A frame that only touches the display is a parked strip that a Dock resize exposed.
+        const horizontal = @min(actual.left + actual.width, area.left + area.width) - @max(actual.left, area.left);
+        const vertical = @min(actual.top + actual.height, area.top + area.height) - @max(actual.top, area.top);
+        if (window.parked and window.parked_at != null and horizontal > 3 and vertical > 3) {
+            const now = native.platform_monotonic();
+            if (now - topology_changed_at > 2) {
+                window.escape = switch (window.escape) {
+                    .escaped => |at| if (now - at <= 300) .exempt else .{ .escaped = now },
+                    else => .{ .escaped = now },
+                };
+                if (window.escape == .exempt) {
+                    window.parked = false;
+                    window.parked_at = null;
+                    placementFailure(window, "Application keeps moving its window back on screen; window is no longer parked");
+                    return .applied;
+                }
+            }
+        }
         var attempted: PlacementOutcome = .no_corner;
         for (candidates) |candidate| {
             if (overlapsOtherDisplays(candidate, window.display)) continue;
@@ -1274,6 +1300,7 @@ export fn wm_tick() void {
         display.* = .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |known| known.workspace else 0, .previous_workspace = if (previous) |known| known.previous_workspace else null };
     }
     if (topology_changed) {
+        topology_changed_at = native.platform_monotonic();
         generation += 1;
         cancelTransition();
         workspace_shortcuts.clearRetainingCapacity();
@@ -1775,9 +1802,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool };
             var items: [1024]Item = undefined;
-            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group };
+            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt };
             return json(items[0..windows.items.len]);
         },
         .monitors => {
