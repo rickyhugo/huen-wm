@@ -1,5 +1,15 @@
 # Commands and binding modes
 
+## Overview
+
+Lists and command results are JSON. Workspace indices start at one. Workspace commands also accept `previous`, signed offsets, occupied offsets, `empty`, `next-empty`, and `name:` selectors. `move-to-workspace` sends the focused window and follows it. `move-app` sends every window of one bundle ID and does not follow. `focus last` returns to the previous window, `focus urgent` goes to a window that asked for focus on a hidden workspace, and `cycle` steps through the visible windows.
+
+`center`, `move-by`, and `resize-by` adjust floating geometry; `resize-by` also resizes tiles. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `resize width DELTA` and `resize height DELTA` resize the focused tile in logical points. `split` changes its nearest binary split. Managed `fullscreen` fills the visible display without creating a macOS Space and preserves the underlying layout. See [layout controls](layout.md).
+
+`select parent` and `select child` change the logical container selection without moving native focus. `tilemove` reparents that selection beside a directional neighbor. `group join` combines it with a neighbor. Groups support `tabbed`, `stacked`, `split`, `next`, and `previous`. Container edits require dwindle layout.
+
+`restore`, `stop`, and `quit` are described in [workspace recovery](workspaces.md#recovery). Application commands support bundle-ID launch, explicit shell execution, close, and conditional normal termination.
+
 ## Binding modes
 
 Top-level `bindings` defines `main`. `modes` is an optional dense array of named modes.

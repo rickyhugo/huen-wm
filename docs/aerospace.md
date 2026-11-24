@@ -3,7 +3,7 @@
 [`config/aerospace.lua`](../config/aerospace.lua) preserves the numbered-workspace
 workflow with Huen WM commands. It does not install itself or change AeroSpace.
 The user configuration lives at `~/.config/huen-wm/config.lua`.
-Build, installation, and permissions use the [existing setup](../README.md#run-deliberately).
+Build, installation, and permissions use the [existing setup](../README.md#get-it-running).
 
 ## Bindings
 
