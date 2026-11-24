@@ -1303,6 +1303,18 @@ fn forgetLearnedBounds(window: *Window) void {
     window.bounds = .{};
     window.placed = null;
 }
+// A learned bound can come from a size someone else set during placement, such as a native edge drag, and a minimum never
+// lowers itself. A resize it blocks clears it, and placement learns it again if the application still refuses.
+fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
+    var forgot = false;
+    for (windows.items) |*window| {
+        if (window.display != display or window.workspace != workspace or window.floating) continue;
+        if (std.meta.eql(window.bounds, size_bounds.Bounds{})) continue;
+        forgetLearnedBounds(window);
+        forgot = true;
+    }
+    return forgot;
+}
 fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
     const area = inset(displays.items[displayIndex(window.display) orelse return false].frame, config.gap);
@@ -2524,8 +2536,20 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .resize_points => |resize| {
                     if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
                     if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
-                    const applied = resizeTiled(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
+                    const identity = source.identity;
+                    const before = source.goal;
+                    var applied = resizeTiled(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
+                    const retried = @abs(resize.delta - applied) > size_bounds.tolerance and forgetWorkspaceBounds(source.display, source.workspace);
+                    if (retried) {
+                        if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                        _ = resizeTiled(sourceIndex, resize.axis, resize.delta - applied) catch |err| return failure(@errorName(err));
+                    }
                     reconcile();
+                    // Placement learns a bound again when the application still refuses, so only the placed goal shows the change.
+                    if (retried) if (windowIndex(identity)) |index| {
+                        const after = windows.items[index].goal;
+                        applied = if (resize.axis == .width) after.width - before.width else after.height - before.height;
+                    };
                     native.platform_config_changed();
                     return json(.{ .ok = true, .applied_delta = applied });
                 },
