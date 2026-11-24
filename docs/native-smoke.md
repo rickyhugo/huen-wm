@@ -10,9 +10,10 @@ sh scripts/build-native-fixture.sh
 ```
 
 Run against the installed app. Choose an output directory that does not exist.
+The driver is `tools/native_smoke.zig`. `mise run native-smoke` builds it and passes the options through. Run it from the repository root, because the default `--fixture` is `zig-out/fixtures/HuenFixture.app` relative to the current directory.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-smoke-result"
 ```
@@ -43,7 +44,7 @@ Add `--workflow` to replace the default checks with keyboard workflow checks on 
 It uses the same preflight, AeroSpace pause, cleanup, and restoration as the default run. It excludes `--scenes`.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-workflow-result" \
     --workflow
@@ -84,7 +85,7 @@ Both use the fixture with `--spread`, a 12-point gap, instant switches, and work
 The driver reads and warps the pointer through public CoreGraphics calls to set a known start position.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-owner-result" \
     --owner
@@ -117,7 +118,7 @@ python3 scripts/native-smoke.py \
 `--global` (N2) checks per-workspace monitors. It starts with `workspace_monitors = { 'external', 'built-in' }`, `mouse_follows_monitor = false`, workspaces One and Two on `external`, and Three on `built-in`.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-global-result" \
     --global
@@ -139,7 +140,7 @@ Each placement check reads `status`, `windows`, `workspaces`, and `monitors`. `s
 `--monitor-moves` (N4, N5) checks window and workspace moves between displays. It starts in independent mode without mouse follow. The fixture's spread puts two windows on one display and one on the other.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-monitor-moves-result" \
     --monitor-moves
@@ -159,7 +160,7 @@ Window checks compare each window's display, workspace, and parking with the fix
 `--global-restart` (N6) checks that a runtime home survives a clean restart. It uses the split configuration of `--global` with `session = { enabled = true }` and a random `border_color`. The color gives each run its own configuration hash, so a run never reads an earlier run's checkpoint. Each run leaves one small checkpoint file in `~/Library/Application Support/HuenWM`. The fixture starts with `--identifiers unique`, so session matching can identify its windows.
 
 ```sh
-python3 scripts/native-smoke.py \
+mise run native-smoke \
     --app "$HOME/Applications/Huen WM.app" \
     --output "$PWD/native-global-restart-result" \
     --global-restart

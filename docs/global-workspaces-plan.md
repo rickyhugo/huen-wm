@@ -118,10 +118,10 @@ workspaces = {
 
 ## Units
 
-Each unit ends with `mise run build`, `mise run check`, and `scripts/smoke.sh`.
-Only the coordinator runs `scripts/native-smoke.py`.
+Each unit ends with `mise run build`, `mise run check`, and `mise run smoke`.
+Only the coordinator runs `mise run native-smoke`.
 
-0. `native-smoke.py --owner` (N1) and `--monitors` modes.
+0. `native-smoke --owner` (N1) and `--monitors` modes.
 1. `src/monitor.zig`, selector parsing in `src/command.zig`, `focus-monitor`
    grammar.
 2. `focus-monitor` runtime and `monitors` additions, both modes.

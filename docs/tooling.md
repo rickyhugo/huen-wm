@@ -10,6 +10,9 @@ mise run build
 mise run test
 ```
 
+Lua 5.5.1 is compiled from checked-in, checksum-recorded upstream source in `native/vendor`.
+The mise Lua pin is for tooling, not a runtime dependency.
+
 Install the repository's pre-commit and commit-msg hooks.
 Linked worktrees share this Git hook configuration.
 
@@ -20,6 +23,11 @@ mise exec -- hk install --mise
 `mise run test` builds `manager-tests` and runs each case in its own process.
 The manager keeps its state in globals, so one process is one manager lifetime.
 `mise exec -- zig build test --summary all` lists every case with its result.
+
+`mise run smoke` runs `tools/smoke.zig` against the built binary: CLI arguments, config validation, and the socket client's handling of bad replies.
+It never starts the manager. The socket part runs only when no manager is running, because it binds the manager's socket path.
+`mise run native-smoke` runs `tools/native_smoke.zig` on real fixture windows. See [native smoke](native-smoke.md).
+The repository has no Python. Helpers are Zig programs under `tools/`, built by `zig build`.
 
 `mise run check` checks Zig formatting, Lua syntax, and source names without a build.
 `mise run fmt` formats Zig files and runs the other checks.

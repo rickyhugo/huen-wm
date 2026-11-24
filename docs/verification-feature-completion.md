@@ -37,7 +37,7 @@ They were not repeated in full after the minimized-record-only change.
 The existing scene flow is repeatable with:
 
 ```sh
-python3 scripts/native-smoke.py --scenes --app "/absolute/path/Huen WM.app" --output "/new/evidence/directory"
+mise run native-smoke --scenes --app "/absolute/path/Huen WM.app" --output "/new/evidence/directory"
 ```
 
 ## Corrections from failed runs

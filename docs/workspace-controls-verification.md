@@ -36,7 +36,7 @@ The unchanged baseline driver passed all 22 required checks, including its two c
 It can be rerun against a signed bundle with:
 
 ```sh
-python3 scripts/native-smoke.py --scenes --app "/absolute/path/Huen WM.app" --output "/new/evidence/directory"
+mise run native-smoke --scenes --app "/absolute/path/Huen WM.app" --output "/new/evidence/directory"
 ```
 
 ## Observed behavior

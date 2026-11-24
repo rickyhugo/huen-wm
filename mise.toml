@@ -19,3 +19,15 @@ run = "hk check --all"
 [tasks.fmt]
 description = "Format authored Zig sources and check names"
 run = "hk fix --all"
+
+[tasks.smoke]
+description = "Run headless checks of the CLI, configuration, and socket client"
+run = "zig build smoke"
+
+[tasks.login]
+description = "Enable, disable, or report login startup: mise run login enable|disable|status"
+run = "zig build login --"
+
+[tasks.native-smoke]
+description = "Check native fixture windows against the installed manager; see docs/native-smoke.md"
+run = "zig build native-smoke --"

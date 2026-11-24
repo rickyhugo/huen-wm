@@ -35,6 +35,27 @@ pub fn build(builder: *std.Build) void {
     const executable = builder.addExecutable(.{ .name = "huen-wm", .root_module = module });
     builder.installArtifact(executable);
 
+    // Developer checks that drive the built binary or the installed app from outside, as a user would.
+    const smoke = builder.addExecutable(.{ .name = "smoke", .root_module = builder.createModule(.{ .root_source_file = builder.path("tools/smoke.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
+    const smoke_run = builder.addRunArtifact(smoke);
+    smoke_run.addArtifactArg(executable);
+    smoke_run.has_side_effects = true;
+    builder.step("smoke", "Run headless checks of the CLI, configuration and socket").dependOn(&smoke_run.step);
+    const native_smoke_module = builder.createModule(.{ .root_source_file = builder.path("tools/native_smoke.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    native_smoke_module.addSystemFrameworkPath(.{ .cwd_relative = builder.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+    native_smoke_module.addSystemIncludePath(.{ .cwd_relative = builder.fmt("{s}/usr/include", .{sdk}) });
+    native_smoke_module.addLibraryPath(.{ .cwd_relative = builder.fmt("{s}/usr/lib", .{sdk}) });
+    for ([_][]const u8{ "CoreGraphics", "CoreFoundation", "ApplicationServices" }) |framework| native_smoke_module.linkFramework(framework, .{});
+    const native_smoke = builder.addExecutable(.{ .name = "native-smoke", .root_module = native_smoke_module });
+    builder.installArtifact(native_smoke);
+    const native_smoke_run = builder.addRunArtifact(native_smoke);
+    native_smoke_run.addPassthruArgs();
+    builder.step("native-smoke", "Check native fixture windows against the installed manager; pass options after --").dependOn(&native_smoke_run.step);
+    const login = builder.addExecutable(.{ .name = "login", .root_module = builder.createModule(.{ .root_source_file = builder.path("tools/login.zig"), .target = target, .optimize = optimize, .link_libc = true }) });
+    const login_run = builder.addRunArtifact(login);
+    login_run.addPassthruArgs();
+    builder.step("login", "Enable, disable, or report login startup: zig build login -- enable|disable|status").dependOn(&login_run.step);
+
     // The suite links the manager against a fake adapter in tests/fake, so it takes none of the native objects above.
     const manager = builder.createModule(.{ .root_source_file = builder.path("src/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const suite = builder.createModule(.{ .root_source_file = builder.path("tests/manager.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "wm", .module = manager }} });

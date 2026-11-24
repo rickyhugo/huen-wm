@@ -126,4 +126,4 @@ Whole-workspace migration rekeys source roots before disconnected-display cleanu
 
 ## Verification
 
-`scripts/native-smoke.py` checks owner mode (`--owner`), monitor focus (`--monitors`), split placement (`--global`), monitor moves (`--monitor-moves`), and restart continuity of runtime homes (`--global-restart`) on a built-in and an external display. Display disconnection cannot be automated. Use the [manual hotplug checklist](native-smoke.md#manual-hotplug-checklist).
+`mise run native-smoke` checks owner mode (`--owner`), monitor focus (`--monitors`), split placement (`--global`), monitor moves (`--monitor-moves`), and restart continuity of runtime homes (`--global-restart`) on a built-in and an external display. Display disconnection cannot be automated. Use the [manual hotplug checklist](native-smoke.md#manual-hotplug-checklist).
