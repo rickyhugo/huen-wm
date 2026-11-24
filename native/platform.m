@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include "platform.h"
 #include "scene.h"
+#include "observe.h"
 
 typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedNotified, WMRecordInvalidPending };
 
@@ -852,8 +853,20 @@ void platform_status_present(const WMStatusPresentation *presentation) {
 static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
     (void)next; (void)context;
     EventHotKeyID identity;
-    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_hotkey(currentBindings[identity.id].command); }
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_hotkey_delivered(identity.id, currentBindings[identity.id].command); }
     return noErr;
+}
+void platform_hotkey_pressed(uint32_t key, uint32_t modifiers) {
+    for (uint32_t slot = 0; slot < 256; slot++) if (hotkeyRefs[slot] && currentBindings[slot].key == key && currentBindings[slot].modifiers == modifiers) { wm_hotkey_pressed(slot, currentBindings[slot].command); return; }
+}
+bool platform_rebind(void) {
+    bool complete = true;
+    for (size_t slot = 0; slot < 256; slot++) if (hotkeyRefs[slot]) {
+        UnregisterEventHotKey(hotkeyRefs[slot]);
+        EventHotKeyID identity = {'HUEN', (UInt32)slot};
+        if (RegisterEventHotKey(currentBindings[slot].key, currentBindings[slot].modifiers, identity, GetApplicationEventTarget(), 0, &hotkeyRefs[slot]) != noErr) { hotkeyRefs[slot] = NULL; complete = false; }
+    }
+    return complete;
 }
 
 bool platform_bindings(const WMBinding *bindings, size_t count) {
@@ -934,7 +947,7 @@ int platform_main(int argc, char **argv) {
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
         if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO };
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()) };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }
@@ -987,6 +1000,7 @@ int platform_main(int argc, char **argv) {
         if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
         if (!wm_activate_config()) { close(lockDescriptor); return 1; }
+        huen_observe_start();
         serverSocket = socket(AF_UNIX, SOCK_STREAM, 0);
         if (serverSocket < 0) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         struct sockaddr_un address = {0}; address.sun_family = AF_UNIX; strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
@@ -1114,7 +1128,7 @@ int platform_main(int argc, char **argv) {
             }
             if (stopping && wm_shutdown()) { [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
         }];
-        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; serviceActive = YES; [NSApp run]; serviceActive = NO; [timer invalidate];
+        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; serviceActive = YES; [NSApp run]; serviceActive = NO; [timer invalidate]; huen_observe_stop();
         close(serverSocket); unlink(socketPath.fileSystemRepresentation); close(lockDescriptor); return 0;
     }
 }

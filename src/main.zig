@@ -12,6 +12,7 @@ const selector = @import("selector.zig");
 const history = @import("history.zig");
 const monitor = @import("monitor.zig");
 const parking = @import("parking.zig");
+const delivery = @import("delivery.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -65,6 +66,8 @@ var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer
 // to 500 ms. Every AX call to them times out meanwhile, so their windows go stale and block placement.
 const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
+var hotkey_watch: delivery.Watch = .{};
+var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
@@ -1790,7 +1793,28 @@ fn observeCommandState() void {
     trackCurrentDisplay();
 }
 export fn wm_hotkey_poll() void {
-    if (native.platform_monotonic() - activated >= activation_settle) placeShortcuts();
+    const now = native.platform_monotonic();
+    if (hotkey_watch.overdue(now)) |command| recoverHotkey(&command, now);
+    if (now - activated >= activation_settle) placeShortcuts();
+}
+export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
+    hotkey_watch.pressed(slot, std.mem.span(command), native.platform_monotonic());
+}
+export fn wm_hotkey_delivered(slot: u32, command: [*:0]const u8) void {
+    if (hotkey_watch.delivered(slot, native.platform_monotonic())) wm_hotkey(command);
+}
+// macOS can stop delivering registered hotkeys without an error.
+fn recoverHotkey(command: *const delivery.Command, now: f64) void {
+    hotkey_recovery.missed += 1;
+    var buffer: [256:0]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(command)}) catch {};
+    native.platform_error(&buffer);
+    if (now - hotkey_recovery.rebound >= 5) {
+        hotkey_recovery.rebound = now;
+        hotkey_recovery.rebinds += 1;
+        if (!native.platform_rebind()) native.platform_error("Hotkey re-registration failed");
+    }
+    wm_hotkey(command);
 }
 fn placeShortcuts() void {
     if (workspace_shortcuts.items.len == 0) return;
@@ -1873,6 +1897,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .snapshot_generation = generation,
                 .transition_pending = transition != null,
                 .transition_error = transition_error,
+                .hotkeys = .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds },
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = session_status,
                 .parking_recovery = parking_recovery,

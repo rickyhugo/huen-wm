@@ -31,7 +31,7 @@ cp config/example.lua ~/.config/huen-wm/config.lua
 open -n -g -a "$HOME/Applications/Huen WM.app" --args doctor
 ```
 
-Grant Accessibility to the installed app manually in System Settings. Launch through `open` so macOS checks the app's permissions rather than the terminal's permission context. `doctor` never prompts. Use `open --stdout /absolute/path/doctor.json` to save its output. Screen Recording is optional. Without it, workspace changes are instant and tiling still works.
+Grant Accessibility to the installed app manually in System Settings. Launch through `open` so macOS checks the app's permissions rather than the terminal's permission context. `doctor` never prompts. Use `open --stdout /absolute/path/doctor.json` to save its output. Screen Recording is optional. Without it, workspace changes are instant and tiling still works. Input Monitoring is optional. With it, the manager recovers hotkeys that macOS fails to deliver.
 
 First native check should manage only the disposable fixture. Do not run another tiling manager against the same windows.
 

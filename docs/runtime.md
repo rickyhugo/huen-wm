@@ -14,6 +14,12 @@ AX geometry can update before matching WindowServer bounds. A successful frame w
 
 Binding names refer to physical keys, not characters produced by the active input layout. Letter, digit, and punctuation names use the ANSI positions from the macOS SDK `Events.h` virtual-key constants. `section` names the ISO key at code `0x0a`. For example, `j`, `k`, and `l` use codes `0x26`, `0x28`, and `0x25`. Numbered workspaces use the physical number row, not the keypad.
 
+## Hotkey delivery watch
+
+macOS can stop delivering Carbon hotkeys without reporting an error. A listen-only session event tap in `native/observe.m` sees each key press that matches a registered binding and records it with the command bound at that moment. `src/delivery.zig` pairs that press with the Carbon delivery, which can arrive up to 250 ms before the press or at any time after it. A press that Carbon has not delivered after 750 ms runs from the recorded command, and every hotkey registers again at most once per five seconds. A Carbon delivery of the same hotkey within one second of that recovery does not run the command a second time. Each recovery is reported on stderr.
+
+The tap needs Input Monitoring permission. The manager never requests it. Without it, the tap does not start and hotkeys work as before without recovery. The tap starts at launch, so permission granted later takes effect at the next start. A listen-only tap never delays a key press, even while the main thread waits on Accessibility. `status.hotkeys` reports `watchdog` as `active` or `unavailable`, with `missed` and `rebinds` counts. `doctor` reports `input_monitoring`.
+
 ## Menu-bar presentation
 
 Zig derives a bounded status presentation from committed configuration and the active monitor. The bridge copies terminated UTF-8 strings and at most twelve rows synchronously on the main thread. `NULL` removes the item. AppKit renders the supplied title, tooltip, checkmarks, availability, and commands without querying workspace JSON. There is no workspace popup.
