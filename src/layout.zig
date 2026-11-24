@@ -18,6 +18,10 @@ pub const Node = struct {
     visible: bool = false,
     frame: Rect = std.mem.zeroes(Rect),
     minimum: [2]f64 = .{ 0, 0 },
+    /// The minimum when the splits inside overlap where their sides do not fit side by side.
+    compact: [2]f64 = .{ 0, 0 },
+    /// The most windows that one cascade inside can hold along each axis.
+    layers: [2]f64 = .{ 1, 1 },
     learned: [2]f64 = .{ 0, 0 },
 };
 
@@ -232,6 +236,11 @@ pub const Store = struct {
                         }
                     }
                 }
+                // A new tile beside one side of an overlapped split would overlap the other side, so it goes beside the split.
+                while (self.nodes[target].parent) |parent| {
+                    if (!self.overlapped(parent)) break;
+                    target = parent;
+                }
                 const frame = self.nodes[target].frame;
                 const bounds = if (frame.width > 0 and frame.height > 0) frame else member.area;
                 const branch = available[1];
@@ -255,6 +264,16 @@ pub const Store = struct {
             const live = if (self.resolve(selection) catch null) |handle| state.root == self.rootOf(handle) else false;
             if (!live) state.selection = null;
         };
+    }
+
+    /// A visible branch whose second side starts before the first side ends.
+    fn overlapped(self: *const Store, handle: Handle) bool {
+        const node = self.nodes[handle];
+        if (node.content != .branch or !node.visible) return false;
+        const first = self.nodes[node.content.branch.children[0]];
+        const second = self.nodes[node.content.branch.children[1]];
+        if (!first.visible or !second.visible) return false;
+        return if (node.content.branch.axis == .width) second.frame.left < first.frame.left + first.frame.width else second.frame.top < first.frame.top + first.frame.height;
     }
 
     fn vanishedLeaf(self: *const Store, members: []const Member, handle: Handle) bool {
@@ -282,25 +301,37 @@ pub const Store = struct {
     fn measure(self: *Store, handle: Handle, gap: f64) void {
         var node = &self.nodes[handle];
         switch (node.content) {
-            .leaf => node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.learned[0]), @max(minimum_tile_extent, node.learned[1]) } else .{ 0, 0 },
+            .leaf => {
+                node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.learned[0]), @max(minimum_tile_extent, node.learned[1]) } else .{ 0, 0 };
+                node.compact = node.minimum;
+                node.layers = .{ 1, 1 };
+            },
             .branch => |branch| {
                 for (branch.children) |child| self.measure(child, gap);
                 const first = self.nodes[branch.children[0]];
                 const second = self.nodes[branch.children[1]];
                 node.active = first.active or second.active;
-                if (!first.active) {
-                    node.minimum = second.minimum;
-                } else if (!second.active) {
-                    node.minimum = first.minimum;
+                if (!first.active or !second.active) {
+                    const only = if (first.active) first else second;
+                    node.minimum = only.minimum;
+                    node.compact = only.compact;
+                    node.layers = only.layers;
                 } else {
                     node.minimum = .{ @max(first.minimum[0], second.minimum[0]), @max(first.minimum[1], second.minimum[1]) };
+                    node.compact = .{ @max(first.compact[0], second.compact[0]), @max(first.compact[1], second.compact[1]) };
+                    node.layers = .{ @max(first.layers[0], second.layers[0]), @max(first.layers[1], second.layers[1]) };
                     const dimension: usize = if (branch.axis == .width) 0 else 1;
                     node.minimum[dimension] = first.minimum[dimension] + second.minimum[dimension] + gap;
+                    const cascade = @max(first.compact[dimension] + second.layers[dimension] * overlap_step, second.compact[dimension] + first.layers[dimension] * overlap_step);
+                    node.compact[dimension] = @min(first.compact[dimension] + second.compact[dimension] + gap, cascade);
+                    node.layers[dimension] = first.layers[dimension] + second.layers[dimension];
                 }
             },
             .group => |*group| {
                 node.active = false;
                 node.minimum = .{ 0, 0 };
+                node.compact = .{ 0, 0 };
+                node.layers = .{ 1, 1 };
                 var selected_active = false;
                 var child: ?Handle = group.first;
                 while (child) |current| : (child = self.nodes[current].next) {
@@ -321,8 +352,12 @@ pub const Store = struct {
                     }
                 }
                 if (node.active) {
+                    const header = 24 * @as(f64, @floatFromInt(if (group.mode == .tabbed) @as(usize, 1) else group.count));
                     node.minimum = self.nodes[group.selected].minimum;
-                    node.minimum[1] += 24 * @as(f64, @floatFromInt(if (group.mode == .tabbed) @as(usize, 1) else group.count));
+                    node.minimum[1] += header;
+                    node.compact = self.nodes[group.selected].compact;
+                    node.compact[1] += header;
+                    node.layers = self.nodes[group.selected].layers;
                 }
             },
             .free => unreachable,
@@ -351,10 +386,25 @@ pub const Store = struct {
             if (self.nodes[second].active) self.project(second, frame, gap);
             return;
         }
-        const dimension: usize = if (branch.axis == .width) 0 else 1;
-        const halves = split(frame, branch.axis, branch.ratio, gap, .{ self.nodes[first].minimum[dimension], self.nodes[second].minimum[dimension] });
+        const halves = split(frame, branch.axis, branch.ratio, gap, self.sides(branch));
         self.project(first, halves[0], gap);
         self.project(second, halves[1], gap);
+    }
+
+    fn sides(self: *const Store, branch: Branch) [2]Side {
+        const dimension: usize = if (branch.axis == .width) 0 else 1;
+        var result: [2]Side = undefined;
+        for (&result, branch.children) |*side, child| side.* = .{ .minimum = self.nodes[child].minimum[dimension], .compact = self.nodes[child].compact[dimension], .layers = self.nodes[child].layers[dimension] };
+        return result;
+    }
+
+    /// The extent the two sides of a branch share and the least and most of it for the first side. Null when the sides overlap or follow the ratio.
+    fn range(self: *const Store, handle: Handle, gap: f64) ?struct { available: f64, minimum: f64, maximum: f64 } {
+        const node = self.nodes[handle];
+        const extent = if (node.content.branch.axis == .width) node.frame.width else node.frame.height;
+        const available = extent - @min(gap, @max(0, extent - 2));
+        const least = leastExtents(available, self.sides(node.content.branch)) orelse return null;
+        return if (available > 0) .{ .available = available, .minimum = least[0], .maximum = available - least[1] } else null;
     }
 
     pub fn arrange(self: *Store, state: *WorkspaceLayout, frame: Rect, gap: f64) void {
@@ -404,16 +454,11 @@ pub const Store = struct {
             const first = branch.children[0];
             const second = branch.children[1];
             if (branch.axis != axis or !self.nodes[first].active or !self.nodes[second].active) continue;
-            const dimension: usize = if (axis == .width) 0 else 1;
-            const extent = if (axis == .width) node.frame.width else node.frame.height;
-            const available = extent - @min(gap, @max(0, extent - 2));
-            const minimum = self.nodes[first].minimum[dimension];
-            const maximum = available - self.nodes[second].minimum[dimension];
-            if (available <= 0 or maximum < minimum) return 0;
-            const previous = std.math.clamp(available * branch.ratio, minimum, maximum);
+            const limits = self.range(parent, gap) orelse return 0;
+            const previous = std.math.clamp(limits.available * branch.ratio, limits.minimum, limits.maximum);
             const sign: f64 = if (child == first) 1 else -1;
-            const next = std.math.clamp(previous + sign * delta, minimum, maximum);
-            branch.ratio = next / available;
+            const next = std.math.clamp(previous + sign * delta, limits.minimum, limits.maximum);
+            branch.ratio = next / limits.available;
             self.revision +%= 1;
             return (next - previous) * sign;
         }
@@ -443,7 +488,7 @@ pub const Store = struct {
         node.frame = frame;
         if (node.content == .leaf and node.active) {
             if (count > 1) {
-                const columns = split(frame, .width, ratio, gap, .{ 0, 0 });
+                const columns = split(frame, .width, ratio, gap, .{ .{}, .{} });
                 if (ordinal.* == 0) {
                     node.frame = columns[0];
                 } else {
@@ -868,7 +913,7 @@ pub const Store = struct {
             const branch = node.content.branch;
             const first = self.nodes[branch.children[0]];
             const second = self.nodes[branch.children[1]];
-            if (!first.visible or !second.visible) continue;
+            if (!first.visible or !second.visible or self.overlapped(@intCast(index))) continue;
             var rect = node.frame;
             if (branch.axis == .width) {
                 rect.left = first.frame.left + first.frame.width - tolerance;
@@ -894,15 +939,10 @@ pub const Store = struct {
         const first = self.nodes[branch.children[0]];
         const second = self.nodes[branch.children[1]];
         if (!first.visible or !second.visible) return error.StaleGesture;
-        const dimension: usize = if (branch.axis == .width) 0 else 1;
-        const extent = if (branch.axis == .width) node.frame.width else node.frame.height;
-        const available = extent - @min(gap, @max(0, extent - 2));
-        const minimum = first.minimum[dimension];
-        const maximum = available - second.minimum[dimension];
-        if (available <= 0 or maximum < minimum) return .{ .boundary = boundary, .ratio = branch.ratio, .applied_delta = 0 };
-        const previous = std.math.clamp(available * branch.ratio, minimum, maximum);
-        const next = std.math.clamp(previous + delta, minimum, maximum);
-        return .{ .boundary = boundary, .ratio = next / available, .applied_delta = next - previous };
+        const limits = self.range(handle, gap) orelse return .{ .boundary = boundary, .ratio = branch.ratio, .applied_delta = 0 };
+        const previous = std.math.clamp(limits.available * branch.ratio, limits.minimum, limits.maximum);
+        const next = std.math.clamp(previous + delta, limits.minimum, limits.maximum);
+        return .{ .boundary = boundary, .ratio = next / limits.available, .applied_delta = next - previous };
     }
 
     pub fn commitResize(self: *Store, preview: ResizePreview, gap: f64) !void {
@@ -1002,24 +1042,52 @@ fn fitsPair(frame: Rect, gap: f64) bool {
     return @min(frame.width, frame.height) >= minimum_tile_extent and @max(frame.width, frame.height) >= 2 * minimum_tile_extent + gap;
 }
 
-/// Each side keeps its minimum when both minimums fit. Otherwise the split follows the ratio.
-pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, minimums: [2]f64) [2]Rect {
+// Two windows of one application within 4 points of each other are not on screen for the native adapter, so overlapped sides never share a frame.
+pub const overlap_step: f64 = 16;
+
+/// What one side of a split needs along the split axis.
+pub const Side = struct {
+    /// The least extent when every split inside stands side by side.
+    minimum: f64 = 0,
+    /// The least extent when the splits inside overlap where their sides do not fit side by side.
+    compact: f64 = 0,
+    /// The most windows that one cascade inside can hold.
+    layers: f64 = 1,
+};
+
+/// The least extent of each side when the sides fit side by side: the minimums when they fit, and else the compact minimums.
+fn leastExtents(available: f64, sides: [2]Side) ?[2]f64 {
+    for ([_][2]f64{ .{ sides[0].minimum, sides[1].minimum }, .{ sides[0].compact, sides[1].compact } }) |least| if (available - least[1] >= least[0]) return least;
+    return null;
+}
+
+/// Each side keeps its least extent when the sides fit side by side, and the rest follows the ratio. Sides that do not fit
+/// overlap: the first keeps the leading edge and the second the trailing edge, and each gives up one `overlap_step` for
+/// every window the other can cascade, so no two windows share a frame. Sides too large to overlap follow the ratio.
+pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, sides: [2]Side) [2]Rect {
     var first = frame;
     var second = frame;
     const extent = if (axis == .width) frame.width else frame.height;
     const spacing = @min(gap, @max(0, extent - 2));
     const available = extent - spacing;
-    const proportional = available * ratio;
-    const maximum = available - minimums[1];
-    const leading = if (maximum >= minimums[0]) std.math.clamp(proportional, minimums[0], maximum) else proportional;
+    var leading = available * ratio;
+    var offset = leading + spacing;
+    const steps = [2]f64{ sides[0].layers * overlap_step, sides[1].layers * overlap_step };
+    if (leastExtents(available, sides)) |least| {
+        leading = std.math.clamp(leading, least[0], available - least[1]);
+        offset = leading + spacing;
+    } else if (sides[0].compact + steps[1] <= extent and sides[1].compact + steps[0] <= extent) {
+        leading = extent - steps[1];
+        offset = steps[0];
+    }
     if (axis == .width) {
         first.width = leading;
-        second.left += first.width + spacing;
-        second.width = frame.width - first.width - spacing;
+        second.left += offset;
+        second.width = frame.width - offset;
     } else {
         first.height = leading;
-        second.top += first.height + spacing;
-        second.height = frame.height - first.height - spacing;
+        second.top += offset;
+        second.height = frame.height - offset;
     }
     return .{ first, second };
 }

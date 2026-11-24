@@ -68,7 +68,7 @@ two participating children. Intervening perpendicular splits preserve the reques
 dimension, so the returned delta describes the focused leaf's dimension change.
 Hidden siblings do not absorb the resize.
 The clamp accounts for gaps and the minimum of every participating leaf.
-An unavailable axis, a single window, or an infeasible minimum returns an applied
+An unavailable axis, a single window, an overlapped split, or an infeasible minimum returns an applied
 delta of zero.
 
 Master retains its column and stack. Stack rows have equal heights unless a learned minimum binds.
@@ -137,16 +137,26 @@ Learned minimums only grow. They last until the window closes or until `toggle-f
 
 A branch gives each child at least its minimum along the branch axis when both minimums fit.
 The rest follows the ratio. The stored ratio does not change, so the requested split returns when the minimum no longer binds.
-When the minimums do not fit, the branch splits by ratio.
 A branch needs the sum of its children's minimums plus the gap along its axis and the larger minimum across it.
 
+When the minimums do not fit side by side, the two children overlap.
+The first child keeps the leading edge of the branch and the second child keeps the trailing edge.
+Two windows get the full extent less 16 points each, so a strip of 16 points of the window behind stays visible.
+Windows of nested overlapped branches on one axis form one cascade: equal extents, each 16 points further along.
+The step also keeps the frames distinct, because the native adapter cannot tell apart two windows of one application at one frame.
+The tree and the stored ratio do not change. The children stand side by side again when their minimums fit, for example after a window closes.
+An overlapped branch has no resize boundary for the mouse, and `resize` on it applies a delta of zero.
+A new window goes beside the overlapped branch, not into it, so it does not cover a window that it does not split.
+A child whose minimum does not fit the branch with the step taken off cannot overlap. That branch splits by ratio.
+
 Master bounds its column split by the master's minimum width and the largest minimum width in the stack.
+The master and the stack overlap by the same rule when those two widths do not fit side by side.
 Stack rows keep minimum heights larger than an equal share, and the other rows share the rest equally.
 When the minimum heights do not fit in the column, the rows have equal heights.
 
 Reconciliation learns from a rejected tile, derives the goals again, and places the windows again in the same tick.
 A workspace switch learns from a rolled-back tile and retries that window once.
-A minimum is kept only when the derived layout gives every window on that display its learned minimum.
+A minimum is kept only when the derived layout gives every window on that display its learned minimum, side by side or overlapped.
 Otherwise it is dropped, so the window that does not fit is the one that floats.
 A rejection that teaches no larger minimum floats the window as before, after the one-second grace for new windows.
 

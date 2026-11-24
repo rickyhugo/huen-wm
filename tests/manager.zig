@@ -17,6 +17,7 @@ const modules = .{
     @import("cases/identity.zig"),
     @import("cases/input.zig"),
     @import("cases/layout_check.zig"),
+    @import("cases/overlap.zig"),
 };
 
 comptime {
@@ -88,6 +89,14 @@ pub fn expect(holds: bool, comptime format: []const u8, arguments: anytype) !voi
 
 pub fn expectFrame(actual: Rect, expected: Rect, comptime label: []const u8) !void {
     try expect(model.framesNear(actual, expected, 0.5), label ++ " at ({d}, {d}, {d}, {d}), got ({d}, {d}, {d}, {d})", .{ expected.left, expected.top, expected.width, expected.height, actual.left, actual.top, actual.width, actual.height });
+}
+
+pub fn inside(frame: Rect, area: Rect) bool {
+    return frame.left >= area.left and frame.top >= area.top and frame.left + frame.width <= area.left + area.width and frame.top + frame.height <= area.top + area.height;
+}
+
+pub fn overlap(first: Rect, second: Rect) bool {
+    return model.intersection(first, second) != null;
 }
 
 pub fn near(first: Rect, second: Rect) bool {
