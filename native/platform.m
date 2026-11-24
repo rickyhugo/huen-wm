@@ -416,6 +416,7 @@ static void scanWindows(pid_t onlyProcess) {
                 BOOL unique = frames.count == windows.count && matchingAX == 1;
                 BOOL assumedVisible = unique && matchingCG == 0 && CACurrentMediaTime() < record.assumedVisibleDeadline;
                 observation.onscreen = unique && (matchingCG == 1 || assumedVisible);
+                observation.stack_order = matchedOrder == NSNotFound ? UINT32_MAX : (uint32_t)matchedOrder;
                 if (!observation.onscreen) observation.public_window_id = 0;
                 observation.hit_eligible = observation.public_window_id != 0;
                 for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {

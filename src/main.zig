@@ -313,7 +313,7 @@ export fn wm_input_poll() void {
             .resize => |preview| if (layouts.commitResize(preview, config.gap)) null else |err| err,
         };
         const target = result catch |err| {
-            transaction.rollback(0);
+            transaction.rollback(&.{});
             pointer_controls.error_message = @errorName(err);
             continue;
         };
@@ -817,11 +817,12 @@ const PlacementTransaction = struct {
         allocator.free(self.originals);
     }
 
-    fn rollback(self: PlacementTransaction, attempted: usize) void {
-        var remaining = attempted;
+    // `attempted` holds indices into `windows.items` in the order their placement was attempted.
+    fn rollback(self: PlacementTransaction, attempted: []const usize) void {
+        var remaining = attempted.len;
         while (remaining > 0) {
             remaining -= 1;
-            const identity = windows.items[remaining].identity;
+            const identity = windows.items[attempted[remaining]].identity;
             const original_index = self.identityIndex(identity);
             const original = self.originals[original_index] orelse continue;
             if (verifiedFrame(identity, original, null)) continue;
@@ -842,13 +843,26 @@ const PlacementTransaction = struct {
         unreachable;
     }
 
+    // Shows the incoming windows before parking the outgoing ones, back to front, so the desktop never shows through.
     fn commit(self: PlacementTransaction) bool {
         if (!deriveGoals()) {
-            self.rollback(0);
+            self.rollback(&.{});
             return false;
         }
-        for (windows.items, 0..) |*window, index| {
-            if (self.originals[self.identityIndex(window.identity)] == null) continue;
+        var order: [1024]usize = undefined;
+        var count: usize = 0;
+        for (windows.items, 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and visible(window)) {
+            order[count] = index;
+            count += 1;
+        };
+        const shown = count;
+        for (windows.items, 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and !visible(window)) {
+            order[count] = index;
+            count += 1;
+        };
+        std.mem.sort(usize, order[shown..count], {}, backToFront);
+        for (order[0..count], 0..) |index, position| {
+            const window = &windows.items[index];
             const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
             if (outcome == .applied) continue;
             // An application that rejects its tile size must not block every other window. Float it, as reconcile does,
@@ -857,12 +871,17 @@ const PlacementTransaction = struct {
                 floatRejectedTile(window);
                 if (window.floating and deriveGoals() and placeVisibility(window, targetFrame(window.*), false) == .applied) continue;
             }
-            self.rollback(index + 1);
+            self.rollback(order[0 .. position + 1]);
             transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
             return false;
         }
         transition_error = null;
         return true;
+    }
+
+    // Unknown stack positions are `maxInt(u32)`, so they come first.
+    fn backToFront(_: void, first: usize, second: usize) bool {
+        return windows.items[first].observation.stack_order > windows.items[second].observation.stack_order;
     }
 };
 fn routeMembership() bool {
@@ -1544,7 +1563,7 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
             };
             defer transaction.deinit();
             layouts.reveal(state, identity) catch |err| {
-                transaction.rollback(0);
+                transaction.rollback(&.{});
                 transition_error = @errorName(err);
                 return;
             };
@@ -1569,7 +1588,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
     if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| layouts.reveal(state, identity) catch |err| {
-        transaction.rollback(0);
+        transaction.rollback(&.{});
         transition_error = @errorName(err);
         return false;
     };
@@ -1946,11 +1965,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     var target: ?u64 = null;
                     switch (command) {
                         .tilemove => |direction| layouts.tilemove(state, source.identity, direction) catch |err| {
-                            transaction.rollback(0);
+                            transaction.rollback(&.{});
                             return failure(@errorName(err));
                         },
                         .group => |action| target = layouts.editGroup(state, source.identity, action) catch |err| {
-                            transaction.rollback(0);
+                            transaction.rollback(&.{});
                             return failure(@errorName(err));
                         },
                         else => unreachable,
@@ -2014,7 +2033,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
                     if (source.floating) source.floating_restore = true else layouts.reveal(state, source.identity) catch |err| {
-                        transaction.rollback(0);
+                        transaction.rollback(&.{});
                         return failure(@errorName(err));
                     };
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
