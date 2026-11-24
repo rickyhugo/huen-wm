@@ -383,7 +383,11 @@ fn publishStatus() void {
             urgent[window.workspace] = true;
             alert = true;
         };
-        statusText(&presentation.title, if (active_mode != 0 and !suspended) text(&config.modes[active_mode].name) else label, 24);
+        const shown = if (active_mode != 0 and !suspended) text(&config.modes[active_mode].name) else label;
+        switch (config.status_bar.style) {
+            .text => statusText(&presentation.title, shown, 24),
+            .badge => statusText(&presentation.badge, shown, 24),
+        }
         if (alert) {
             const mark = " •";
             @memcpy(presentation.title[text(&presentation.title).len..][0..mark.len], mark);

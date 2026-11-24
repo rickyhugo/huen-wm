@@ -9,7 +9,7 @@ pub extern "c" fn platform_warp_pointer(point: WMPoint) bool;
 pub extern "c" fn platform_pointer_buttons() bool;
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
 pub const WMStatusRow = extern struct { title: [80]u8, command: [128]u8, checked: bool, enabled: bool };
-pub const WMStatusPresentation = extern struct { title: [160]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
+pub const WMStatusPresentation = extern struct { title: [160]u8, badge: [128]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
 pub extern "c" fn platform_status_present(presentation: ?*const WMStatusPresentation) void;
 pub const lua_State = opaque {};
 pub const LUA_OK = 0;

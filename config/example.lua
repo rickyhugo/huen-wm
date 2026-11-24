@@ -24,7 +24,7 @@ bind("ctrl+alt", "-", "resize -0.05")
 bind("ctrl+alt", "r", "reload")
 
 return {
-    status_bar = { enabled = true, label = "name" },
+    status_bar = { enabled = true, label = "name", style = "text" },
     session = { enabled = false },
     placement_memory = true,
     mouse = { enabled = false, mods = "ctrl+alt" },

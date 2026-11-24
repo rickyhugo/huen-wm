@@ -37,7 +37,7 @@ pub const Config = struct {
     workspace_back_and_forth: bool = false,
     focus_on_activate: bool = false,
     placement_memory: bool = true,
-    status_bar: struct { enabled: bool = true, label: enum { name, index, index_and_name } = .name } = .{},
+    status_bar: struct { enabled: bool = true, label: enum { name, index, index_and_name } = .name, style: enum { text, badge } = .text } = .{},
     session: struct { enabled: bool = false } = .{},
     mouse: struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 } = .{},
     swipe: struct { enabled: bool = false, fingers: u32 = 3 } = .{},

@@ -23,7 +23,8 @@ pub const FloatingSize = struct { width: f64 = 0.5, height: f64 = 0.5 };
 pub const Mouse = struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 };
 pub const Swipe = struct { enabled: bool = false, fingers: u32 = 3 };
 pub const StatusLabel = enum { name, index, index_and_name };
-pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
+pub const StatusStyle = enum { text, badge };
+pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name, style: StatusStyle = .text };
 pub const Mode = struct {
     name: [64:0]u8 = @splat(0),
     bindings: [128]native.WMBinding = @splat(std.mem.zeroes(native.WMBinding)),
@@ -503,9 +504,10 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     }
     pop(state);
     if (rawField(state, "status_bar") != native.LUA_TNIL) {
-        try checkKeys(state, &.{ "enabled", "label" });
+        try checkKeys(state, &.{ "enabled", "label", "style" });
         result.status_bar.enabled = try fieldBool(state, "enabled", true);
         if (try fieldString(state, "label")) |label| result.status_bar.label = std.meta.stringToEnum(StatusLabel, label) orelse return error.InvalidStatusLabel;
+        if (try fieldString(state, "style")) |style| result.status_bar.style = std.meta.stringToEnum(StatusStyle, style) orelse return error.InvalidStatusStyle;
     }
     pop(state);
     result.gap = try fieldNumber(state, "gap", 12, 0, 100);

@@ -34,7 +34,7 @@ return {
     workspace_monitors = { "external", "built-in" },
     mouse_follows_monitor = true,
     focus_on_activate = true,
-    status_bar = { enabled = true, label = "name" },
+    status_bar = { enabled = true, label = "name", style = "text" },
     bindings = bindings,
     modes = {
         {

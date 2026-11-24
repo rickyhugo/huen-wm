@@ -20,8 +20,8 @@ bool platform_warp_pointer(WMPoint point);
 bool platform_pointer_buttons(void);
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
-typedef struct { char title[160], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;
-/* Synchronous main-thread copy. NULL disables. Strings are terminated UTF-8; row_count <= 12. */
+typedef struct { char title[160], badge[128], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;
+/* Synchronous main-thread copy. NULL disables. Strings are terminated UTF-8; row_count <= 12. A nonempty badge draws as a filled rounded box before the title. */
 void platform_status_present(const WMStatusPresentation *presentation);
 int platform_main(int argc, char **argv);
 lua_State *platform_lua_open(void);

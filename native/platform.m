@@ -831,6 +831,23 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
 
 static StatusItemOwner *statusOwner;
 
+// A template image, so the menu bar tints the box for light and dark mode; the text is cut out of it.
+static NSImage *statusBadge(NSString *label) {
+    NSDictionary *attributes = @{ NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightBold], NSForegroundColorAttributeName: NSColor.blackColor };
+    NSSize textSize = [label sizeWithAttributes:attributes];
+    CGFloat height = 16, width = MAX(height, ceil(textSize.width) + 8);
+    NSImage *image = [NSImage imageWithSize:NSMakeSize(width, height) flipped:NO drawingHandler:^BOOL(NSRect bounds) {
+        [NSColor.blackColor setFill];
+        [[NSBezierPath bezierPathWithRoundedRect:bounds xRadius:4 yRadius:4] fill];
+        CGContextSetBlendMode(NSGraphicsContext.currentContext.CGContext, kCGBlendModeDestinationOut);
+        [label drawAtPoint:NSMakePoint((width - textSize.width) / 2, (height - textSize.height) / 2) withAttributes:attributes];
+        return YES;
+    }];
+    image.template = YES;
+    image.accessibilityDescription = label;
+    return image;
+}
+
 void platform_status_present(const WMStatusPresentation *presentation) {
     BOOL removing = !presentation || stopping;
     if (!removing && presentation->row_count > 12) { platform_error("Status menu exceeds row limit"); return; }
@@ -858,6 +875,9 @@ void platform_status_present(const WMStatusPresentation *presentation) {
         entry.state = row->checked ? NSControlStateValueOn : NSControlStateValueOff;
         [menu addItem:entry];
     }
+    NSString *badge = [NSString stringWithUTF8String:presentation->badge];
+    statusOwner.item.button.image = badge.length ? statusBadge(badge) : nil;
+    statusOwner.item.button.imagePosition = NSImageLeading;
     statusOwner.item.button.title = [NSString stringWithUTF8String:presentation->title];
     statusOwner.item.button.toolTip = [NSString stringWithUTF8String:presentation->tooltip];
     statusOwner.item.menu = menu;
