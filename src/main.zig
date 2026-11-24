@@ -19,7 +19,7 @@ const Direction = commands.Direction;
 const parseCommand = commands.parse;
 // Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
 const Escape = union(enum) { settled, escaped: f64, exempt };
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, minimum: [2]f64 = .{ 0, 0 } };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -590,20 +590,21 @@ fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     const state = workspaceLayout(source.display, source.workspace);
     if (state.layout == .dwindle) return layouts.resizePoints(source.identity, axis, delta, config.gap);
     if (axis != .width) return error.MasterHeightResizeUnsupported;
-    var master: ?u64 = null;
+    var indices: [1024]usize = undefined;
     var count: usize = 0;
-    for (windows.items) |window| {
+    for (windows.items, 0..) |window, index| {
         if (window.display != source.display or window.workspace != source.workspace or !visible(window) or window.floating) continue;
-        if (master == null) master = window.identity;
+        indices[count] = index;
         count += 1;
     }
     if (count < 2) return 0;
+    const minimums = masterMinimums(indices[0..count]);
     const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
     const available = area.width - @min(config.gap, @max(0, area.width - 2));
-    if (available < 160) return 0;
-    const sign: f64 = if (master == source.identity) 1 else -1;
-    const previous = available * state.ratio;
-    const next = std.math.clamp(previous + sign * delta, 80, available - 80);
+    if (available < minimums[0] + minimums[1]) return 0;
+    const sign: f64 = if (indices[0] == source_index) 1 else -1;
+    const previous = std.math.clamp(available * state.ratio, minimums[0], available - minimums[1]);
+    const next = std.math.clamp(previous + sign * delta, minimums[0], available - minimums[1]);
     state.ratio = next / available;
     return (next - previous) * sign;
 }
@@ -825,7 +826,8 @@ const PlacementTransaction = struct {
             const identity = windows.items[attempted[remaining]].identity;
             const original_index = self.identityIndex(identity);
             const original = self.originals[original_index] orelse continue;
-            if (verifiedFrame(identity, original, null)) continue;
+            var restored = original;
+            if (verifiedFrame(identity, original, null, &restored)) continue;
             const intent = &self.intent[original_index];
             if (!intent.parked) intent.parking_frame = original;
             intent.parked = true;
@@ -863,13 +865,13 @@ const PlacementTransaction = struct {
         std.mem.sort(usize, order[shown..count], {}, backToFront);
         for (order[0..count], 0..) |index, position| {
             const window = &windows.items[index];
-            const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
+            const outcome = if (visible(window.*)) placeVisible(window) else parkWindow(window);
             if (outcome == .applied) continue;
             // An application that rejects its tile size must not block every other window. Float it, as reconcile does,
             // and derive goals again so later windows do not receive tiles sized around the rejected one.
             if (outcome == .rolled_back and visible(window.*) and !window.floating) {
                 floatRejectedTile(window);
-                if (window.floating and deriveGoals() and placeVisibility(window, targetFrame(window.*), false) == .applied) continue;
+                if (window.floating and deriveGoals() and placeVisible(window) == .applied) continue;
             }
             self.rollback(order[0 .. position + 1]);
             transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
@@ -915,7 +917,7 @@ fn layoutMembers(output: []tiling.Member) []tiling.Member {
     var count: usize = 0;
     for (windows.items) |window| {
         const display = displays.items[displayIndex(window.display) orelse continue];
-        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap) };
+        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .minimum = window.minimum };
         count += 1;
     }
     return output[0..count];
@@ -1053,15 +1055,36 @@ fn deriveGoals() bool {
             continue;
         }
         if (workspace.layout == .master) {
-            const columns = tiling.split(area, .width, workspace.ratio, config.gap);
+            const columns = tiling.split(area, .width, workspace.ratio, config.gap, masterMinimums(indices[0..count]));
             windows.items[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
             const spacing = @min(config.gap, columns[1].height / (2 * rows));
             const height = (columns[1].height - spacing * (rows - 1)) / rows;
-            for (indices[1..count], 0..) |index, row| {
+            var bound: [1024]bool = @splat(false);
+            var share = height;
+            var required = spacing * (rows - 1);
+            for (indices[1..count]) |index| required += rowMinimum(windows.items[index]);
+            if (required <= columns[1].height) {
+                var remaining = columns[1].height - spacing * (rows - 1);
+                var unbound = count - 1;
+                var settled = false;
+                while (!settled) {
+                    settled = true;
+                    for (indices[1..count], bound[1..count]) |index, *fixed| if (!fixed.* and rowMinimum(windows.items[index]) > share) {
+                        fixed.* = true;
+                        remaining -= rowMinimum(windows.items[index]);
+                        unbound -= 1;
+                        settled = false;
+                    };
+                    if (!settled and unbound > 0) share = remaining / @as(f64, @floatFromInt(unbound));
+                }
+            }
+            var shift: f64 = 0;
+            for (indices[1..count], bound[1..count], 0..) |index, fixed, row| {
                 var frame = columns[1];
-                frame.top += @as(f64, @floatFromInt(row)) * (height + spacing);
-                frame.height = height;
+                frame.top += @as(f64, @floatFromInt(row)) * (share + spacing) + shift;
+                frame.height = if (fixed) rowMinimum(windows.items[index]) else share;
+                shift += frame.height - share;
                 windows.items[index].goal = frame;
             }
         } else for (indices[0..count]) |index| {
@@ -1069,6 +1092,17 @@ fn deriveGoals() bool {
         }
     }
     return true;
+}
+fn rowMinimum(window: Window) f64 {
+    return @max(tiling.minimum_tile_extent, window.minimum[1]);
+}
+fn masterMinimums(indices: []const usize) [2]f64 {
+    var minimums: [2]f64 = @splat(tiling.minimum_tile_extent);
+    for (indices, 0..) |index, ordinal| {
+        const slot: usize = if (ordinal == 0) 0 else 1;
+        minimums[slot] = @max(minimums[slot], windows.items[index].minimum[0]);
+    }
+    return minimums;
 }
 fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
     return @abs(first.left - second.left) <= tolerance and @abs(first.top - second.top) <= tolerance and @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;
@@ -1102,13 +1136,12 @@ fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
         actual.top >= area.top and actual.top <= bottom and actual.top + actual.height >= bottom and
         !overlapsOtherDisplays(actual, displayIdentity);
 }
-fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
+fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32, actual: *Rect) bool {
     _ = native.platform_frame(identity, target, 0, .verified_placement);
-    var actual: Rect = undefined;
-    if (!native.platform_read_frame(identity, &actual)) return false;
-    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual, target, displayIdentity) else framesNear(actual, target, 2);
+    if (!native.platform_read_frame(identity, actual)) return false;
+    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else framesNear(actual.*, target, 2);
 }
-const PlacementOutcome = enum { applied, rolled_back, recovery_required, unreadable, no_corner };
+const PlacementOutcome = union(enum) { applied, rolled_back: struct { accepted: Rect }, recovery_required, unreadable, no_corner };
 
 fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
     var original: Rect = undefined;
@@ -1118,15 +1151,17 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     // A failed AX write can still move the window. Own it before the first write.
     window.parked = true;
     if (parked and !previouslyParked) saveParkingJournal();
-    if (verifiedFrame(window.identity, target, if (parked) window.display else null)) {
+    var accepted = target;
+    if (verifiedFrame(window.identity, target, if (parked) window.display else null, &accepted)) {
         window.parked = parked;
         window.parked_at = if (parked) native.platform_monotonic() else null;
         window.placement_error = null;
         return .applied;
     }
-    if (verifiedFrame(window.identity, original, null)) {
+    var restored = original;
+    if (verifiedFrame(window.identity, original, null, &restored)) {
         window.parked = previouslyParked;
-        return .rolled_back;
+        return .{ .rolled_back = .{ .accepted = accepted } };
     }
     window.parked_at = null;
     return .recovery_required;
@@ -1140,10 +1175,39 @@ fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
         .no_corner => placementFailure(window, "No parking corner avoids other displays"),
     }
 }
-fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
-    const outcome = attemptVisibility(window, target, parked);
+fn placeVisible(window: *Window) PlacementOutcome {
+    const target = targetFrame(window.*);
+    var outcome = attemptVisibility(window, target, false);
+    if (outcome == .rolled_back and !window.floating and !managedFullscreen(window.*) and learnMinimum(window, target, outcome.rolled_back.accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
     reportPlacementOutcome(window, outcome);
     return outcome;
+}
+// A minimum the layout cannot honor is dropped, so the window that does not fit floats rather than a neighbor.
+fn learnMinimum(window: *Window, target: Rect, accepted: Rect) bool {
+    // A launching application can restore its own larger frame over its first placements. That frame is a preference, not a minimum.
+    if (native.platform_monotonic() - window.discovered < 1.0) return false;
+    const area = inset(displays.items[displayIndex(window.display) orelse return false].frame, config.gap);
+    const previous = window.minimum;
+    var grew = false;
+    for (&window.minimum, [2]f64{ target.width, target.height }, [2]f64{ accepted.width, accepted.height }, [2]f64{ area.width, area.height }) |*minimum, requested, answered, usable| {
+        const learned = @min(answered, usable);
+        if (answered > requested + 2 and learned > minimum.*) {
+            minimum.* = learned;
+            grew = true;
+        }
+    }
+    if (!grew) return false;
+    if (deriveGoals() and minimumsHonored(window.display)) return true;
+    window.minimum = previous;
+    _ = deriveGoals();
+    return false;
+}
+fn minimumsHonored(display: u32) bool {
+    for (windows.items) |window| {
+        if (window.display != display or !visible(window) or window.floating or managedFullscreen(window)) continue;
+        if (window.goal.width < window.minimum[0] - 2 or window.goal.height < window.minimum[1] - 2) return false;
+    }
+    return true;
 }
 fn parkWindow(window: *Window) PlacementOutcome {
     if (window.escape == .exempt) return .applied;
@@ -1185,9 +1249,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
-fn reconcile() void {
-    if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
-    if (!deriveGoals()) return;
+fn placeWindows() enum { settled, relayout } {
     for (windows.items) |*window| {
         if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
             window.floating = true;
@@ -1204,7 +1266,7 @@ fn reconcile() void {
         }
         const target = targetFrame(window.*);
         if (window.parked) {
-            const outcome = placeVisibility(window, target, false);
+            const outcome = placeVisible(window);
             if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             continue;
         }
@@ -1215,13 +1277,25 @@ fn reconcile() void {
             floatRejectedTile(window);
             continue;
         }
+        if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
+        if (!window.floating and learnMinimum(window, target, accepted)) return .relayout;
         // A launching application can refuse or override its first placements. Retry a new window before floating it.
         if (native.platform_monotonic() - window.discovered < 1.0) continue;
+        const tiled = !window.floating;
         window.floating = true;
         window.floating_restore = false;
-        if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
         window.floating_frame = accepted;
         placementFailure(window, "Application rejected layout geometry; window left floating");
+        if (tiled) return .relayout;
+    }
+    return .settled;
+}
+fn reconcile() void {
+    if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
+    if (!deriveGoals()) return;
+    var passes: usize = 0;
+    while (placeWindows() == .relayout and passes < windows.items.len) : (passes += 1) {
+        if (!deriveGoals()) return;
     }
     var borderIdentity: u64 = 0;
     if (focused) |identity| if (windowIndex(identity)) |index| {
@@ -1821,9 +1895,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 } };
             var items: [1024]Item = undefined;
-            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt };
+            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.minimum[0], .height = window.minimum[1] } };
             return json(items[0..windows.items.len]);
         },
         .monitors => {
@@ -2055,6 +2129,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (source.floating) {
                         source.last_floating_frame = source.floating_frame;
                         source.floating = false;
+                        // Tiling a window again asks its application afresh, so a minimum that no longer holds can shrink.
+                        source.minimum = .{ 0, 0 };
                     } else {
                         // Like Hyprland: return to the last floating frame, or float at `floating_size`, centered.
                         const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
