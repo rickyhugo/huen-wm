@@ -266,8 +266,7 @@ pub const Store = struct {
         return false;
     }
 
-    // A new leaf goes where it would go if vanished leaves were already removed, so a window that is not a
-    // replacement lands as it did before vanished windows kept their leaves.
+    // A vanished leaf can still go to a successor, so a new leaf is placed as if the vanished leaves were already removed.
     fn survivingParent(self: *const Store, members: []const Member, handle: Handle) ?Handle {
         var child = handle;
         while (self.nodes[child].parent) |ancestor| : (child = ancestor) {
@@ -1011,7 +1010,8 @@ pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, minimums: [2]f64) [2
     const spacing = @min(gap, @max(0, extent - 2));
     const available = extent - spacing;
     const proportional = available * ratio;
-    const leading = if (minimums[0] + minimums[1] <= available) std.math.clamp(proportional, minimums[0], available - minimums[1]) else proportional;
+    const maximum = available - minimums[1];
+    const leading = if (maximum >= minimums[0]) std.math.clamp(proportional, minimums[0], maximum) else proportional;
     if (axis == .width) {
         first.width = leading;
         second.left += first.width + spacing;

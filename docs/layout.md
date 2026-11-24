@@ -131,6 +131,7 @@ An application can refuse a tile and answer with a larger frame.
 A width or height more than two points above the request becomes the window's learned minimum.
 It is capped at the usable extent of the window's display.
 A refusal in the first second after a window appears teaches nothing, because a launching application can restore its own larger frame.
+Windows that the manager's first scan finds are exempt from that wait when their application has run for more than 5 seconds.
 Learned minimums only grow. They last until the window closes or until `toggle-floating` tiles the window again.
 `windows` reports them as `minimum.width` and `minimum.height`, with zero for unknown.
 

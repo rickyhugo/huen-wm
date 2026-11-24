@@ -863,12 +863,13 @@ static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *c
     return noErr;
 }
 void platform_hotkey_pressed(uint32_t key, uint32_t modifiers) {
-    for (uint32_t slot = 0; slot < 256; slot++) if (hotkeyRefs[slot] && currentBindings[slot].key == key && currentBindings[slot].modifiers == modifiers) { wm_hotkey_pressed(slot, currentBindings[slot].command); return; }
+    for (uint32_t slot = 0; slot < 256; slot++) if (currentBindings[slot].command[0] && currentBindings[slot].key == key && currentBindings[slot].modifiers == modifiers) { wm_hotkey_pressed(slot, currentBindings[slot].command); return; }
 }
 bool platform_rebind(void) {
     bool complete = true;
-    for (size_t slot = 0; slot < 256; slot++) if (hotkeyRefs[slot]) {
-        UnregisterEventHotKey(hotkeyRefs[slot]);
+    // A slot that failed to register keeps its binding, so the key press still runs it and the next call registers it again.
+    for (size_t slot = 0; slot < 256; slot++) if (currentBindings[slot].command[0]) {
+        if (hotkeyRefs[slot]) UnregisterEventHotKey(hotkeyRefs[slot]);
         EventHotKeyID identity = {'HUEN', (UInt32)slot};
         if (RegisterEventHotKey(currentBindings[slot].key, currentBindings[slot].modifiers, identity, GetApplicationEventTarget(), 0, &hotkeyRefs[slot]) != noErr) { hotkeyRefs[slot] = NULL; complete = false; }
     }
@@ -924,21 +925,24 @@ void platform_drag_active(bool active) {
 }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
 static NSDictionary *journalReport(void) {
-    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM/journal.jsonl"];
-    NSData *contents = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:NULL];
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM"];
     NSMutableDictionary<NSString *, NSNumber *> *events = [NSMutableDictionary dictionary];
     id lastMark = NSNull.null;
-    const char *bytes = contents.bytes; NSUInteger start = 0;
-    while (start < contents.length) {
-        const char *newline = memchr(bytes + start, '\n', contents.length - start);
-        NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
-        NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
-        start = end + 1;
-        if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
-        events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
-        if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
+    // The rotated file is older, so it is read first.
+    for (NSString *name in @[@"journal.1.jsonl", @"journal.jsonl"]) {
+        NSData *contents = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:name] options:NSDataReadingMappedIfSafe error:NULL];
+        const char *bytes = contents.bytes; NSUInteger start = 0;
+        while (start < contents.length) {
+            const char *newline = memchr(bytes + start, '\n', contents.length - start);
+            NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
+            NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
+            start = end + 1;
+            if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
+            events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
+            if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
+        }
     }
-    return @{ @"path": path, @"events": events, @"last_mark": lastMark };
+    return @{ @"path": [directory stringByAppendingPathComponent:@"journal.jsonl"], @"events": events, @"last_mark": lastMark };
 }
 
 int platform_main(int argc, char **argv) {

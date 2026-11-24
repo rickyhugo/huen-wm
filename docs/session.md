@@ -227,12 +227,14 @@ Each entry has a bundle ID, a workspace name, floating state, a floating frame, 
 
 The runtime adds entries at two points.
 When a window leaves the scan and its ghost grace of 0.5 seconds ends without a replacement, the runtime adds an entry that expires 30 seconds later.
-That entry names the process that owned the window, by PID and launch date.
-Only a window of another process can claim it, and only after the owning process has exited.
-The exit is checked at the claim, because an application can take seconds to exit after its windows close.
+The entry names the process that owned the window, by PID and launch date, and cannot be claimed yet.
+An application can take seconds to exit after its windows close, so each tick checks the owning process.
+When that process has exited, the entry becomes claimable.
 A relaunch with the same PID has a different launch date and counts as an exit.
-A new window from an application that keeps running therefore joins the current workspace.
-Entries loaded from the placement file name no process, so any window of the bundle can claim them.
+When the process still runs 5 seconds after the window went away, the window was closed and the entry is dropped.
+A new window from an application that keeps running therefore joins the current workspace, also after that application quits later.
+Entries loaded from the placement file name no process and are claimable at once.
+An entry that still waits for its process to exit is not written to the placement file.
 At `restore`, `quit`, and signal shutdown, after original-frame restoration, the runtime reads each window's frame and writes those entries and the unexpired in-memory entries to the placement file.
 
 The file is `~/Library/Application Support/HuenWM/placements-<hash>.json`.

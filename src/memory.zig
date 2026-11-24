@@ -3,9 +3,11 @@ const Rect = @import("native.zig").WMRect;
 
 pub const capacity = 256;
 pub const max_bytes = 1024 * 1024;
-// `pid` and `token` name the process that owned the window. A zero token is an entry from the previous manager, which any process may claim.
-pub const Entry = struct { bundle: [256]u8 = @splat(0), workspace: [64]u8 = @splat(0), floating: bool = false, floating_frame: Rect, frame: Rect, expires: f64, pid: c_int = 0, token: f64 = 0 };
 pub const Process = struct { pid: c_int, token: f64 };
+// How long after a window goes away its application may take to exit and still count as having quit with that window open.
+pub const release_window = 5.0;
+// `owner` is set while it is unknown whether the window was closed or its application quit. Such an entry cannot be claimed.
+pub const Entry = struct { bundle: [256]u8 = @splat(0), workspace: [64]u8 = @splat(0), floating: bool = false, floating_frame: Rect, frame: Rect, expires: f64, owner: ?struct { process: Process, since: f64 } = null };
 const Persisted = struct { bundle: []const u8, workspace: []const u8, floating: bool, floating_frame: Rect, frame: Rect };
 const File = struct { version: u32, entries: []const Persisted };
 
@@ -19,15 +21,39 @@ pub const Memory = struct {
         self.count += 1;
     }
 
+    /// Releases the entries whose application exited, and drops the ones whose application outlived the release window:
+    /// their windows were closed, so a later window of that application must not take their place.
+    pub fn settle(self: *Memory, now: f64, exited: *const fn (Process) bool) void {
+        var index: usize = 0;
+        while (index < self.count) {
+            const owner = self.entries[index].owner orelse {
+                index += 1;
+                continue;
+            };
+            if (exited(owner.process)) {
+                self.entries[index].owner = null;
+            } else if (now - owner.since > release_window) {
+                self.remove(index);
+                continue;
+            }
+            index += 1;
+        }
+    }
+
+    pub fn dropPending(self: *Memory) void {
+        var index: usize = 0;
+        while (index < self.count) {
+            if (self.entries[index].owner != null) self.remove(index) else index += 1;
+        }
+    }
+
     /// Takes the unexpired entry of `bundle` whose frame is within 4 points of `frame`, else its oldest unexpired entry.
-    /// An entry is open to another process only after its own process exited, so a window closed in a running application is never claimed.
-    pub fn claim(self: *Memory, bundle: []const u8, frame: Rect, now: f64, claimant: Process, exited: *const fn (Process) bool) ?Entry {
+    pub fn claim(self: *Memory, bundle: []const u8, frame: Rect, now: f64) ?Entry {
         self.prune(now);
         var chosen: ?usize = null;
         for (self.entries[0..self.count], 0..) |*entry, index| {
             if (!std.mem.eql(u8, std.mem.sliceTo(&entry.bundle, 0), bundle)) continue;
-            const owner: Process = .{ .pid = entry.pid, .token = entry.token };
-            if (owner.token != 0 and (std.meta.eql(owner, claimant) or !exited(owner))) continue;
+            if (entry.owner != null) continue;
             if (near(entry.frame, frame)) {
                 chosen = index;
                 break;
@@ -71,7 +97,6 @@ pub fn encode(allocator: std.mem.Allocator, entries: []const Entry) ![]u8 {
     return std.json.Stringify.valueAlloc(allocator, File{ .version = 1, .entries = persisted }, .{});
 }
 
-/// Replaces the contents of `memory` with the decoded entries, each expiring at `expires`.
 pub fn decode(allocator: std.mem.Allocator, bytes: []const u8, expires: f64, memory: *Memory) !void {
     const parsed = try std.json.parseFromSlice(File, allocator, bytes, .{ .max_value_len = max_bytes });
     defer parsed.deinit();

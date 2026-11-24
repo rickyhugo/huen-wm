@@ -51,16 +51,19 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(
     return parsed;
 }
 
-// macOS can clamp the vertical position of a parked window, so the top is not compared.
-pub fn match(records: []const Record, observed: []const native.WMWindow, output: []Recovery) []Recovery {
-    var claimed: [max_records]bool = @splat(false);
+// macOS can clamp the vertical position of a parked window, so the frame only has to cross the bottom edge the corner sits on.
+// `eligible` marks the observations that may match, and `claimed` receives the records that did.
+pub fn match(records: []const Record, observed: []const native.WMWindow, eligible: []const bool, claimed: []bool, output: []Recovery) []Recovery {
     var count: usize = 0;
-    for (observed, 0..) |*window, index| {
+    for (observed, eligible, 0..) |*window, open, index| {
         if (count == output.len) break;
-        for (records, claimed[0..records.len]) |record, *used| {
+        if (!open) continue;
+        for (records, claimed) |record, *used| {
             if (used.* or record.pid != window.pid or record.token != window.process_token or !std.mem.eql(u8, record.bundle, std.mem.sliceTo(&window.bundle, 0))) continue;
             const parked = for (record.corners) |corner| {
-                if (@abs(window.frame.width - corner.width) <= 2 and @abs(window.frame.height - corner.height) <= 2 and @abs(window.frame.left - corner.left) <= 2) break true;
+                const bottom = corner.top + 1;
+                if (@abs(window.frame.width - corner.width) <= 2 and @abs(window.frame.height - corner.height) <= 2 and @abs(window.frame.left - corner.left) <= 2 and
+                    window.frame.top <= bottom + 2 and window.frame.top + window.frame.height >= bottom - 2) break true;
             } else false;
             if (!parked) continue;
             used.* = true;

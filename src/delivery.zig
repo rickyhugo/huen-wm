@@ -38,6 +38,13 @@ pub const Watch = struct {
         return entry.state.pressed;
     }
 
+    /// A new binding table can give a slot to another key, so a waiting press must not pair with that key's delivery.
+    pub fn forgetPresses(self: *Watch) void {
+        for (&self.entries) |*slot| if (slot.*) |entry| if (entry.state == .pressed) {
+            slot.* = null;
+        };
+    }
+
     fn expire(self: *Watch, now: f64) void {
         for (&self.entries) |*slot| if (slot.*) |entry| switch (entry.state) {
             .pressed => {},
