@@ -2257,6 +2257,33 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             } else null else null;
             return jumpToWindow(urgent orelse focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow"), displaySlot);
         },
+        .move_app => |request| {
+            const resolved = resolvePlacements();
+            const workspace = resolveWorkspace(request.workspace, displaySlot) catch |err| return failure(@errorName(err));
+            var identities: [1024]u64 = undefined;
+            var count: usize = 0;
+            for (windows.items) |window| if (window.vanished == null and std.mem.eql(u8, text(&window.observation.bundle), request.bundle.text())) {
+                identities[count] = window.identity;
+                count += 1;
+            };
+            var moved: usize = 0;
+            var first_error: ?[]const u8 = null;
+            for (identities[0..count]) |identity| {
+                const index = windowIndex(identity) orelse continue;
+                const window = windows.items[index];
+                const destination = resolved[workspace] orelse window.display;
+                if (workspace == window.workspace and destination == window.display) continue;
+                if (route(resolved, &.{}, .{ .index = index, .display = destination, .workspace = workspace })) moved += 1 else if (first_error == null) {
+                    first_error = transition_error orelse "MonitorRoutingFailed";
+                }
+            }
+            if (focused) |identity| if (windowIndex(identity)) |index| if (!visible(windows.items[index])) {
+                focused = null;
+            };
+            if (moved > 0) native.platform_config_changed();
+            if (first_error) |message| return json(.{ .@"error" = true, .err_message = message, .moved = moved });
+            return json(.{ .ok = true, .moved = moved });
+        },
         .layout => |layout| {
             if (placedWorkspace(display.*) == null) return failure("NoWorkspaceOnMonitor");
             const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));

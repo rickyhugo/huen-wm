@@ -275,6 +275,7 @@ fn validate(candidate: *const ConfigCandidate) !void {
                     if (binding.key == 0x35 and binding.modifiers == 0 and std.mem.eql(u8, name.text(), "main")) escape_to_main = true;
                 },
                 .workspace, .send_to_workspace, .move_to_workspace => |selection| if (selection == .name and candidate.workspaceIndex(selection.name.text()) == null) return error.UnknownWorkspaceName,
+                .move_app => |request| if (request.workspace == .name and candidate.workspaceIndex(request.workspace.name.text()) == null) return error.UnknownWorkspaceName,
                 else => {},
             }
             for (mode.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;

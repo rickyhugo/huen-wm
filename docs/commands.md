@@ -260,7 +260,7 @@ See [runtime homes](monitors.md#runtime-homes), [hotplug](monitors.md#hotplug), 
 
 ## Workspace selectors
 
-`workspace`, `send-to-workspace`, and `move-to-workspace` take one selector.
+`workspace`, `send-to-workspace`, `move-to-workspace`, and `move-app` take one selector.
 
 | Selector | Target |
 | --- | --- |
@@ -308,6 +308,14 @@ Without a previous workspace, the selection stays on the current workspace.
 With `workspace_monitors`, it does not apply when the selected display shows no workspace, except in owner mode.
 The option defaults to `false`.
 
+`move-app BUNDLE SELECTOR` sends every managed window whose bundle ID is exactly `BUNDLE` to the target workspace, as `send-to-workspace` does for the focused window.
+The selector resolves once, against the active display, before any window moves.
+Without `workspace_monitors`, each window stays on its display.
+The selection, the shown workspaces, and focus do not change, except that a focused window sent to a hidden workspace loses focus.
+Windows already on the target are skipped.
+The reply reports `moved`, the number of windows moved.
+If a move fails, the reply is an error with the first `err_message` and `moved`, and the other windows still move.
+
 `move-to-workspace SELECTOR` sends the focused window and shows the target workspace in one placement commit.
 It then focuses the moved window and reports `verified` and `target`.
 It does not use the snapshot transition.
@@ -354,6 +362,7 @@ Verbs reject extra arguments.
 | `toggle-floating` | None. Floats at the last floating frame, or centered at `floating_size`. |
 | `layout` | `dwindle` or `master`. |
 | `workspace`, `send-to-workspace`, `move-to-workspace` | One workspace selector. |
+| `move-app` | One bundle ID, then one workspace selector. |
 | `mode` | One configured mode name. |
 
 Flags precede their positional argument.
