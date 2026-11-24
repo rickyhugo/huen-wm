@@ -17,7 +17,7 @@ sh scripts/smoke.sh
 sh scripts/bundle.sh
 ```
 
-The signed development app is `zig-out/Huen WM.app`. The bundle script does not launch it. Run `sh scripts/bundle.sh --install` explicitly to copy it to `~/Applications/Huen WM.app`. Nothing installs a launch agent or login item. Ad-hoc signing keeps a stable bundle identifier, `dev.huen-wm`, but macOS may require renewed permission after rebuilding.
+The signed development app is `zig-out/Huen WM.app`. The bundle script does not launch it. Run `sh scripts/bundle.sh --install` explicitly to copy it to `~/Applications/Huen WM.app` and register that copy with Launch Services. Nothing installs a launch agent or login item. Ad-hoc signing keeps a stable bundle identifier, `dev.huen-wm`, but macOS may require renewed permission after rebuilding.
 
 To enable startup separately, use the [opt-in login helper](docs/login-startup.md).
 

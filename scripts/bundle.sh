@@ -12,6 +12,10 @@ codesign --verify --strict "$bundle"
 if [ "${1:-}" = "--install" ]; then
 	mkdir -p "$HOME/Applications"
 	ditto "$bundle" "$HOME/Applications/Huen WM.app"
+	# Every build registers its bundle under dev.huen-wm, so point Launch Services at the installed copy.
+	lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+	"$lsregister" -u "$bundle" 2>/dev/null || true
+	"$lsregister" -f "$HOME/Applications/Huen WM.app"
 	printf '%s\n' "Installed $HOME/Applications/Huen WM.app. Not launched."
 else
 	printf '%s\n' "Built $bundle. Not installed or launched."
