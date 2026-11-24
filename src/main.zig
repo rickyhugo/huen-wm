@@ -1218,7 +1218,8 @@ fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32, actual: *Rect
     if (!native.platform_read_frame(identity, actual)) return false;
     return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else framesNear(actual.*, target, 2);
 }
-const PlacementOutcome = union(enum) { applied, rolled_back: struct { accepted: Rect }, recovery_required, unreadable, no_corner };
+const Refusal = struct { accepted: Rect };
+const PlacementOutcome = union(enum) { applied, rolled_back: Refusal, recovery_required: Refusal, unreadable, no_corner };
 
 fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
     var original: Rect = undefined;
@@ -1241,7 +1242,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
         return .{ .rolled_back = .{ .accepted = accepted } };
     }
     window.parked_at = null;
-    return .recovery_required;
+    return .{ .recovery_required = .{ .accepted = accepted } };
 }
 fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
     switch (outcome) {
@@ -1255,7 +1256,22 @@ fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
 fn placeVisible(window: *Window) PlacementOutcome {
     const target = targetFrame(window.*);
     var outcome = attemptVisibility(window, target, false);
-    if (outcome == .rolled_back and !window.floating and !managedFullscreen(window.*) and learnMinimum(window, target, outcome.rolled_back.accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
+    const refusal: ?Refusal = switch (outcome) {
+        .rolled_back, .recovery_required => |refusal| refusal,
+        else => null,
+    };
+    if (refusal) |answer| if (!managedFullscreen(window.*)) {
+        const accepted = answer.accepted;
+        if (!window.floating) {
+            if (outcome == .rolled_back and learnMinimum(window, target, accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
+        } else if (@abs(accepted.width - target.width) > 2 or @abs(accepted.height - target.height) > 2) {
+            // A floating window takes the size its application answered with, or the same refusal would repeat on every attempt.
+            // An application that raised its minimum also refuses the rollback to the old size, so both refusals are retried.
+            window.floating_frame.width = accepted.width;
+            window.floating_frame.height = accepted.height;
+            outcome = attemptVisibility(window, targetFrame(window.*), false);
+        }
+    };
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
@@ -1292,7 +1308,12 @@ fn parkWindow(window: *Window) PlacementOutcome {
         var actual: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
         const area = displays.items[displayIndex(window.display) orelse break :outcome .no_corner].frame;
-        const candidates = parking.corners(if (window.parked) window.parking_frame else actual, area);
+        // A parked window keeps the size its application gave it, so a corner is never written with a size the application refuses.
+        if (window.parked) {
+            window.parking_frame.width = actual.width;
+            window.parking_frame.height = actual.height;
+        }
+        const candidates = parking.corners(actual, area);
         if (window.parked) for (candidates) |candidate| if (parkedFrameAccepted(actual, candidate, window.display)) {
             window.placement_error = null;
             return .applied;
@@ -1344,15 +1365,8 @@ fn placeWindows() enum { settled, relayout } {
         }
         const target = targetFrame(window.*);
         if (window.parked) {
-            switch (placeVisible(window)) {
-                // A floating window takes the size its application answered with, or the same refusal would repeat on every scan.
-                .rolled_back => |rejection| if (window.floating and !managedFullscreen(window.*)) {
-                    window.floating_frame.width = rejection.accepted.width;
-                    window.floating_frame.height = rejection.accepted.height;
-                } else floatRejectedTile(window),
-                .recovery_required => floatRejectedTile(window),
-                else => {},
-            }
+            const outcome = placeVisible(window);
+            if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             continue;
         }
         const duration = if (window.floating_restore and !managedFullscreen(window.*)) 0 else config.duration;
