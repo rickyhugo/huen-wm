@@ -66,7 +66,7 @@ pub fn monitorConfig(smoke: *Smoke, owners: ?[]const []const u8, follows: bool, 
         "{'One','Two','Three'}";
     // The token changes the configuration hash, so each restart run reads only its own checkpoint.
     const session = if (session_token) |token| try std.fmt.allocPrint(system.allocator, "session={{enabled=true}}, border_color='#{x:0>6}', ", .{token}) else "";
-    try smoke.writeConfig(try std.fmt.allocPrint(system.allocator, "return {{gap={d}, motion_duration=0, workspaces={s}, {s}{s}mouse_follows_monitor={s}, bindings={{}}}}\n", .{ workflow_gap, workspaces, routing, session, follow }));
+    try smoke.writeConfig(try std.fmt.allocPrint(system.allocator, "return {{gap={d}, motion_duration=0, workspaces={s}, {s}{s}mouse_follows_monitor={s}, " ++ driver.Smoke.isolation ++ "bindings={{}}}}\n", .{ workflow_gap, workspaces, routing, session, follow }));
 }
 
 pub fn reloadMonitors(smoke: *Smoke, name: []const u8, owners: ?[]const []const u8, follows: bool, split: bool) Error!void {

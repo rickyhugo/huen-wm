@@ -249,13 +249,17 @@ pub const Smoke = struct {
         try system.rename(replacement, smoke.config_path);
     }
 
+    // Every run turns off placement memory. The fixture's placements file outlives a run, and a window that
+    // claims an entry from an earlier run would start floating or on another workspace.
+    pub const isolation = "placement_memory=false, ";
+
     pub fn config(smoke: *Smoke, gap: u32) Error!void {
         const duration = if (smoke.options.scenes) "0.12" else "0";
-        try smoke.writeConfig(try std.fmt.allocPrint(system.allocator, "return {{gap={d}, motion_duration={s}, workspaces={{'One','Two'}}, bindings={{}}}}\n", .{ gap, duration }));
+        try smoke.writeConfig(try std.fmt.allocPrint(system.allocator, "return {{gap={d}, motion_duration={s}, workspaces={{'One','Two'}}, " ++ isolation ++ "bindings={{}}}}\n", .{ gap, duration }));
     }
 
     pub fn workflowConfig(smoke: *Smoke) Error!void {
-        try smoke.writeConfig(std.fmt.comptimePrint("return {{gap={d}, motion_duration=0, workspaces={{'One','Two','Three'}}, workspace_back_and_forth=true, bindings={{}}}}\n", .{workflow_gap}));
+        try smoke.writeConfig(std.fmt.comptimePrint("return {{gap={d}, motion_duration=0, workspaces={{'One','Two','Three'}}, workspace_back_and_forth=true, " ++ isolation ++ "bindings={{}}}}\n", .{workflow_gap}));
     }
 
     pub fn preflight(smoke: *Smoke) Error!void {

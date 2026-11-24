@@ -20,6 +20,7 @@ mise run native-smoke \
 
 Add `--scenes` to require captured covers for both workspace switches, then check native frame convergence. This does not prove appearance, animation quality, or snapshot coverage.
 
+Every configuration the driver writes sets `placement_memory = false`. The fixture's placements file outlives a run, and a fixture window that claims an entry from an earlier run starts floating or on another workspace.
 The driver refuses an existing huen-wm or HuenFixture process. It checks permissions through LaunchServices before it pauses AeroSpace.
 It restores AeroSpace only if this run disabled it. If the owned manager does not stop, the driver leaves AeroSpace disabled and records the failure.
 It never hard-kills the manager or installs an app.
