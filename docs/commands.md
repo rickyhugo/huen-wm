@@ -115,6 +115,17 @@ Only one conditional close request can be pending.
 `termination_requested` does not mean that the application has exited.
 Restore and shutdown cancel a pending request.
 
+## Diagnostic commands
+
+`wrong [NOTE...]` appends a `mark` to the [placement journal](runtime.md#placement-journal) and replies `{"ok":true}`.
+The note is the rest of the command line, at most 200 bytes.
+The command works while the manager is suspended.
+It returns `JournalDisabledByFilter` while `--app` is set and `JournalAppendFailed` when the file cannot be written.
+
+```sh
+huen-wm wrong did not switch to workspace 3
+```
+
 ## Focus commands
 
 `focus DIRECTION` keeps the existing directional search, including cross-display candidates.

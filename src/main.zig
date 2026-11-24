@@ -70,6 +70,8 @@ var activated: f64 = -std.math.inf(f64);
 var hotkey_watch: delivery.Watch = .{};
 var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
 var swipe_recognizer: swipe.Recognizer = .{};
+var journal_failed = false;
+var journaled_transition: ?[]const u8 = null;
 var gestures_enabled = false;
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
@@ -1129,11 +1131,53 @@ fn placementFailure(window: *Window, message: []const u8) void {
     const repeated = if (window.placement_error) |previous| std.mem.eql(u8, previous, message) else false;
     window.placement_error = message;
     transition_error = message;
+    journaled_transition = message;
     if (repeated) return;
+    if (journaling()) {
+        var actual: Rect = undefined;
+        const readable = native.platform_read_frame(window.identity, &actual);
+        _ = journal("placement", .{ .window = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .message = message, .workspace = window.workspace + 1, .display = window.display, .goal = window.goal, .target = targetFrame(window.*), .actual = if (readable) actual else null });
+    }
     var buffer: [256:0]u8 = @splat(0);
     const formatted = std.fmt.bufPrint(&buffer, "Window {d}: {s}", .{ window.identity, message }) catch return;
     buffer[formatted.len] = 0;
     native.platform_error(&buffer);
+}
+fn journaling() bool {
+    return native.platform_filter()[0] == 0;
+}
+fn journal(event: []const u8, fields: anytype) bool {
+    if (!journaling()) return false;
+    var buffer: [4096]u8 = undefined;
+    const line = journalLine(&buffer, event, fields) catch return false;
+    if (session.huen_journal_append(line.ptr, line.len)) return true;
+    if (!journal_failed) native.platform_error("Journal append failed; later failures are not reported");
+    journal_failed = true;
+    return false;
+}
+fn journalLine(buffer: []u8, event: []const u8, fields: anytype) ![]const u8 {
+    var clock: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &clock);
+    var writer: std.Io.Writer = .fixed(buffer);
+    var stream: std.json.Stringify = .{ .writer = &writer };
+    try stream.beginObject();
+    try stream.objectField("at");
+    try stream.write(clock.sec);
+    try stream.objectField("event");
+    try stream.write(event);
+    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+        try stream.objectField(name);
+        try stream.write(@field(fields, name));
+    }
+    try stream.endObject();
+    try writer.writeByte('\n');
+    return writer.buffered();
+}
+fn journalTransition() void {
+    const message = transition_error orelse return;
+    if (journaled_transition) |previous| if (std.mem.eql(u8, previous, message)) return;
+    journaled_transition = message;
+    _ = journal("transition", .{ .message = message });
 }
 fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     for (displays.items) |display| {
@@ -1398,6 +1442,7 @@ export fn wm_tick() void {
     if (!initialized) return;
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
     var updated: [monitor.capacity]Display = undefined;
@@ -1696,6 +1741,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const pending = transition orelse return;
     if (callbackGeneration != pending.generation) return;
     defer publishStatus();
+    defer journalTransition();
     native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
     if (displayIndex(pending.display)) |displaySlot| {
@@ -1833,10 +1879,14 @@ fn recoverHotkey(command: *const delivery.Command, now: f64) void {
     var buffer: [256:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(command)}) catch {};
     native.platform_error(&buffer);
+    _ = journal("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
     if (now - hotkey_recovery.rebound >= 5) {
         hotkey_recovery.rebound = now;
         hotkey_recovery.rebinds += 1;
-        if (!native.platform_rebind()) native.platform_error("Hotkey re-registration failed");
+        if (!native.platform_rebind()) {
+            native.platform_error("Hotkey re-registration failed");
+            _ = journal("error", .{ .message = "Hotkey re-registration failed" });
+        }
     }
     wm_hotkey(command);
 }
@@ -1846,6 +1896,7 @@ fn placeShortcuts() void {
     if (suspended or displays.items.len == 0 or transition != null) return;
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     var remaining = workspace_shortcuts.items;
     while (remaining.len != 0) {
         observeCommandState();
@@ -1888,9 +1939,10 @@ export fn wm_hotkey(commandText: [*:0]const u8) void {
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
-        .status, .windows, .monitors, .workspaces => {},
+        .status, .windows, .monitors, .workspaces, .wrong => {},
         .quit, .restore => workspace_shortcuts.clearRetainingCapacity(),
         else => placeShortcuts(),
     }
@@ -1940,6 +1992,18 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const request_id = native.platform_launch(request.bundle.text(), request.new_instance, request.hidden);
             if (request_id == 0) return failure("ApplicationNotFound");
             return json(.{ .ok = true, .accepted = true, .request_id = request_id });
+        },
+        .wrong => |note| {
+            if (!journaling()) return failure("JournalDisabledByFilter");
+            var length = @min(note.len, 200);
+            while (length < note.len and note[length] & 0xc0 == 0x80) length -= 1;
+            const Shown = struct { display: u32, workspace: ?usize };
+            var shown: [monitor.capacity]Shown = undefined;
+            for (displays.items, shown[0..displays.items.len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (placedWorkspace(display)) |workspace| workspace + 1 else null };
+            var parked: usize = 0;
+            for (windows.items) |window| parked += @intFromBool(window.parked);
+            if (!journal("mark", .{ .note = note[0..length], .window_count = windows.items.len, .parked_count = parked, .workspaces = shown[0..displays.items.len], .transition_error = transition_error })) return failure("JournalAppendFailed");
+            return json(.{ .ok = true });
         },
         .exec_and_forget => |shell| {
             if (suspended) return failure("RuntimeSuspendedRestartToResume");
@@ -2338,7 +2402,10 @@ export fn wm_shutdown() bool {
     const outstanding = native.platform_restore();
     saveSession(outstanding == 0);
     if (outstanding == 0) writeParkingJournal(&.{});
-    if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
+    if (outstanding != 0) {
+        native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
+        _ = journal("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
+    }
     native.platform_border(0, 0, 0);
     return true;
 }

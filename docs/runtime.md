@@ -24,6 +24,19 @@ The tap needs Input Monitoring permission. The manager never requests it. Withou
 
 With `swipe.enabled`, the same listen-only tap also receives trackpad gesture events and reports the count and mean normalized position of the touching fingers. `src/swipe.zig` starts a gesture when exactly the configured number of fingers touch. It emits one step when the horizontal travel reaches 0.15 and is at least twice the vertical travel. A change in finger count cancels the gesture. The recognizer arms again after every finger lifts, or after half a second without a gesture event. A step selects the display under the pointer and runs `workspace occupied+1` for a left swipe or `workspace occupied-1` for a right swipe through the hotkey path, so rapid swipes coalesce like rapid shortcuts. A step does nothing while a mouse button is held, while the manager is suspended, or during a workspace transition. The tap listens for gesture events only while swipes are enabled, and a reload changes that.
 
+## Placement journal
+
+The manager appends a line to `~/Library/Application Support/HuenWM/journal.jsonl` at each moment where its model and the screen disagreed. Each line is one JSON object with `at` in Unix seconds and an `event`:
+
+- `placement` records a rejected placement, once until the window's error changes. It has the window identity, `pid`, `bundle`, `message`, `workspace`, `display`, the layout `goal`, the `target` frame the manager asks for after the failure, and the `actual` frame, or `null` when the frame is unreadable.
+- `transition` records a new `status.transition_error` that is not a placement failure. A repeat of the last recorded message is not recorded again.
+- `error` records a hotkey that macOS did not deliver, a failed hotkey registration, or windows left unrestored at shutdown.
+- `mark` records a `wrong` command.
+
+The journal never records a window title or a file path. It is not written while `--app` limits the manager to one application. The file is private to the user, mode 0600, and the manager refuses a symbolic link in its place. Past 1 MiB, the manager renames it to `journal.1.jsonl` and starts a new file, so the two files hold at most about 2 MiB. A failed append is reported on stderr once, and later failures are silent.
+
+Run `huen-wm wrong` right after the manager does something wrong, with an optional note such as `huen-wm wrong did not switch`. The command appends a `mark` with the note, `window_count`, `parked_count`, the workspace shown on each display, and `transition_error`. Notes longer than 200 bytes are cut at a character boundary. The command works while the manager is suspended. `doctor` reports the journal `path`, a count for each event, and `last_mark`. It skips malformed lines.
+
 ## Menu-bar presentation
 
 Zig derives a bounded status presentation from committed configuration and the active monitor. The bridge copies terminated UTF-8 strings and at most twelve rows synchronously on the main thread. `NULL` removes the item. AppKit renders the supplied title, tooltip, checkmarks, availability, and commands without querying workspace JSON. There is no workspace popup.

@@ -58,6 +58,7 @@ pub const Command = union(enum) {
     mode: Name,
     launch: Launch,
     exec_and_forget: []const u8,
+    wrong: []const u8,
     close: bool,
     swap: Direction,
     swap_cycle: Step,
@@ -107,6 +108,7 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (shell.len == 0) return error.MissingArgument;
         return .{ .exec_and_forget = shell };
     }
+    if (std.mem.eql(u8, verb, "wrong")) return .{ .wrong = std.mem.trim(u8, tokens.rest(), " \t") };
     var argument = tokens.next();
     inline for (.{ .{ "workspace", "workspace" }, .{ "send-to-workspace", "send_to_workspace" }, .{ "move-to-workspace", "move_to_workspace" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         const value = argument orelse return error.MissingArgument;

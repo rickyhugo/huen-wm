@@ -52,6 +52,7 @@ pub extern "c" fn huen_session_display_uuid(display: u32, output: [*]u8, capacit
 pub extern "c" fn huen_session_boot_identity(output: [*]u8, capacity: usize) bool;
 pub extern "c" fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize) c_int;
 pub extern "c" fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*]const u8, length: usize, durable: bool) bool;
+pub extern "c" fn huen_journal_append(line: [*]const u8, length: usize) bool;
 
 pub const Rect = struct { left: f64, top: f64, width: f64, height: f64 };
 pub const Window = struct {

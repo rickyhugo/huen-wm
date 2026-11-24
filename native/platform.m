@@ -918,6 +918,23 @@ void platform_drag_active(bool active) {
     lastScan = 0;
 }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
+static NSDictionary *journalReport(void) {
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM/journal.jsonl"];
+    NSData *contents = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:NULL];
+    NSMutableDictionary<NSString *, NSNumber *> *events = [NSMutableDictionary dictionary];
+    id lastMark = NSNull.null;
+    const char *bytes = contents.bytes; NSUInteger start = 0;
+    while (start < contents.length) {
+        const char *newline = memchr(bytes + start, '\n', contents.length - start);
+        NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
+        NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
+        start = end + 1;
+        if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
+        events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
+        if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
+    }
+    return @{ @"path": path, @"events": events, @"last_mark": lastMark };
+}
 
 int platform_main(int argc, char **argv) {
     @autoreleasepool {
@@ -946,9 +963,9 @@ int platform_main(int argc, char **argv) {
         if (argc == 1 && getppid() == 1) [arguments addObject:@"start"];
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
-        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nhuen-wm wrong [NOTE...]\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()) };
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()), @"journal": journalReport() };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }

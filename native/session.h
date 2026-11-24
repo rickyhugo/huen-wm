@@ -22,3 +22,5 @@ bool huen_session_boot_identity(char *output, size_t capacity);
    A write that is not durable skips the fsyncs and survives the death of this process, not of the machine. */
 int huen_session_read(const char *stem, const char *hash, void *output, size_t capacity, size_t *used);
 bool huen_session_write(const char *stem, const char *hash, const void *bytes, size_t length, bool durable);
+/* Appends to journal.jsonl beside the session files, renaming it to journal.1.jsonl first past 1 MiB. */
+bool huen_journal_append(const char *line, size_t length);

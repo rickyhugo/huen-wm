@@ -176,3 +176,32 @@ bool huen_session_write(const char *stem, const char *hash, const void *bytes, s
     close(directory);
     return success;
 }
+
+bool huen_journal_append(const char *line, size_t length) {
+    int directory = session_directory();
+    if (directory < 0) return false;
+    struct stat existing;
+    if (fstatat(directory, "journal.jsonl", &existing, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(existing.st_mode) || existing.st_uid != geteuid() || (existing.st_mode & 0777) != 0600 ||
+            ((uint64_t)existing.st_size + length > 1024 * 1024 && renameat(directory, "journal.jsonl", directory, "journal.1.jsonl") != 0)) {
+            close(directory);
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        close(directory);
+        return false;
+    }
+    int descriptor = openat(directory, "journal.jsonl", O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    close(directory);
+    if (descriptor < 0) return false;
+    bool success = private_file(descriptor, S_IFREG, 0600);
+    size_t offset = 0;
+    while (success && offset < length) {
+        ssize_t count = write(descriptor, line + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { success = false; break; }
+        offset += (size_t)count;
+    }
+    if (close(descriptor) != 0) success = false;
+    return success;
+}
