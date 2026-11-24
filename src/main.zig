@@ -333,7 +333,7 @@ export fn wm_input_poll() void {
                 layouts.commitDrop(state, preview) catch |err| break :drop err;
                 break :drop representative;
             },
-            .resize => |preview| if (layouts.commitResize(preview, config.gap)) null else |err| err,
+            .resize => |preview| if (commitPointerResize(state, preview, if (preview.boundary.axis == .width) sample.point.left - sample.origin.left else sample.point.top - sample.origin.top)) null else |err| err,
         };
         const target = result catch |err| {
             transaction.rollback(&.{});
@@ -1314,6 +1314,15 @@ fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
         forgot = true;
     }
     return forgot;
+}
+// Clearing bounds during the drag would move the published boundaries and cancel the gesture, so the release retries the rest.
+fn commitPointerResize(state: *tiling.WorkspaceLayout, preview: tiling.ResizePreview, requested: f64) !void {
+    try layouts.commitResize(preview, config.gap);
+    if (@abs(requested - preview.applied_delta) <= size_bounds.tolerance or !forgetWorkspaceBounds(state.display, state.workspace)) return;
+    if (!deriveGoals()) return error.LayoutProjectionFailed;
+    var boundary = preview.boundary;
+    boundary.revision = layouts.revision;
+    try layouts.commitResize(try layouts.previewResize(boundary, requested - preview.applied_delta, config.gap), config.gap);
 }
 fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
