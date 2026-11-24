@@ -9,6 +9,8 @@ pub const Window = struct {
     identity: u64,
     public_id: u32,
     eligible: bool,
+    // The frame the window is placed at. A lone window can be narrower than its layout leaf.
+    goal: layout.Rect,
     title: []const u8,
     // The on-screen frame of a floating window that modified drags can move or resize.
     floating: ?layout.Rect = null,
@@ -72,8 +74,8 @@ pub const Controls = struct {
                 if (!window.eligible) continue;
                 const node = store.nodeForIdentity(window.identity) orelse continue;
                 if (!belongs(store, node, state)) continue;
-                const frame = store.goal(window.identity) orelse continue;
-                try hits.append(allocator, .{ .kind = .tile, .rect = frame, .node = reference(node), .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
+                if (store.goal(window.identity) == null) continue;
+                try hits.append(allocator, .{ .kind = .tile, .rect = window.goal, .node = reference(node), .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
             }
             var projected_headers: [2047]layout.Header = undefined;
             const header_count = try store.headers(state, &projected_headers);

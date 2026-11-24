@@ -204,6 +204,7 @@ fn pointerWindows(output: []pointer.Window) []pointer.Window {
     for (windows.items, 0..) |window, index| output[index] = .{
         .identity = window.identity,
         .public_id = window.observation.public_window_id,
+        .goal = window.goal,
         .eligible = visible(window) and !window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle and framesNear(window.observation.frame, targetFrame(window), 2),
         .title = text(&windows.items[index].observation.title),
         .floating = if (visible(window) and window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle) window.observation.frame else null,

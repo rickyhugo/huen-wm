@@ -153,6 +153,7 @@ A rejection that teaches no larger minimum floats the window as before, after th
 ## Lone window width
 
 `single_window_max_width` limits the width of a window that is the only tiled window on its display.
+The drag region of the mouse controls covers the narrowed window, not the full width of its layout leaf.
 The window is centered horizontally at the smaller of the usable width and the limit.
 A learned minimum width larger than the limit wins.
 Absent or `0` means no limit. Other values are from 400 to 100000 points.
