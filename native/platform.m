@@ -429,6 +429,7 @@ static void scanWindows(pid_t onlyProcess) {
                 if (!observation.minimized && !observation.fullscreen && unique && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
                 observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
                 copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
+                observation.process_token = application.launchDate ? application.launchDate.timeIntervalSinceReferenceDate : 0;
                 NSString *title = attribute(element, kAXTitleAttribute);
                 observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
                 record.observation = observation;
@@ -569,6 +570,19 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
 
 bool platform_read_frame(uint64_t identity, WMRect *frame) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) return readFrame(record.element, frame);
+    return false;
+}
+
+bool platform_adopt_original(uint64_t identity, WMRect frame, WMRect *actual) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity) {
+        record.original = frame;
+        writeFrame(record, frame, YES);
+        BOOL readable = readFrame(record.element, actual);
+        BOOL verified = readable && framesNear(*actual, frame, 2);
+        record.changed = !verified;
+        if (readable) { WMWindow observation = record.observation; observation.frame = *actual; record.observation = observation; }
+        return verified;
+    }
     return false;
 }
 
@@ -917,9 +931,9 @@ int platform_main(int argc, char **argv) {
         if (argc == 1 && getppid() == 1) [arguments addObject:@"start"];
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
-        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }

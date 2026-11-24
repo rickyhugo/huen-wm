@@ -11,6 +11,7 @@ const continuity = @import("continuity.zig");
 const selector = @import("selector.zig");
 const history = @import("history.zig");
 const monitor = @import("monitor.zig");
+const parking = @import("parking.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -81,6 +82,11 @@ var session_focus_pending = false;
 var session_frozen: ?continuity.Frozen = null;
 var session_freeze_attempted = false;
 var session_save_attempted = false;
+var parking_journal: parking.Writer = .{};
+var parking_journal_failed = false;
+const ParkingRecovery = struct { records: usize = 0, recovered: usize = 0, failed: usize = 0 };
+// Null until the first tick that has displays has matched the journal of the previous process.
+var parking_recovery: ?ParkingRecovery = null;
 var session_status: struct {
     load: enum { disabled, pending, none, restored, rejected, failed } = .disabled,
     save: enum { idle, frozen, saved, skipped, failed } = .idle,
@@ -1087,6 +1093,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     if (!previouslyParked) window.parking_frame = original;
     // A failed AX write can still move the window. Own it before the first write.
     window.parked = true;
+    if (parked and !previouslyParked) saveParkingJournal();
     if (verifiedFrame(window.identity, target, if (parked) window.display else null)) {
         window.parked = parked;
         window.placement_error = null;
@@ -1117,12 +1124,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
         var actual: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
         const area = displays.items[displayIndex(window.display) orelse break :outcome .no_corner].frame;
-        var right = if (window.parked) window.parking_frame else actual;
-        right.top = area.top + area.height - 1;
-        right.left = area.left + area.width - 1;
-        var left = right;
-        left.left = area.left + 1 - right.width;
-        const candidates = [2]Rect{ right, left };
+        const candidates = parking.corners(if (window.parked) window.parking_frame else actual, area);
         if (window.parked) for (candidates) |candidate| if (parkedFrameAccepted(actual, candidate, window.display)) {
             window.placement_error = null;
             return .applied;
@@ -1184,6 +1186,70 @@ fn reconcile() void {
         } else false)) borderIdentity = identity;
     };
     native.platform_border(borderIdentity, config.border_width, config.border_color);
+    saveParkingJournal();
+}
+fn reportParkingJournal(message: []const u8, err: anyerror) void {
+    var buffer: [256:0]u8 = @splat(0);
+    const formatted = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ message, @errorName(err) }) catch return;
+    buffer[formatted.len] = 0;
+    native.platform_error(&buffer);
+}
+fn writeParkingJournal(records: []const parking.Record) void {
+    parking_journal.save(allocator, std.mem.span(native.platform_filter()), records) catch |err| {
+        if (!parking_journal_failed) reportParkingJournal("Parking journal save failed", err);
+        parking_journal_failed = true;
+        return;
+    };
+    parking_journal_failed = false;
+}
+fn saveParkingJournal() void {
+    var records: [1024]parking.Record = undefined;
+    var count: usize = 0;
+    for (windows.items) |*window| {
+        if (!window.parked) continue;
+        const display = displays.items[displayIndex(window.display) orelse continue];
+        const record: parking.Record = .{ .bundle = text(&window.observation.bundle), .pid = window.observation.pid, .token = window.observation.process_token, .original = window.parking_frame, .corners = parking.corners(window.parking_frame, display.frame) };
+        if (!parking.valid(record)) continue;
+        records[count] = record;
+        count += 1;
+    }
+    writeParkingJournal(records[0..count]);
+}
+// The display layout may have changed since the crash, so the frame is bounded to the display it overlaps most.
+fn recoveryFrame(frame: Rect) Rect {
+    var largest: f64 = 0;
+    var area = displays.items[0].frame;
+    for (displays.items) |display| {
+        const bounds = display.full_bounds;
+        const width = @min(frame.left + frame.width, bounds.left + bounds.width) - @max(frame.left, bounds.left);
+        const height = @min(frame.top + frame.height, bounds.top + bounds.height) - @max(frame.top, bounds.top);
+        if (width > 0 and height > 0 and width * height > largest) {
+            largest = width * height;
+            area = display.frame;
+        }
+    }
+    return boundedFloating(frame, area);
+}
+// Patches the observations with the readback so discovery assigns each window to the display it is on now.
+fn recoverParked(observed: []native.WMWindow, output: []parking.Recovery) []parking.Recovery {
+    var outcome: ParkingRecovery = .{};
+    defer parking_recovery = outcome;
+    var loaded = (parking.load(allocator, std.mem.span(native.platform_filter())) catch |err| {
+        reportParkingJournal("Parking journal rejected", err);
+        return output[0..0];
+    }) orelse return output[0..0];
+    defer loaded.deinit();
+    outcome.records = loaded.value.records.len;
+    const recoveries = parking.match(loaded.value.records, observed, output);
+    for (recoveries) |*recovery| {
+        const window = &observed[recovery.index];
+        recovery.original = recoveryFrame(recovery.original);
+        var actual = window.frame;
+        if (native.platform_adopt_original(window.identity, recovery.original, &actual)) outcome.recovered += 1 else outcome.failed += 1;
+        window.frame = actual;
+    }
+    if (recoveries.len > 0) native.platform_config_changed();
+    return recoveries;
 }
 export fn wm_tick() void {
     if (pending_close) |pending| close: {
@@ -1217,6 +1283,8 @@ export fn wm_tick() void {
     if (displays.items.len == 0) return;
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
+    var recovered: [1024]parking.Recovery = undefined;
+    const recoveries = if (parking_recovery == null) recoverParked(observed[0..count], &recovered) else recovered[0..0];
     var observed_focus: ?u64 = null;
     for (observed[0..count]) |observation| {
         if (observation.focused) observed_focus = observation.identity;
@@ -1262,6 +1330,11 @@ export fn wm_tick() void {
             window.floating_frame = boundedFloating(frame, area);
             window.floating_restore = true;
         }
+        // A recovered window stays owned even when it did not reach its frame or shares it with another window of its application.
+        for (recoveries) |recovery| if (observed[recovery.index].identity == observation.identity) {
+            window.parked = true;
+            window.parking_frame = recovery.original;
+        };
         window.discovered = native.platform_monotonic();
         windows.appendAssumeCapacity(window);
     }
@@ -1677,6 +1750,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .transition_error = transition_error,
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = session_status,
+                .parking_recovery = parking_recovery,
                 .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
             });
         },
@@ -1761,7 +1835,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             freezeSession();
             suspended = true;
             const outstanding = native.platform_restore();
-            if (outstanding == 0) saveSession(true);
+            if (outstanding == 0) {
+                saveSession(true);
+                writeParkingJournal(&.{});
+            }
             native.platform_border(0, 0, 0);
             if (outstanding != 0) return json(.{ .@"error" = true, .err_message = "Geometry restoration incomplete. Retry restore after unminimizing or leaving fullscreen.", .outstanding = outstanding, .suspended = true });
             return json(.{ .ok = true, .suspended = true, .note = "Restored live-session geometry. Restart to resume tiling." });
@@ -2084,6 +2161,7 @@ export fn wm_shutdown() bool {
     cancelTransition();
     const outstanding = native.platform_restore();
     saveSession(outstanding == 0);
+    if (outstanding == 0) writeParkingJournal(&.{});
     if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
     native.platform_border(0, 0, 0);
     return true;

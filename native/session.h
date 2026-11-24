@@ -18,6 +18,7 @@ typedef struct {
 bool huen_session_identify(AXUIElementRef element, pid_t pid, HuenSessionAttributes *output);
 bool huen_session_display_uuid(CGDirectDisplayID display, char *output, size_t capacity);
 bool huen_session_boot_identity(char *output, size_t capacity);
-/* Hash is exactly 64 lowercase hexadecimal characters. Load returns 0, missing 1, failure -1. */
-int huen_session_read(const char *hash, void *output, size_t capacity, size_t *used);
-bool huen_session_write(const char *hash, const void *bytes, size_t length);
+/* Stem is 1 to 16 lowercase letters. Hash is exactly 64 lowercase hexadecimal characters. Load returns 0, missing 1, failure -1.
+   A write that is not durable skips the fsyncs and survives the death of this process, not of the machine. */
+int huen_session_read(const char *stem, const char *hash, void *output, size_t capacity, size_t *used);
+bool huen_session_write(const char *stem, const char *hash, const void *bytes, size_t length, bool durable);

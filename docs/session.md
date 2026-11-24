@@ -126,7 +126,9 @@ The caller freezes logical intent, captures the checkpoint, restores physical or
 A failed physical restore omits the save.
 A storage error never blocks or replaces native geometry recovery.
 An interruption before successful save retains the previous checkpoint.
-There is no guaranteed crash recovery.
+The checkpoint provides no crash recovery.
+A separate parking journal returns parked windows to their pre-parking frames after a crash, but not their workspace membership or layout.
+See [runtime safety and recovery](runtime.md#safety-and-recovery).
 
 The following skeleton shows the ownership order.
 `freezeCheckpoint` and `restoreOriginalFrames` are caller operations, not session APIs.

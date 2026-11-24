@@ -12,7 +12,7 @@
 typedef struct { double left, top, width, height; } WMRect;
 typedef enum { WMFrameIntentVisibleGoal = 0, WMFrameIntentVerifiedPlacement = 1 } WMFrameIntent;
 typedef enum { WMMotionIdle, WMMotionAnimating, WMMotionRejected } WMMotionState;
-typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete, hit_eligible; uint32_t public_window_id; char bundle[256], title[512]; } WMWindow;
+typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete, hit_eligible; uint32_t public_window_id; char bundle[256], title[512]; double process_token; } WMWindow;
 typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; bool built_in; } WMDisplay;
 typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);
@@ -31,6 +31,9 @@ bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame);
 size_t platform_displays(WMDisplay *output, size_t capacity);
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent);
 bool platform_read_frame(uint64_t identity, WMRect *frame);
+// Makes `frame` the geometry that restore writes back, writes it, and stores the readback in `actual` when readable.
+// Returns whether the readback is near `frame`. A window that did not get there stays eligible for restore.
+bool platform_adopt_original(uint64_t identity, WMRect frame, WMRect *actual);
 bool platform_focus(uint64_t identity);
 uint64_t platform_focused_window(void);
 uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden);
