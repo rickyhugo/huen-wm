@@ -573,7 +573,13 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
 }
 
 bool platform_read_frame(uint64_t identity, WMRect *frame) {
-    for (WindowRecord *record in records) if (record.observation.identity == identity) return readFrame(record.element, frame);
+    for (WindowRecord *record in records) if (record.observation.identity == identity) {
+        if (!readFrame(record.element, frame)) return false;
+        // A write does not scan again, so without this the observation keeps the frame from before the write until the next scan.
+        // The manager would then take its own write for a snap back and learn a size bound from it.
+        WMWindow observation = record.observation; observation.frame = *frame; record.observation = observation;
+        return true;
+    }
     return false;
 }
 
