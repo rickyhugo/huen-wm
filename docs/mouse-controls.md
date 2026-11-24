@@ -1,9 +1,9 @@
 # Native mouse and group interaction reference
 
 `native/interaction.h` defines the C ABI. `src/interaction.zig` mirrors it.
-`native/input.m` owns the singleton event queue, snapshots, and event tap.
+`src/input.zig` owns the singleton event queue, snapshots, and event tap. It builds as its own object, not as part of the `src/main.zig` module.
 `native/groups.m` owns nonactivating header buttons and previews.
-Both native files must link into the same executable.
+Both native units must link into the same executable.
 
 All calls require the main thread. The tap runs on the main run loop in common modes.
 There are no worker threads, runtime JSON messages, AX window scans, CLI calls, or layout mutations in this module.

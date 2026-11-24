@@ -62,7 +62,7 @@ Configuration ratios and persisted default ratios retain their inclusive 0.1 thr
 
 `Controls.publish` excludes non-dwindle workspaces before publishing any tile, header, or boundary hit.
 Master layouts therefore publish no gesture targets.
-In `native/input.m`, a mouse-down without a matching hit returns the original event before capture starts.
+In `src/input.zig`, a mouse-down without a matching hit returns the original event before capture starts.
 Global `status.mouse.availability` describes input capability, not support for gestures in every layout.
 Modified drag and resize are supported only in eligible dwindle workspaces.
 

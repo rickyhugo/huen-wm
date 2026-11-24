@@ -179,7 +179,7 @@ A directory-fsync failure is reported even if rename already replaced the checkp
 
 ## Integration and verification status
 
-The runtime links `native/session.m` and owns retained AX record lookup through `platform_session_attributes`.
+The runtime links `src/session_native.zig` and owns retained AX record lookup through `platform_session_attributes`.
 `src/continuity.zig` converts between bounded session records and the layout store.
 Its conversion storage and temporary stores are heap allocated.
 

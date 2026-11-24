@@ -20,11 +20,16 @@ pub fn build(builder: *std.Build) void {
     native.addFileArg(builder.path("native/platform.m"));
     native.addArg("-o");
     module.addObjectFile(native.addOutputFileArg("platform.o"));
-    for ([_][]const u8{ "scene", "input", "groups", "session", "observe" }) |unit| {
+    for ([_][]const u8{ "scene", "groups" }) |unit| {
         const compilation = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
         compilation.addFileArg(builder.path(builder.fmt("native/{s}.m", .{unit})));
         compilation.addArg("-o");
         module.addObjectFile(compilation.addOutputFileArg(builder.fmt("{s}.o", .{unit})));
+    }
+    // These native units are Zig, but they build as separate objects, as the units above do, so the suite's fake adapter can export the same symbols.
+    for ([_][]const u8{ "input", "observe", "session_native" }) |unit| {
+        const unit_module = builder.createModule(.{ .root_source_file = builder.path(builder.fmt("src/{s}.zig", .{unit})), .target = target, .optimize = optimize, .link_libc = true });
+        module.addObject(builder.addObject(.{ .name = unit, .root_module = unit_module }));
     }
     for ([_][]const u8{ "Cocoa", "ApplicationServices", "Carbon", "QuartzCore", "ScreenCaptureKit", "CoreGraphics" }) |framework| module.linkFramework(framework, .{});
     const executable = builder.addExecutable(.{ .name = "huen-wm", .root_module = module });
