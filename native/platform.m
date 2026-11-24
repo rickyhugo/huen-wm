@@ -753,6 +753,11 @@ bool platform_terminate_if_empty(uint64_t identity, int pid, double process_toke
     return application.launchDate.timeIntervalSinceReferenceDate == process_token && [application terminate];
 }
 
+double platform_process_token(int pid) {
+    NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    return application && !application.terminated && application.launchDate ? application.launchDate.timeIntervalSinceReferenceDate : 0;
+}
+
 static void scanAndTick(pid_t process) {
     lastProcessScan = CACurrentMediaTime();
     if (!process) { dirty = NO; commandScanNeeded = NO; lastScan = lastProcessScan; }

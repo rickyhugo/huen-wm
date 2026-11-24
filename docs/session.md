@@ -211,3 +211,42 @@ The headless probe exercises bounded JSON conversion and strict duplicate matchi
 Combined native acceptance verifies public AXIdentifier reads, mode-0600 clean checkpoints, manager restart matching, native geometry and focus, group child selection, duplicate rejection, and missing-metadata skips on one display.
 Power-loss durability, document-URL fallback, and multi-display routing remain unverified.
 See [workspace controls verification](workspace-controls-verification.md).
+
+## Placement memory
+
+Placement memory is separate from the session checkpoint.
+The checkpoint restores layout trees for the same process and requires stable AX identifiers.
+Placement memory is a heuristic that matches windows by bundle ID and frame.
+It stores only logical intent: a workspace name, floating state, and a floating frame.
+It does not restore layout trees, focus, or display placement.
+It never grants parking or original-frame recovery ownership.
+`placement_memory = false` disables all of it, including file reads and writes.
+
+`src/memory.zig` holds at most 256 entries and drops the oldest first.
+Each entry has a bundle ID, a workspace name, floating state, a floating frame, the window's last frame, and an expiry time.
+
+The runtime adds entries at two points.
+When a window leaves the scan and its ghost grace of 0.5 seconds ends without a replacement, the runtime adds an entry that expires 30 seconds later.
+That entry names the process that owned the window, by PID and launch date.
+Only a window of another process can claim it, and only after the owning process has exited.
+The exit is checked at the claim, because an application can take seconds to exit after its windows close.
+A relaunch with the same PID has a different launch date and counts as an exit.
+A new window from an application that keeps running therefore joins the current workspace.
+Entries loaded from the placement file name no process, so any window of the bundle can claim them.
+At `restore`, `quit`, and signal shutdown, after original-frame restoration, the runtime reads each window's frame and writes those entries and the unexpired in-memory entries to the placement file.
+
+The file is `~/Library/Application Support/HuenWM/placements-<hash>.json`.
+Its hash is SHA-256 over a versioned prefix and the application filter, so it survives reboots and configuration changes.
+It uses the same file-safety rules as the checkpoint.
+On the first tick, the runtime loads the file with a 60-second expiry and replaces it with an empty file.
+Entries from one exit therefore cannot apply after a later crash.
+A file that fails validation is rejected whole.
+
+A newly discovered window claims an entry only when no rule set its workspace.
+The claim takes the unexpired entry of the window's bundle whose frame is within 4 points of the window's frame, else the oldest unexpired entry of that bundle.
+A claimed entry is removed.
+An entry whose workspace name is no longer configured is discarded.
+The entry sets the workspace and, unless a rule decided it, the floating state.
+A floating window without rule geometry or centering receives the entry's floating frame, bounded to its display.
+The session checkpoint import runs later in the same tick and overrides the windows it matches.
+`status.placement_memory` reports `entries`, the unexpired entries, and `claimed`, the windows placed from memory since start.

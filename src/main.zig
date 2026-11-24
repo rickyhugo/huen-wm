@@ -14,6 +14,7 @@ const monitor = @import("monitor.zig");
 const parking = @import("parking.zig");
 const delivery = @import("delivery.zig");
 const swipe = @import("swipe.zig");
+const memory = @import("memory.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -99,6 +100,9 @@ var parking_journal_failed = false;
 const ParkingRecovery = struct { records: usize = 0, recovered: usize = 0, failed: usize = 0 };
 // Null until the first tick that has displays has matched the journal of the previous process.
 var parking_recovery: ?ParkingRecovery = null;
+var placement_memory: memory.Memory = .{};
+var placement_memory_loaded = false;
+var placement_claims: usize = 0;
 var session_status: struct {
     load: enum { disabled, pending, none, restored, rejected, failed } = .disabled,
     save: enum { idle, frozen, saved, skipped, failed } = .idle,
@@ -1465,6 +1469,67 @@ fn replaceWindow(ghost_index: usize, successor_index: usize) void {
     windows.items[ghost_index] = successor;
     _ = windows.orderedRemove(successor_index);
 }
+fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
+    if (window.observation.bundle[0] == 0) return null;
+    var entry: memory.Entry = .{ .bundle = window.observation.bundle, .floating = window.floating, .floating_frame = window.floating_frame, .frame = frame, .expires = expires };
+    const name = text(&config.workspaces[window.workspace].name);
+    @memcpy(entry.workspace[0..name.len], name);
+    return entry;
+}
+// An application can take seconds to exit after its windows close, so whether it exited is judged when a window claims the entry.
+fn rememberPlacement(window: Window, now: f64) void {
+    if (!config.placement_memory or window.observation.process_token == 0) return;
+    var entry = placementEntry(window, window.observation.frame, now + 30) orelse return;
+    entry.pid = window.observation.pid;
+    entry.token = window.observation.process_token;
+    placement_memory.remember(entry);
+}
+fn processExited(process: memory.Process) bool {
+    return native.platform_process_token(process.pid) != process.token;
+}
+fn claimPlacement(window: *Window, decision: rules.Decision, display: u32) void {
+    if (!config.placement_memory or decision.workspace != null) return;
+    const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered, .{ .pid = window.observation.pid, .token = window.observation.process_token }, processExited) orelse return;
+    const workspace = config.workspaceIndex(text(&entry.workspace)) orelse return;
+    placement_claims += 1;
+    window.workspace = workspace;
+    if (decision.floating == null) window.floating = entry.floating;
+    if (!window.floating or decision.geometry != null or decision.centered) return;
+    const destination = resolvePlacements()[workspace] orelse display;
+    window.floating_frame = boundedFloating(entry.floating_frame, inset(displays.items[displayIndex(destination).?].frame, config.gap));
+    window.floating_restore = true;
+}
+fn loadPlacements() void {
+    if (!config.placement_memory) return;
+    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+    const bytes = allocator.alloc(u8, memory.max_bytes) catch return native.platform_error("Placement memory: out of memory");
+    defer allocator.free(bytes);
+    var used: usize = 0;
+    switch (session.huen_session_read("placements", &hash, bytes.ptr, bytes.len, &used)) {
+        0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
+        1 => return,
+        else => return native.platform_error("Placement memory: file unreadable"),
+    }
+    writePlacements(&.{});
+}
+fn writePlacements(entries: []const memory.Entry) void {
+    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+    const encoded = memory.encode(allocator, entries) catch return native.platform_error("Placement memory: out of memory");
+    defer allocator.free(encoded);
+    if (!session.huen_session_write("placements", &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
+}
+// After restoration each window is where a restarted manager will discover it.
+fn persistPlacements() void {
+    if (!config.placement_memory) return;
+    const now = native.platform_monotonic();
+    var persisted = placement_memory;
+    persisted.prune(now);
+    for (windows.items) |window| {
+        var frame: Rect = undefined;
+        if (window.vanished == null and native.platform_read_frame(window.identity, &frame)) persisted.remember(placementEntry(window, frame, now) orelse continue);
+    }
+    writePlacements(persisted.entries[0..persisted.count]);
+}
 export fn wm_tick() void {
     if (pending_close) |pending| close: {
         const observed = if (native.platform_monotonic() < pending.deadline) native.platform_close_state(pending.identity, pending.pid, pending.process_token) else -1;
@@ -1497,6 +1562,10 @@ export fn wm_tick() void {
     displays.clearRetainingCapacity();
     displays.appendSliceAssumeCapacity(updated[0..displayCount]);
     if (displays.items.len == 0) return;
+    if (!placement_memory_loaded) {
+        placement_memory_loaded = true;
+        loadPlacements();
+    }
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
     var recovered: [1024]parking.Recovery = undefined;
@@ -1553,6 +1622,7 @@ export fn wm_tick() void {
             window.parking_frame = recovery.original;
         };
         window.discovered = native.platform_monotonic();
+        claimPlacement(&window, decision, display);
         windows.appendAssumeCapacity(window);
     }
     var now: ?f64 = null;
@@ -1583,6 +1653,7 @@ export fn wm_tick() void {
         }
         if (now == null) now = native.platform_monotonic();
         if (now.? - vanished > replacement_grace) {
+            rememberPlacement(windows.items[index], now.?);
             layouts.forgetIdentity(windows.items[index].identity);
             focus_history.forget(windows.items[index].identity);
             _ = windows.orderedRemove(index);
@@ -2033,6 +2104,10 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = session_status,
                 .parking_recovery = parking_recovery,
+                .placement_memory = .{ .entries = if (placement_memory.count == 0) 0 else unexpired: {
+                    placement_memory.prune(native.platform_monotonic());
+                    break :unexpired placement_memory.count;
+                }, .claimed = placement_claims },
                 .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
             });
         },
@@ -2129,6 +2204,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             freezeSession();
             suspended = true;
             const outstanding = native.platform_restore();
+            persistPlacements();
             if (outstanding == 0) {
                 saveSession(true);
                 writeParkingJournal(&.{});
@@ -2456,6 +2532,7 @@ export fn wm_shutdown() bool {
     if (pointer_controls.forced_stop) native.platform_error("Input release drain exceeded 250 ms; tap teardown forced");
     cancelTransition();
     const outstanding = native.platform_restore();
+    persistPlacements();
     saveSession(outstanding == 0);
     if (outstanding == 0) writeParkingJournal(&.{});
     if (outstanding != 0) {

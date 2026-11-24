@@ -26,6 +26,7 @@ bind("ctrl+alt", "r", "reload")
 return {
     status_bar = { enabled = true, label = "name" },
     session = { enabled = false },
+    placement_memory = true,
     mouse = { enabled = false, mods = "ctrl+alt" },
     -- swipe = { enabled = false, fingers = 3 },
     gap = 12,

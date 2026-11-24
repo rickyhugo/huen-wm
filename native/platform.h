@@ -47,6 +47,8 @@ int platform_close_state(uint64_t identity, int pid, double process_token);
 void platform_close_cancel(void);
 double platform_monotonic(void);
 bool platform_terminate_if_empty(uint64_t identity, int pid, double process_token);
+// The process's launch date, or 0 when it is not running. Two calls agree only for one launch of the process.
+double platform_process_token(int pid);
 bool platform_bindings(const WMBinding *bindings, size_t count);
 bool platform_rebind(void);
 void platform_border(uint64_t identity, double width, uint32_t color);

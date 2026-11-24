@@ -42,6 +42,7 @@ pub extern "c" fn platform_monotonic() f64;
 /// Returns 1 for a match, 0 for no match, and -1 for a pattern that does not compile.
 pub extern "c" fn platform_regex_match(pattern: [*:0]const u8, text: [*]const u8, length: usize) c_int;
 pub extern "c" fn platform_terminate_if_empty(identity: u64, pid: c_int, process_token: f64) bool;
+pub extern "c" fn platform_process_token(pid: c_int) f64;
 pub extern "c" fn platform_bindings(bindings: [*]const WMBinding, count: usize) bool;
 pub extern "c" fn platform_rebind() bool;
 pub extern "c" fn platform_border(identity: u64, width: f64, color: u32) void;
