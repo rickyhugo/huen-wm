@@ -6,6 +6,7 @@ pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds:
 pub const WMPoint = extern struct { left: f64, top: f64 };
 pub extern "c" fn platform_pointer(point: *WMPoint) bool;
 pub extern "c" fn platform_warp_pointer(point: WMPoint) bool;
+pub extern "c" fn platform_pointer_buttons() bool;
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
 pub const WMStatusRow = extern struct { title: [80]u8, command: [128]u8, checked: bool, enabled: bool };
 pub const WMStatusPresentation = extern struct { title: [160]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
@@ -67,3 +68,4 @@ pub extern "c" fn huen_scene_begin(display: u32, generation: u64, duration: f64,
 pub extern "c" fn huen_scene_finish(generation: u64) void;
 pub extern "c" fn huen_scene_cancel() void;
 pub extern "c" fn huen_observe_active() bool;
+pub extern "c" fn huen_observe_gestures(enabled: bool) void;

@@ -17,6 +17,7 @@ typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[
 typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);
 bool platform_warp_pointer(WMPoint point);
+bool platform_pointer_buttons(void);
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
 typedef struct { char title[160], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;

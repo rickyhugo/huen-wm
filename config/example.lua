@@ -27,6 +27,7 @@ return {
     status_bar = { enabled = true, label = "name" },
     session = { enabled = false },
     mouse = { enabled = false, mods = "ctrl+alt" },
+    -- swipe = { enabled = false, fingers = 3 },
     gap = 12,
     layout = "dwindle",
     master_ratio = 0.55,

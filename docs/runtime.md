@@ -20,6 +20,10 @@ macOS can stop delivering Carbon hotkeys without reporting an error. A listen-on
 
 The tap needs Input Monitoring permission. The manager never requests it. Without it, the tap does not start and hotkeys work as before without recovery. The tap starts at launch, so permission granted later takes effect at the next start. A listen-only tap never delays a key press, even while the main thread waits on Accessibility. `status.hotkeys` reports `watchdog` as `active` or `unavailable`, with `missed` and `rebinds` counts. `doctor` reports `input_monitoring`.
 
+## Trackpad swipes
+
+With `swipe.enabled`, the same listen-only tap also receives trackpad gesture events and reports the count and mean normalized position of the touching fingers. `src/swipe.zig` starts a gesture when exactly the configured number of fingers touch. It emits one step when the horizontal travel reaches 0.15 and is at least twice the vertical travel. A change in finger count cancels the gesture. The recognizer arms again after every finger lifts, or after half a second without a gesture event. A step selects the display under the pointer and runs `workspace occupied+1` for a left swipe or `workspace occupied-1` for a right swipe through the hotkey path, so rapid swipes coalesce like rapid shortcuts. A step does nothing while a mouse button is held, while the manager is suspended, or during a workspace transition. The tap listens for gesture events only while swipes are enabled, and a reload changes that.
+
 ## Menu-bar presentation
 
 Zig derives a bounded status presentation from committed configuration and the active monitor. The bridge copies terminated UTF-8 strings and at most twelve rows synchronously on the main thread. `NULL` removes the item. AppKit renders the supplied title, tooltip, checkmarks, availability, and commands without querying workspace JSON. There is no workspace popup.

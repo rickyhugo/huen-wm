@@ -13,6 +13,7 @@ const history = @import("history.zig");
 const monitor = @import("monitor.zig");
 const parking = @import("parking.zig");
 const delivery = @import("delivery.zig");
+const swipe = @import("swipe.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -68,6 +69,8 @@ const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
 var hotkey_watch: delivery.Watch = .{};
 var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
+var swipe_recognizer: swipe.Recognizer = .{};
+var gestures_enabled = false;
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
@@ -454,8 +457,14 @@ export fn wm_activate_config() bool {
     active_mode = 0;
     status_active = true;
     pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
+    configureGestures();
     publishStatus();
     return true;
+}
+fn configureGestures() void {
+    if (gestures_enabled == config.swipe.enabled) return;
+    gestures_enabled = config.swipe.enabled;
+    native.huen_observe_gestures(gestures_enabled);
 }
 fn rejectConfig(message: [:0]const u8) void {
     config_state = .failed;
@@ -476,6 +485,7 @@ export fn wm_config_poll() void {
     applyLayoutDefaults(&candidate);
     config = candidate;
     pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
+    configureGestures();
     configureSession();
     active_mode = 0;
     config_state = .ready;
@@ -1802,6 +1812,20 @@ export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
 }
 export fn wm_hotkey_delivered(slot: u32, command: [*:0]const u8) void {
     if (hotkey_watch.delivered(slot, native.platform_monotonic())) wm_hotkey(command);
+}
+export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {
+    if (!initialized or !config.swipe.enabled) return;
+    swipe_recognizer.fingers = config.swipe.fingers;
+    const step = swipe_recognizer.sample(fingers, horizontal, vertical, native.platform_monotonic()) orelse return;
+    if (suspended or transition != null or native.platform_pointer_buttons()) return;
+    var point: native.WMPoint = undefined;
+    if (native.platform_pointer(&point)) for (displays.items) |display| {
+        const bounds = display.full_bounds;
+        if (point.left < bounds.left or point.left >= bounds.left + bounds.width or point.top < bounds.top or point.top >= bounds.top + bounds.height) continue;
+        selectDisplay(display.identity);
+        break;
+    };
+    wm_hotkey(if (step == .next) "workspace occupied+1" else "workspace occupied-1");
 }
 // macOS can stop delivering registered hotkeys without an error.
 fn recoverHotkey(command: *const delivery.Command, now: f64) void {

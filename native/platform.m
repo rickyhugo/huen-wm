@@ -540,6 +540,7 @@ bool platform_pointer(WMPoint *point) {
     return true;
 }
 
+bool platform_pointer_buttons(void) { return NSEvent.pressedMouseButtons != 0; }
 bool platform_warp_pointer(WMPoint point) {
     return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
