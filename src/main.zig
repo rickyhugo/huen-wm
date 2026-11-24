@@ -1051,7 +1051,12 @@ fn deriveGoals() bool {
         const workspace = workspaceLayout(display.identity, display.workspace);
         const area = inset(display.frame, config.gap);
         if (count == 1) {
-            windows.items[indices[0]].goal = area;
+            const lone = &windows.items[indices[0]];
+            lone.goal = area;
+            if (config.single_window_max_width > 0) {
+                lone.goal.width = @min(area.width, @max(config.single_window_max_width, lone.minimum[0]));
+                lone.goal.left += (area.width - lone.goal.width) / 2;
+            }
             continue;
         }
         if (workspace.layout == .master) {

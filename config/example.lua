@@ -35,6 +35,7 @@ return {
     border_single_window = true,
     focus_on_activate = false,
     floating_size = { width = 0.5, height = 0.5 },
+    -- single_window_max_width = 1800,
     motion_duration = 0.12,
     workspaces = { "Build", "Browse", "Write", "Talk", "Quiet" },
     bindings = bindings,

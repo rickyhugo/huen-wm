@@ -149,6 +149,15 @@ A minimum is kept only when the derived layout gives every window on that displa
 Otherwise it is dropped, so the window that does not fit is the one that floats.
 A rejection that teaches no larger minimum floats the window as before, after the one-second grace for new windows.
 
+## Lone window width
+
+`single_window_max_width` limits the width of a window that is the only tiled window on its display.
+The window is centered horizontally at the smaller of the usable width and the limit.
+A learned minimum width larger than the limit wins.
+Absent or `0` means no limit. Other values are from 400 to 100000 points.
+Managed fullscreen ignores the limit.
+A second tiled window returns both windows to normal tiling.
+
 ## Pure container model
 
 The APIs below are implemented in `src/layout.zig`.

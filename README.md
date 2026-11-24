@@ -102,6 +102,8 @@ Lua must return a table. `config/example.lua` provides basic settings. The [Aero
 
 `floating_size = { width = 0.5, height = 0.5 }` sets the size, as fractions of the usable display area from `0.1` to `1`, of a window that `toggle-floating` floats for the first time. It floats centered. A window that floated before returns to its last floating frame.
 
+`single_window_max_width = 1800` limits the width, in points, of a window that is the only tiled window on its display. It is centered horizontally. The value is at least `400`, and absent or `0` means no limit. A larger learned application minimum wins. Managed fullscreen ignores the limit.
+
 `border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count.
 
 Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. On a floating window, the left button moves it and the right button resizes it from the nearest corner, as in Hyprland. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](docs/mouse-controls.md).
