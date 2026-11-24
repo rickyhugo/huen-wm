@@ -4,6 +4,7 @@ const configuration = @import("config.zig");
 const rules = @import("rules.zig");
 const commands = @import("command.zig");
 const tiling = @import("layout.zig");
+const size_bounds = @import("bounds.zig");
 const pointer = @import("pointer.zig");
 const interaction = @import("interaction.zig");
 const session = @import("session.zig");
@@ -22,7 +23,10 @@ const Direction = commands.Direction;
 const parseCommand = commands.parse;
 // Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
 const Escape = union(enum) { settled, escaped: f64, exempt };
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, minimum: [2]f64 = .{ 0, 0 }, discovered_frame: Rect, vanished: ?f64 = null, vanished_parked: bool = false, established: bool = false };
+const PendingTileWrite = struct { frame: Rect, at: f64, snap_candidate: ?Rect = null };
+const snap_back_window: f64 = 1.0;
+const launch_grace: f64 = 1.0;
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, bounds: tiling.Bounds = .{}, placed: ?PendingTileWrite = null, discovered_frame: Rect, vanished: ?f64 = null, vanished_parked: bool = false, established: bool = false };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -610,7 +614,7 @@ fn targetFrame(window: Window) Rect {
     if (managedFullscreen(window)) {
         if (displayIndex(window.display)) |index| return displays.items[index].frame;
     }
-    return if (window.floating) window.floating_frame else window.goal;
+    return if (window.floating) window.floating_frame else window.bounds.fit(window.goal);
 }
 fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     const source = windows.items[source_index];
@@ -625,13 +629,15 @@ fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
         count += 1;
     }
     if (count < 2) return 0;
-    const minimums = masterMinimums(indices[0..count]);
     const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
     const available = area.width - @min(config.gap, @max(0, area.width - 2));
-    if (available - minimums[1] < minimums[0]) return 0;
+    const limits = switch (tiling.leadingRange(available, available * state.ratio, masterSides(indices[0..count]))) {
+        .fits => |span| span,
+        .overlaps => return 0,
+    };
     const sign: f64 = if (indices[0] == source_index) 1 else -1;
-    const previous = std.math.clamp(available * state.ratio, minimums[0], available - minimums[1]);
-    const next = std.math.clamp(previous + sign * delta, minimums[0], available - minimums[1]);
+    const previous = std.math.clamp(available * state.ratio, limits.lower, limits.upper);
+    const next = std.math.clamp(previous + sign * delta, limits.lower, limits.upper);
     state.ratio = next / available;
     return (next - previous) * sign;
 }
@@ -946,7 +952,7 @@ fn layoutMembers(output: []tiling.Member) []tiling.Member {
     var count: usize = 0;
     for (windows.items) |window| {
         const display = displays.items[displayIndex(window.display) orelse continue];
-        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .minimum = window.minimum, .vanished = window.vanished != null };
+        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .bounds = window.bounds, .vanished = window.vanished != null };
         count += 1;
     }
     return output[0..count];
@@ -1047,6 +1053,7 @@ fn floatRejectedTile(window: *Window) void {
     }
     if (window.floating) return;
     window.floating = true;
+    window.placed = null;
     window.floating_frame = boundedFloating(window.parking_frame, inset(displays.items[displayIndex(window.display).?].frame, config.gap));
     placementFailure(window, "Application rejected tile; retrying with floating recovery geometry");
 }
@@ -1084,42 +1091,49 @@ fn deriveGoals() bool {
             const lone = &windows.items[indices[0]];
             lone.goal = area;
             if (config.single_window_max_width > 0) {
-                lone.goal.width = @min(area.width, @max(config.single_window_max_width, lone.minimum[0]));
+                lone.goal.width = @min(area.width, @max(config.single_window_max_width, lone.bounds.minimumAt(.width)));
                 lone.goal.left += (area.width - lone.goal.width) / 2;
             }
             continue;
         }
         if (workspace.layout == .master) {
-            const minimums = masterMinimums(indices[0..count]);
-            const columns = tiling.split(area, .width, workspace.ratio, config.gap, .{ .{ .minimum = minimums[0], .compact = minimums[0] }, .{ .minimum = minimums[1], .compact = minimums[1] } });
+            const columns = tiling.split(area, .width, workspace.ratio, config.gap, masterSides(indices[0..count]));
             windows.items[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
             const spacing = @min(config.gap, columns[1].height / (2 * rows));
             const height = (columns[1].height - spacing * (rows - 1)) / rows;
-            var bound: [1024]bool = @splat(false);
+            var bound_height: [1024]?f64 = @splat(null);
             var share = height;
             var required = spacing * (rows - 1);
             for (indices[1..count]) |index| required += rowMinimum(windows.items[index]);
+            var extra: f64 = 0;
             if (required <= columns[1].height) {
                 var remaining = columns[1].height - spacing * (rows - 1);
                 var unbound = count - 1;
                 var settled = false;
                 while (!settled) {
                     settled = true;
-                    for (indices[1..count], bound[1..count]) |index, *fixed| if (!fixed.* and rowMinimum(windows.items[index]) > share) {
-                        fixed.* = true;
-                        remaining -= rowMinimum(windows.items[index]);
+                    for (indices[1..count], bound_height[1..count]) |index, *fixed| if (fixed.* == null) {
+                        const minimum = rowMinimum(windows.items[index]);
+                        const ceiling_height: ?f64 = if (windows.items[index].bounds.ceilingAt(.height)) |ceiling| if (ceiling.binds(share)) @max(minimum, ceiling.accepted) else null else null;
+                        if (minimum > share) {
+                            fixed.* = minimum;
+                        } else if (ceiling_height) |capped| {
+                            fixed.* = capped;
+                        } else continue;
+                        remaining -= fixed.*.?;
                         unbound -= 1;
                         settled = false;
                     };
                     if (!settled and unbound > 0) share = remaining / @as(f64, @floatFromInt(unbound));
                 }
+                if (unbound == 0 and remaining > 0) extra = remaining / rows;
             }
             var shift: f64 = 0;
-            for (indices[1..count], bound[1..count], 0..) |index, fixed, row| {
+            for (indices[1..count], bound_height[1..count], 0..) |index, fixed, row| {
                 var frame = columns[1];
                 frame.top += @as(f64, @floatFromInt(row)) * (share + spacing) + shift;
-                frame.height = if (fixed) rowMinimum(windows.items[index]) else share;
+                frame.height = if (fixed) |resolved| resolved + extra else share;
                 shift += frame.height - share;
                 windows.items[index].goal = frame;
             }
@@ -1130,15 +1144,20 @@ fn deriveGoals() bool {
     return true;
 }
 fn rowMinimum(window: Window) f64 {
-    return @max(tiling.minimum_tile_extent, window.minimum[1]);
+    return @max(tiling.minimum_tile_extent, window.bounds.minimumAt(.height));
 }
-fn masterMinimums(indices: []const usize) [2]f64 {
+fn masterSides(indices: []const usize) [2]tiling.Side {
     var minimums: [2]f64 = @splat(tiling.minimum_tile_extent);
     for (indices, 0..) |index, ordinal| {
         const slot: usize = if (ordinal == 0) 0 else 1;
-        minimums[slot] = @max(minimums[slot], windows.items[index].minimum[0]);
+        minimums[slot] = @max(minimums[slot], windows.items[index].bounds.minimumAt(.width));
     }
-    return minimums;
+    var stack_ceiling = windows.items[indices[1]].bounds.ceilingAt(.width);
+    for (indices[2..]) |index| stack_ceiling = tiling.combineAcross(stack_ceiling, windows.items[index].bounds.ceilingAt(.width));
+    return .{
+        .{ .minimum = minimums[0], .compact = minimums[0], .ceiling = windows.items[indices[0]].bounds.ceilingAt(.width) },
+        .{ .minimum = minimums[1], .compact = minimums[1], .ceiling = stack_ceiling },
+    };
 }
 fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
     return @abs(first.left - second.left) <= tolerance and @abs(first.top - second.top) <= tolerance and @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;
@@ -1234,6 +1253,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     if (verifiedFrame(window.identity, target, if (parked) window.display else null, &accepted)) {
         window.parked = parked;
         window.parked_at = if (parked) native.platform_monotonic() else null;
+        if (parked) window.placed = null;
         window.placement_error = null;
         return .applied;
     }
@@ -1264,7 +1284,7 @@ fn placeVisible(window: *Window) PlacementOutcome {
     if (refusal) |answer| if (!managedFullscreen(window.*)) {
         const accepted = answer.accepted;
         if (!window.floating) {
-            if (outcome == .rolled_back and learnMinimum(window, target, accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
+            if (outcome == .rolled_back and learnBounds(window, target, accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
         } else if (@abs(accepted.width - target.width) > 2 or @abs(accepted.height - target.height) > 2) {
             // A floating window takes the size its application answered with, or the same refusal would repeat on every attempt.
             // An application that raised its minimum also refuses the rollback to the old size, so both refusals are retried.
@@ -1273,33 +1293,32 @@ fn placeVisible(window: *Window) PlacementOutcome {
             outcome = attemptVisibility(window, targetFrame(window.*), false);
         }
     };
+    if (outcome == .applied and !window.floating and !managedFullscreen(window.*)) {
+        window.placed = .{ .frame = targetFrame(window.*), .at = native.platform_monotonic() };
+    }
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
-// A minimum the layout cannot honor is dropped, so the window that does not fit floats rather than a neighbor.
-fn learnMinimum(window: *Window, target: Rect, accepted: Rect) bool {
-    // A launching application can restore its own larger frame over its first placements. That frame is a preference, not a minimum.
-    if (!window.established and native.platform_monotonic() - window.discovered < 1.0) return false;
+fn forgetLearnedBounds(window: *Window) void {
+    window.bounds = .{};
+    window.placed = null;
+}
+fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
+    if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
     const area = inset(displays.items[displayIndex(window.display) orelse return false].frame, config.gap);
-    const previous = window.minimum;
-    var grew = false;
-    for (&window.minimum, [2]f64{ target.width, target.height }, [2]f64{ accepted.width, accepted.height }, [2]f64{ area.width, area.height }) |*minimum, requested, answered, usable| {
-        const learned = @min(answered, usable);
-        if (answered > requested + 2 and learned > minimum.*) {
-            minimum.* = learned;
-            grew = true;
-        }
-    }
-    if (!grew) return false;
+    const previous = window.bounds;
+    const next = previous.learn(.{ requested.width, requested.height }, .{ accepted.width, accepted.height }, .{ area.width, area.height });
+    if (std.meta.eql(next, previous)) return false;
+    window.bounds = next;
     if (deriveGoals() and minimumsHonored(window.display)) return true;
-    window.minimum = previous;
+    window.bounds = previous;
     _ = deriveGoals();
     return false;
 }
 fn minimumsHonored(display: u32) bool {
     for (windows.items) |window| {
         if (window.display != display or !visible(window) or window.floating or managedFullscreen(window)) continue;
-        if (window.goal.width < window.minimum[0] - 2 or window.goal.height < window.minimum[1] - 2) return false;
+        if (window.goal.width < window.bounds.minimumAt(.width) - 2 or window.goal.height < window.bounds.minimumAt(.height) - 2) return false;
     }
     return true;
 }
@@ -1349,15 +1368,41 @@ fn parkWindow(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
+fn settleTileWrite(window: *Window, target: Rect, now: f64) enum { proceed, wait, relayout } {
+    if (window.floating or managedFullscreen(window.*)) return .proceed;
+    const placed = if (window.placed) |*active| active else return .proceed;
+    if (!framesNear(target, placed.frame, size_bounds.tolerance) or now - placed.at > snap_back_window) {
+        window.placed = null;
+        return .proceed;
+    }
+    if (now < placed.at or window.observation.motion != .idle) return .proceed;
+    const observed = window.observation.frame;
+    if (@abs(observed.width - placed.frame.width) <= size_bounds.tolerance and @abs(observed.height - placed.frame.height) <= size_bounds.tolerance) {
+        placed.snap_candidate = null;
+        return .proceed;
+    }
+    if (placed.snap_candidate) |previous| {
+        if (@abs(observed.width - previous.width) <= size_bounds.tolerance and @abs(observed.height - previous.height) <= size_bounds.tolerance) {
+            const requested = placed.frame;
+            window.placed = null;
+            return if (learnBounds(window, requested, observed)) .relayout else .proceed;
+        }
+    }
+    placed.snap_candidate = observed;
+    native.platform_config_changed();
+    return .wait;
+}
 fn placeWindows() enum { settled, relayout } {
     for (windows.items) |*window| {
         if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
             window.floating = true;
+            window.placed = null;
             window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
             window.goal = window.floating_frame;
             placementFailure(window, "Tile too crowded; window left floating");
         }
     }
+    const now = native.platform_monotonic();
     for (windows.items) |*window| {
         if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
         if (!visible(window.*)) {
@@ -1370,19 +1415,30 @@ fn placeWindows() enum { settled, relayout } {
             if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             continue;
         }
+        switch (settleTileWrite(window, target, now)) {
+            .proceed => {},
+            .wait => continue,
+            .relayout => return .relayout,
+        }
         const duration = if (window.floating_restore and !managedFullscreen(window.*)) 0 else config.duration;
+        const needs_write = !framesNear(window.observation.frame, target, size_bounds.tolerance);
         var accepted: Rect = window.observation.frame;
-        if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and framesNear(accepted, target, 2)))) continue;
+        if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and framesNear(accepted, target, 2)))) {
+            if (!window.floating and !managedFullscreen(window.*) and needs_write) {
+                window.placed = .{ .frame = target, .at = now + duration };
+            }
+            continue;
+        }
         if (managedFullscreen(window.*)) {
             floatRejectedTile(window);
             continue;
         }
         if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
-        if (!window.floating and learnMinimum(window, target, accepted)) return .relayout;
-        // A launching application can refuse or override its first placements. Retry a new window before floating it.
-        if (native.platform_monotonic() - window.discovered < 1.0) continue;
+        if (!window.floating and learnBounds(window, target, accepted)) return .relayout;
+        if (now - window.discovered < launch_grace) continue;
         const tiled = !window.floating;
         window.floating = true;
+        window.placed = null;
         window.floating_restore = false;
         window.floating_frame = accepted;
         placementFailure(window, "Application rejected layout geometry; window left floating");
@@ -1558,7 +1614,8 @@ fn replaceWindow(ghost_index: usize, successor_index: usize) void {
     successor.floating_frame = ghost.floating_frame;
     successor.floating_restore = ghost.floating;
     successor.last_floating_frame = ghost.last_floating_frame;
-    successor.minimum = ghost.minimum;
+    successor.bounds = ghost.bounds;
+    successor.placed = null;
     // The successor appeared at the corner, so that frame must not become the geometry that restore writes back.
     if (ghost.vanished_parked) {
         successor.parking_frame = recoveryFrame(ghost.parking_frame);
@@ -2272,9 +2329,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 } };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 }, maximum: struct { width: ?f64, height: ?f64 } };
             var items: [1024]Item = undefined;
-            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.minimum[0], .height = window.minimum[1] } };
+            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.bounds.minimumAt(.width), .height = window.bounds.minimumAt(.height) }, .maximum = .{ .width = if (window.bounds.ceilingAt(.width)) |ceiling| ceiling.accepted else null, .height = if (window.bounds.ceilingAt(.height)) |ceiling| ceiling.accepted else null } };
             return json(items[0..windows.items.len]);
         },
         .monitors => {
@@ -2534,8 +2591,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (source.floating) {
                         source.last_floating_frame = source.floating_frame;
                         source.floating = false;
-                        // Tiling a window again asks its application afresh, so a minimum that no longer holds can shrink.
-                        source.minimum = .{ 0, 0 };
+                        forgetLearnedBounds(source);
                     } else {
                         // Like Hyprland: return to the last floating frame, or float at `floating_size`, centered.
                         const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
@@ -2564,6 +2620,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                             }
                         }
                         source.floating = true;
+                        source.placed = null;
                         source.floating_frame = frame;
                     }
                 },

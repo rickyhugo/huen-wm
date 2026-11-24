@@ -1,5 +1,8 @@
 const std = @import("std");
 const commands = @import("command.zig");
+const size_bounds = @import("bounds.zig");
+pub const Bounds = size_bounds.Bounds;
+pub const Ceiling = size_bounds.Ceiling;
 pub const Rect = @import("native.zig").WMRect;
 pub const minimum_tile_extent: f64 = 80;
 const Axis = commands.Axis;
@@ -22,10 +25,11 @@ pub const Node = struct {
     compact: [2]f64 = .{ 0, 0 },
     /// The most windows that one cascade inside can hold along each axis.
     layers: [2]f64 = .{ 1, 1 },
-    learned: [2]f64 = .{ 0, 0 },
+    ceiling: [2]?Ceiling = .{ null, null },
+    bounds: Bounds = .{},
 };
 
-pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect, minimum: [2]f64, vanished: bool = false };
+pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect, bounds: Bounds = .{}, vanished: bool = false };
 pub const WorkspaceLayout = struct {
     display: u32,
     workspace: usize,
@@ -195,9 +199,9 @@ pub const Store = struct {
                 if (state.root != root) continue;
                 for (members) |member| {
                     if (!member.tiled or member.identity != node.content.leaf or member.display != state.display or member.workspace != state.workspace) continue;
-                    if (node.active != member.active or !std.meta.eql(node.learned, member.minimum)) self.revision +%= 1;
+                    if (node.active != member.active or !std.meta.eql(node.bounds, member.bounds)) self.revision +%= 1;
                     node.active = member.active;
-                    node.learned = member.minimum;
+                    node.bounds = member.bounds;
                     break;
                 } else self.remove(state, @intCast(index));
                 break;
@@ -251,10 +255,10 @@ pub const Store = struct {
                 self.nodes[target].previous = null;
                 self.nodes[target].next = null;
                 self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .parent = branch, .content = .{ .leaf = member.identity }, .active = member.active, .learned = member.minimum };
+                self.nodes[added] = .{ .generation = self.serial, .parent = branch, .content = .{ .leaf = member.identity }, .active = member.active, .bounds = member.bounds };
             } else {
                 self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .content = .{ .leaf = member.identity }, .active = member.active, .learned = member.minimum };
+                self.nodes[added] = .{ .generation = self.serial, .content = .{ .leaf = member.identity }, .active = member.active, .bounds = member.bounds };
                 destination.root = added;
             }
             self.revision +%= 1;
@@ -302,9 +306,10 @@ pub const Store = struct {
         var node = &self.nodes[handle];
         switch (node.content) {
             .leaf => {
-                node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.learned[0]), @max(minimum_tile_extent, node.learned[1]) } else .{ 0, 0 };
+                node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.bounds.minimumAt(.width)), @max(minimum_tile_extent, node.bounds.minimumAt(.height)) } else .{ 0, 0 };
                 node.compact = node.minimum;
                 node.layers = .{ 1, 1 };
+                node.ceiling = if (node.active) node.bounds.ceilings() else .{ null, null };
             },
             .branch => |branch| {
                 for (branch.children) |child| self.measure(child, gap);
@@ -316,15 +321,18 @@ pub const Store = struct {
                     node.minimum = only.minimum;
                     node.compact = only.compact;
                     node.layers = only.layers;
+                    node.ceiling = only.ceiling;
                 } else {
                     node.minimum = .{ @max(first.minimum[0], second.minimum[0]), @max(first.minimum[1], second.minimum[1]) };
                     node.compact = .{ @max(first.compact[0], second.compact[0]), @max(first.compact[1], second.compact[1]) };
                     node.layers = .{ @max(first.layers[0], second.layers[0]), @max(first.layers[1], second.layers[1]) };
+                    node.ceiling = .{ combineAcross(first.ceiling[0], second.ceiling[0]), combineAcross(first.ceiling[1], second.ceiling[1]) };
                     const dimension: usize = if (branch.axis == .width) 0 else 1;
                     node.minimum[dimension] = first.minimum[dimension] + second.minimum[dimension] + gap;
                     const cascade = @max(first.compact[dimension] + second.layers[dimension] * overlap_step, second.compact[dimension] + first.layers[dimension] * overlap_step);
                     node.compact[dimension] = @min(first.compact[dimension] + second.compact[dimension] + gap, cascade);
                     node.layers[dimension] = first.layers[dimension] + second.layers[dimension];
+                    node.ceiling[dimension] = combineAlong(first.ceiling[dimension], second.ceiling[dimension], gap);
                 }
             },
             .group => |*group| {
@@ -332,6 +340,7 @@ pub const Store = struct {
                 node.minimum = .{ 0, 0 };
                 node.compact = .{ 0, 0 };
                 node.layers = .{ 1, 1 };
+                node.ceiling = .{ null, null };
                 var selected_active = false;
                 var child: ?Handle = group.first;
                 while (child) |current| : (child = self.nodes[current].next) {
@@ -358,6 +367,11 @@ pub const Store = struct {
                     node.compact = self.nodes[group.selected].compact;
                     node.compact[1] += header;
                     node.layers = self.nodes[group.selected].layers;
+                    node.ceiling = self.nodes[group.selected].ceiling;
+                    if (node.ceiling[1]) |*vertical| {
+                        vertical.accepted += header;
+                        vertical.largest_refused += header;
+                    }
                 }
             },
             .free => unreachable,
@@ -394,7 +408,7 @@ pub const Store = struct {
     fn sides(self: *const Store, branch: Branch) [2]Side {
         const dimension: usize = if (branch.axis == .width) 0 else 1;
         var result: [2]Side = undefined;
-        for (&result, branch.children) |*side, child| side.* = .{ .minimum = self.nodes[child].minimum[dimension], .compact = self.nodes[child].compact[dimension], .layers = self.nodes[child].layers[dimension] };
+        for (&result, branch.children) |*side, child| side.* = .{ .minimum = self.nodes[child].minimum[dimension], .compact = self.nodes[child].compact[dimension], .layers = self.nodes[child].layers[dimension], .ceiling = self.nodes[child].ceiling[dimension] };
         return result;
     }
 
@@ -403,8 +417,10 @@ pub const Store = struct {
         const node = self.nodes[handle];
         const extent = if (node.content.branch.axis == .width) node.frame.width else node.frame.height;
         const available = extent - @min(gap, @max(0, extent - 2));
-        const least = leastExtents(available, self.sides(node.content.branch)) orelse return null;
-        return if (available > 0) .{ .available = available, .minimum = least[0], .maximum = available - least[1] } else null;
+        return switch (leadingRange(available, available * node.content.branch.ratio, self.sides(node.content.branch))) {
+            .fits => |limits| if (available > 0) .{ .available = available, .minimum = limits.lower, .maximum = limits.upper } else null,
+            .overlaps => null,
+        };
     }
 
     pub fn arrange(self: *Store, state: *WorkspaceLayout, frame: Rect, gap: f64) void {
@@ -1053,12 +1069,41 @@ pub const Side = struct {
     compact: f64 = 0,
     /// The most windows that one cascade inside can hold.
     layers: f64 = 1,
+    ceiling: ?Ceiling = null,
 };
+
+pub fn combineAcross(first: ?Ceiling, second: ?Ceiling) ?Ceiling {
+    const leading = first orelse return null;
+    const trailing = second orelse return null;
+    return .{ .accepted = @max(leading.accepted, trailing.accepted), .largest_refused = @min(leading.largest_refused, trailing.largest_refused) };
+}
+
+fn combineAlong(first: ?Ceiling, second: ?Ceiling, gap: f64) ?Ceiling {
+    const leading = first orelse return null;
+    const trailing = second orelse return null;
+    return .{ .accepted = leading.accepted + trailing.accepted + gap, .largest_refused = leading.largest_refused + trailing.largest_refused + gap };
+}
 
 /// The least extent of each side when the sides fit side by side: the minimums when they fit, and else the compact minimums.
 fn leastExtents(available: f64, sides: [2]Side) ?[2]f64 {
     for ([_][2]f64{ .{ sides[0].minimum, sides[1].minimum }, .{ sides[0].compact, sides[1].compact } }) |least| if (available - least[1] >= least[0]) return least;
     return null;
+}
+
+pub const LeadingRange = struct { lower: f64, upper: f64 };
+pub const SplitFit = union(enum) { fits: LeadingRange, overlaps };
+
+pub fn leadingRange(available: f64, share: f64, sides: [2]Side) SplitFit {
+    const least = leastExtents(available, sides) orelse return .overlaps;
+    const base: LeadingRange = .{ .lower = least[0], .upper = available - least[1] };
+    var tightened = base;
+    if (sides[0].ceiling) |ceiling| if (ceiling.binds(share)) {
+        tightened.upper = @min(tightened.upper, ceiling.accepted);
+    };
+    if (sides[1].ceiling) |ceiling| if (ceiling.binds(available - share)) {
+        tightened.lower = @max(tightened.lower, available - ceiling.accepted);
+    };
+    return .{ .fits = if (tightened.lower <= tightened.upper) tightened else base };
 }
 
 /// Each side keeps its least extent when the sides fit side by side, and the rest follows the ratio. Sides that do not fit
@@ -1073,12 +1118,15 @@ pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, sides: [2]Side) [2]R
     var leading = available * ratio;
     var offset = leading + spacing;
     const steps = [2]f64{ sides[0].layers * overlap_step, sides[1].layers * overlap_step };
-    if (leastExtents(available, sides)) |least| {
-        leading = std.math.clamp(leading, least[0], available - least[1]);
-        offset = leading + spacing;
-    } else if (sides[0].compact + steps[1] <= extent and sides[1].compact + steps[0] <= extent) {
-        leading = extent - steps[1];
-        offset = steps[0];
+    switch (leadingRange(available, leading, sides)) {
+        .fits => |limits| {
+            leading = std.math.clamp(leading, limits.lower, limits.upper);
+            offset = leading + spacing;
+        },
+        .overlaps => if (sides[0].compact + steps[1] <= extent and sides[1].compact + steps[0] <= extent) {
+            leading = extent - steps[1];
+            offset = steps[0];
+        },
     }
     if (axis == .width) {
         first.width = leading;
