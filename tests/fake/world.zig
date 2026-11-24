@@ -101,6 +101,7 @@ pub const World = struct {
     frame_writes: usize = 0,
     journal: std.ArrayList([]const u8) = .empty,
     tile_hits: std.ArrayList(abi.HitRegion) = .empty,
+    boundary_hits: std.ArrayList(abi.HitRegion) = .empty,
     input: abi.InputAvailability = .disabled,
     observe_active: bool = false,
     pointer_buttons: bool = false,

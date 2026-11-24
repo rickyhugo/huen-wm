@@ -245,11 +245,14 @@ export fn huen_input_status() abi.InputAvailability {
     return world.input;
 }
 
-/// Keeps the tile hit regions of the latest publication.
+/// Keeps the tile and boundary hit regions of the latest publication.
 export fn huen_input_publish(snapshot: *const abi.InputSnapshot) bool {
     world.tile_hits.clearRetainingCapacity();
-    if (snapshot.hits) |hits| for (hits[0..snapshot.hit_count]) |hit| if (hit.kind == .tile) {
-        world.tile_hits.append(allocator, hit) catch return false;
+    world.boundary_hits.clearRetainingCapacity();
+    if (snapshot.hits) |hits| for (hits[0..snapshot.hit_count]) |hit| switch (hit.kind) {
+        .tile => world.tile_hits.append(allocator, hit) catch return false,
+        .boundary => world.boundary_hits.append(allocator, hit) catch return false,
+        else => {},
     };
     return true;
 }

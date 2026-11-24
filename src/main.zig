@@ -1090,7 +1090,8 @@ fn deriveGoals() bool {
             continue;
         }
         if (workspace.layout == .master) {
-            const columns = tiling.split(area, .width, workspace.ratio, config.gap, masterMinimums(indices[0..count]));
+            const minimums = masterMinimums(indices[0..count]);
+            const columns = tiling.split(area, .width, workspace.ratio, config.gap, .{ .{ .minimum = minimums[0], .compact = minimums[0] }, .{ .minimum = minimums[1], .compact = minimums[1] } });
             windows.items[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
             const spacing = @min(config.gap, columns[1].height / (2 * rows));
