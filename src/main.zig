@@ -11,12 +11,18 @@ const continuity = @import("continuity.zig");
 const selector = @import("selector.zig");
 const history = @import("history.zig");
 const monitor = @import("monitor.zig");
+const parking = @import("parking.zig");
+const delivery = @import("delivery.zig");
+const swipe = @import("swipe.zig");
+const memory = @import("memory.zig");
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null };
+// Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
+const Escape = union(enum) { settled, escaped: f64, exempt };
+const Window = struct { identity: u64, observation: native.WMWindow, workspace: usize, display: u32, discovered: f64 = 0, floating: bool = false, floating_restore: bool = false, parked: bool = false, urgent: bool = false, parking_frame: Rect, floating_frame: Rect, last_floating_frame: ?Rect = null, goal: Rect, placement_error: ?[]const u8 = null, escape: Escape = .settled, parked_at: ?f64 = null, minimum: [2]f64 = .{ 0, 0 }, discovered_frame: Rect, vanished: ?f64 = null, vanished_parked: bool = false, established: bool = false };
 const Display = struct { identity: u32, frame: Rect, full_bounds: Rect, name: [128]u8, built_in: bool, workspace: usize = 0, previous_workspace: ?usize = null };
 const Config = configuration.ConfigCandidate;
 var config: Config = .{};
@@ -35,6 +41,8 @@ var selected_display: ?u32 = null;
 var last_observed_focus: ?u64 = null;
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
+// macOS moves windows when a display goes away, which must not count as an application moving its own window.
+var topology_changed_at: f64 = -std.math.inf(f64);
 // `shown` caches whether the workspace was active on its display at the start of the tick, so a
 // workspace on a display that just vanished keeps that fact until routing moves it. `shown_when_lost`
 // keeps it while the workspace waits on a fallback display, so a reconnect shows it again.
@@ -60,6 +68,12 @@ var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer
 // to 500 ms. Every AX call to them times out meanwhile, so their windows go stale and block placement.
 const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
+var hotkey_watch: delivery.Watch = .{};
+var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
+var swipe_recognizer: swipe.Recognizer = .{};
+var journal_failed = false;
+var journaled_transition: ?[]const u8 = null;
+var gestures_enabled = false;
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
 var config_state: enum { idle, pending, ready, failed } = .idle;
@@ -81,6 +95,20 @@ var session_focus_pending = false;
 var session_frozen: ?continuity.Frozen = null;
 var session_freeze_attempted = false;
 var session_save_attempted = false;
+var parking_journal: parking.Writer = .{};
+var parking_journal_failed = false;
+// A parked window the manager lost track of while its application still runs. Its record stays in the journal and is
+// matched against new windows for up to a minute, because most orphans are windows their application closed while parked.
+const orphan_lifetime = 60.0;
+const Orphan = struct { bundle: [256]u8, pid: c_int, token: f64, original: Rect, corners: [2]Rect, since: f64 };
+var orphan_buffer: [256]Orphan = undefined;
+var orphans: std.ArrayList(Orphan) = .initBuffer(&orphan_buffer);
+const ParkingRecovery = struct { records: usize = 0, recovered: usize = 0, failed: usize = 0 };
+// Null until the first tick that has displays has matched the journal of the previous process.
+var parking_recovery: ?ParkingRecovery = null;
+var placement_memory: memory.Memory = .{};
+var placement_memory_loaded = false;
+var placement_claims: usize = 0;
 var session_status: struct {
     load: enum { disabled, pending, none, restored, rejected, failed } = .disabled,
     save: enum { idle, frozen, saved, skipped, failed } = .idle,
@@ -176,6 +204,7 @@ fn pointerWindows(output: []pointer.Window) []pointer.Window {
     for (windows.items, 0..) |window, index| output[index] = .{
         .identity = window.identity,
         .public_id = window.observation.public_window_id,
+        .goal = window.goal,
         .eligible = visible(window) and !window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle and framesNear(window.observation.frame, targetFrame(window), 2),
         .title = text(&windows.items[index].observation.title),
         .floating = if (visible(window) and window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle) window.observation.frame else null,
@@ -303,7 +332,7 @@ export fn wm_input_poll() void {
             .resize => |preview| if (layouts.commitResize(preview, config.gap)) null else |err| err,
         };
         const target = result catch |err| {
-            transaction.rollback(0);
+            transaction.rollback(&.{});
             pointer_controls.error_message = @errorName(err);
             continue;
         };
@@ -441,8 +470,14 @@ export fn wm_activate_config() bool {
     active_mode = 0;
     status_active = true;
     pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
+    configureGestures();
     publishStatus();
     return true;
+}
+fn configureGestures() void {
+    if (gestures_enabled == config.swipe.enabled) return;
+    gestures_enabled = config.swipe.enabled;
+    native.huen_observe_gestures(gestures_enabled);
 }
 fn rejectConfig(message: [:0]const u8) void {
     config_state = .failed;
@@ -460,9 +495,11 @@ export fn wm_config_poll() void {
     };
     if (suspended) return rejectConfig("RuntimeSuspendedRestartToResume");
     if (!native.platform_bindings(&candidate.modes[0].bindings, candidate.modes[0].binding_count)) return rejectConfig("HotkeyCollision");
+    hotkey_watch.forgetPresses();
     applyLayoutDefaults(&candidate);
     config = candidate;
     pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
+    configureGestures();
     configureSession();
     active_mode = 0;
     config_state = .ready;
@@ -580,20 +617,21 @@ fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     const state = workspaceLayout(source.display, source.workspace);
     if (state.layout == .dwindle) return layouts.resizePoints(source.identity, axis, delta, config.gap);
     if (axis != .width) return error.MasterHeightResizeUnsupported;
-    var master: ?u64 = null;
+    var indices: [1024]usize = undefined;
     var count: usize = 0;
-    for (windows.items) |window| {
+    for (windows.items, 0..) |window, index| {
         if (window.display != source.display or window.workspace != source.workspace or !visible(window) or window.floating) continue;
-        if (master == null) master = window.identity;
+        indices[count] = index;
         count += 1;
     }
     if (count < 2) return 0;
+    const minimums = masterMinimums(indices[0..count]);
     const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
     const available = area.width - @min(config.gap, @max(0, area.width - 2));
-    if (available < 160) return 0;
-    const sign: f64 = if (master == source.identity) 1 else -1;
-    const previous = available * state.ratio;
-    const next = std.math.clamp(previous + sign * delta, 80, available - 80);
+    if (available - minimums[1] < minimums[0]) return 0;
+    const sign: f64 = if (indices[0] == source_index) 1 else -1;
+    const previous = std.math.clamp(available * state.ratio, minimums[0], available - minimums[1]);
+    const next = std.math.clamp(previous + sign * delta, minimums[0], available - minimums[1]);
     state.ratio = next / available;
     return (next - previous) * sign;
 }
@@ -703,6 +741,7 @@ fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: 
         const sent = send != null and send.?.index == index;
         const destination = if (sent) send.?.display else resolved[window.workspace] orelse if (displayIndex(window.display) == null) displays.items[0].identity else window.display;
         staged[index] = destination;
+        if (window.vanished != null) continue;
         if (window.observation.minimized or window.observation.fullscreen or (!window.observation.onscreen and !window.parked)) {
             if (destination != window.display or (window.observation.fullscreen and sent)) {
                 transition_error = "Routing deferred for unavailable or native fullscreen window";
@@ -807,17 +846,21 @@ const PlacementTransaction = struct {
         allocator.free(self.originals);
     }
 
-    fn rollback(self: PlacementTransaction, attempted: usize) void {
-        var remaining = attempted;
+    // `attempted` holds indices into `windows.items` in the order their placement was attempted.
+    fn rollback(self: PlacementTransaction, attempted: []const usize) void {
+        saveParkingJournal(self.intent);
+        var remaining = attempted.len;
         while (remaining > 0) {
             remaining -= 1;
-            const identity = windows.items[remaining].identity;
+            const identity = windows.items[attempted[remaining]].identity;
             const original_index = self.identityIndex(identity);
             const original = self.originals[original_index] orelse continue;
-            if (verifiedFrame(identity, original, null)) continue;
+            var restored = original;
+            if (verifiedFrame(identity, original, null, &restored)) continue;
             const intent = &self.intent[original_index];
             if (!intent.parked) intent.parking_frame = original;
             intent.parked = true;
+            intent.parked_at = null;
             intent.placement_error = "Placement rollback rejected; recovery ownership retained";
         }
         layouts = self.store.*;
@@ -831,27 +874,45 @@ const PlacementTransaction = struct {
         unreachable;
     }
 
+    // Shows the incoming windows before parking the outgoing ones, back to front, so the desktop never shows through.
     fn commit(self: PlacementTransaction) bool {
         if (!deriveGoals()) {
-            self.rollback(0);
+            self.rollback(&.{});
             return false;
         }
-        for (windows.items, 0..) |*window, index| {
-            if (self.originals[self.identityIndex(window.identity)] == null) continue;
-            const outcome = if (visible(window.*)) placeVisibility(window, targetFrame(window.*), false) else parkWindow(window);
+        var order: [1024]usize = undefined;
+        var count: usize = 0;
+        for (windows.items, 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and visible(window)) {
+            order[count] = index;
+            count += 1;
+        };
+        const shown = count;
+        for (windows.items, 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and !visible(window)) {
+            order[count] = index;
+            count += 1;
+        };
+        std.mem.sort(usize, order[shown..count], {}, backToFront);
+        for (order[0..count], 0..) |index, position| {
+            const window = &windows.items[index];
+            const outcome = if (visible(window.*)) placeVisible(window) else parkWindow(window);
             if (outcome == .applied) continue;
             // An application that rejects its tile size must not block every other window. Float it, as reconcile does,
             // and derive goals again so later windows do not receive tiles sized around the rejected one.
             if (outcome == .rolled_back and visible(window.*) and !window.floating) {
                 floatRejectedTile(window);
-                if (window.floating and deriveGoals() and placeVisibility(window, targetFrame(window.*), false) == .applied) continue;
+                if (window.floating and deriveGoals() and placeVisible(window) == .applied) continue;
             }
-            self.rollback(index + 1);
+            self.rollback(order[0 .. position + 1]);
             transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
             return false;
         }
         transition_error = null;
         return true;
+    }
+
+    // Unknown stack positions are `maxInt(u32)`, so they come first.
+    fn backToFront(_: void, first: usize, second: usize) bool {
+        return windows.items[first].observation.stack_order > windows.items[second].observation.stack_order;
     }
 };
 fn routeMembership() bool {
@@ -885,7 +946,7 @@ fn layoutMembers(output: []tiling.Member) []tiling.Member {
     var count: usize = 0;
     for (windows.items) |window| {
         const display = displays.items[displayIndex(window.display) orelse continue];
-        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap) };
+        output[count] = .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .tiled = !window.floating, .active = externallyEligible(window), .area = inset(display.frame, config.gap), .minimum = window.minimum, .vanished = window.vanished != null };
         count += 1;
     }
     return output[0..count];
@@ -973,8 +1034,9 @@ fn boundedFloating(frame: Rect, area: Rect) Rect {
     var bounded = frame;
     bounded.width = @min(frame.width, area.width);
     bounded.height = @min(frame.height, area.height);
-    bounded.left = std.math.clamp(frame.left, area.left, area.left + area.width - bounded.width);
-    bounded.top = std.math.clamp(frame.top, area.top, area.top + area.height - bounded.height);
+    // The sum is taken last, so rounding cannot put the upper bound below the lower one.
+    bounded.left = std.math.clamp(frame.left, area.left, area.left + (area.width - bounded.width));
+    bounded.top = std.math.clamp(frame.top, area.top, area.top + (area.height - bounded.height));
     return bounded;
 }
 fn floatRejectedTile(window: *Window) void {
@@ -1019,19 +1081,45 @@ fn deriveGoals() bool {
         const workspace = workspaceLayout(display.identity, display.workspace);
         const area = inset(display.frame, config.gap);
         if (count == 1) {
-            windows.items[indices[0]].goal = area;
+            const lone = &windows.items[indices[0]];
+            lone.goal = area;
+            if (config.single_window_max_width > 0) {
+                lone.goal.width = @min(area.width, @max(config.single_window_max_width, lone.minimum[0]));
+                lone.goal.left += (area.width - lone.goal.width) / 2;
+            }
             continue;
         }
         if (workspace.layout == .master) {
-            const columns = tiling.split(area, .width, workspace.ratio, config.gap);
+            const columns = tiling.split(area, .width, workspace.ratio, config.gap, masterMinimums(indices[0..count]));
             windows.items[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
             const spacing = @min(config.gap, columns[1].height / (2 * rows));
             const height = (columns[1].height - spacing * (rows - 1)) / rows;
-            for (indices[1..count], 0..) |index, row| {
+            var bound: [1024]bool = @splat(false);
+            var share = height;
+            var required = spacing * (rows - 1);
+            for (indices[1..count]) |index| required += rowMinimum(windows.items[index]);
+            if (required <= columns[1].height) {
+                var remaining = columns[1].height - spacing * (rows - 1);
+                var unbound = count - 1;
+                var settled = false;
+                while (!settled) {
+                    settled = true;
+                    for (indices[1..count], bound[1..count]) |index, *fixed| if (!fixed.* and rowMinimum(windows.items[index]) > share) {
+                        fixed.* = true;
+                        remaining -= rowMinimum(windows.items[index]);
+                        unbound -= 1;
+                        settled = false;
+                    };
+                    if (!settled and unbound > 0) share = remaining / @as(f64, @floatFromInt(unbound));
+                }
+            }
+            var shift: f64 = 0;
+            for (indices[1..count], bound[1..count], 0..) |index, fixed, row| {
                 var frame = columns[1];
-                frame.top += @as(f64, @floatFromInt(row)) * (height + spacing);
-                frame.height = height;
+                frame.top += @as(f64, @floatFromInt(row)) * (share + spacing) + shift;
+                frame.height = if (fixed) rowMinimum(windows.items[index]) else share;
+                shift += frame.height - share;
                 windows.items[index].goal = frame;
             }
         } else for (indices[0..count]) |index| {
@@ -1040,6 +1128,17 @@ fn deriveGoals() bool {
     }
     return true;
 }
+fn rowMinimum(window: Window) f64 {
+    return @max(tiling.minimum_tile_extent, window.minimum[1]);
+}
+fn masterMinimums(indices: []const usize) [2]f64 {
+    var minimums: [2]f64 = @splat(tiling.minimum_tile_extent);
+    for (indices, 0..) |index, ordinal| {
+        const slot: usize = if (ordinal == 0) 0 else 1;
+        minimums[slot] = @max(minimums[slot], windows.items[index].minimum[0]);
+    }
+    return minimums;
+}
 fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
     return @abs(first.left - second.left) <= tolerance and @abs(first.top - second.top) <= tolerance and @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;
 }
@@ -1047,11 +1146,53 @@ fn placementFailure(window: *Window, message: []const u8) void {
     const repeated = if (window.placement_error) |previous| std.mem.eql(u8, previous, message) else false;
     window.placement_error = message;
     transition_error = message;
+    journaled_transition = message;
     if (repeated) return;
+    if (journaling()) {
+        var actual: Rect = undefined;
+        const readable = native.platform_read_frame(window.identity, &actual);
+        _ = journal("placement", .{ .window = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .message = message, .workspace = window.workspace + 1, .display = window.display, .goal = window.goal, .target = targetFrame(window.*), .actual = if (readable) actual else null });
+    }
     var buffer: [256:0]u8 = @splat(0);
     const formatted = std.fmt.bufPrint(&buffer, "Window {d}: {s}", .{ window.identity, message }) catch return;
     buffer[formatted.len] = 0;
     native.platform_error(&buffer);
+}
+fn journaling() bool {
+    return native.platform_filter()[0] == 0;
+}
+fn journal(event: []const u8, fields: anytype) bool {
+    if (!journaling()) return false;
+    var buffer: [4096]u8 = undefined;
+    const line = journalLine(&buffer, event, fields) catch return false;
+    if (session.huen_journal_append(line.ptr, line.len)) return true;
+    if (!journal_failed) native.platform_error("Journal append failed; later failures are not reported");
+    journal_failed = true;
+    return false;
+}
+fn journalLine(buffer: []u8, event: []const u8, fields: anytype) ![]const u8 {
+    var clock: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &clock);
+    var writer: std.Io.Writer = .fixed(buffer);
+    var stream: std.json.Stringify = .{ .writer = &writer };
+    try stream.beginObject();
+    try stream.objectField("at");
+    try stream.write(clock.sec);
+    try stream.objectField("event");
+    try stream.write(event);
+    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
+        try stream.objectField(name);
+        try stream.write(@field(fields, name));
+    }
+    try stream.endObject();
+    try writer.writeByte('\n');
+    return writer.buffered();
+}
+fn journalTransition() void {
+    const message = transition_error orelse return;
+    if (journaled_transition) |previous| if (std.mem.eql(u8, previous, message)) return;
+    journaled_transition = message;
+    _ = journal("transition", .{ .message = message });
 }
 fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     for (displays.items) |display| {
@@ -1072,13 +1213,13 @@ fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
         actual.top >= area.top and actual.top <= bottom and actual.top + actual.height >= bottom and
         !overlapsOtherDisplays(actual, displayIdentity);
 }
-fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32) bool {
+fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32, actual: *Rect) bool {
     _ = native.platform_frame(identity, target, 0, .verified_placement);
-    var actual: Rect = undefined;
-    if (!native.platform_read_frame(identity, &actual)) return false;
-    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual, target, displayIdentity) else framesNear(actual, target, 2);
+    if (!native.platform_read_frame(identity, actual)) return false;
+    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else framesNear(actual.*, target, 2);
 }
-const PlacementOutcome = enum { applied, rolled_back, recovery_required, unreadable, no_corner };
+const Refusal = struct { accepted: Rect };
+const PlacementOutcome = union(enum) { applied, rolled_back: Refusal, recovery_required: Refusal, unreadable, no_corner };
 
 fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
     var original: Rect = undefined;
@@ -1087,16 +1228,21 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     if (!previouslyParked) window.parking_frame = original;
     // A failed AX write can still move the window. Own it before the first write.
     window.parked = true;
-    if (verifiedFrame(window.identity, target, if (parked) window.display else null)) {
+    if (parked and !previouslyParked) saveParkingJournal(&.{});
+    var accepted = target;
+    if (verifiedFrame(window.identity, target, if (parked) window.display else null, &accepted)) {
         window.parked = parked;
+        window.parked_at = if (parked) native.platform_monotonic() else null;
         window.placement_error = null;
         return .applied;
     }
-    if (verifiedFrame(window.identity, original, null)) {
+    var restored = original;
+    if (verifiedFrame(window.identity, original, null, &restored)) {
         window.parked = previouslyParked;
-        return .rolled_back;
+        return .{ .rolled_back = .{ .accepted = accepted } };
     }
-    return .recovery_required;
+    window.parked_at = null;
+    return .{ .recovery_required = .{ .accepted = accepted } };
 }
 fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
     switch (outcome) {
@@ -1107,26 +1253,90 @@ fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
         .no_corner => placementFailure(window, "No parking corner avoids other displays"),
     }
 }
-fn placeVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
-    const outcome = attemptVisibility(window, target, parked);
+fn placeVisible(window: *Window) PlacementOutcome {
+    const target = targetFrame(window.*);
+    var outcome = attemptVisibility(window, target, false);
+    const refusal: ?Refusal = switch (outcome) {
+        .rolled_back, .recovery_required => |refusal| refusal,
+        else => null,
+    };
+    if (refusal) |answer| if (!managedFullscreen(window.*)) {
+        const accepted = answer.accepted;
+        if (!window.floating) {
+            if (outcome == .rolled_back and learnMinimum(window, target, accepted)) outcome = attemptVisibility(window, targetFrame(window.*), false);
+        } else if (@abs(accepted.width - target.width) > 2 or @abs(accepted.height - target.height) > 2) {
+            // A floating window takes the size its application answered with, or the same refusal would repeat on every attempt.
+            // An application that raised its minimum also refuses the rollback to the old size, so both refusals are retried.
+            window.floating_frame.width = accepted.width;
+            window.floating_frame.height = accepted.height;
+            outcome = attemptVisibility(window, targetFrame(window.*), false);
+        }
+    };
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
+// A minimum the layout cannot honor is dropped, so the window that does not fit floats rather than a neighbor.
+fn learnMinimum(window: *Window, target: Rect, accepted: Rect) bool {
+    // A launching application can restore its own larger frame over its first placements. That frame is a preference, not a minimum.
+    if (!window.established and native.platform_monotonic() - window.discovered < 1.0) return false;
+    const area = inset(displays.items[displayIndex(window.display) orelse return false].frame, config.gap);
+    const previous = window.minimum;
+    var grew = false;
+    for (&window.minimum, [2]f64{ target.width, target.height }, [2]f64{ accepted.width, accepted.height }, [2]f64{ area.width, area.height }) |*minimum, requested, answered, usable| {
+        const learned = @min(answered, usable);
+        if (answered > requested + 2 and learned > minimum.*) {
+            minimum.* = learned;
+            grew = true;
+        }
+    }
+    if (!grew) return false;
+    if (deriveGoals() and minimumsHonored(window.display)) return true;
+    window.minimum = previous;
+    _ = deriveGoals();
+    return false;
+}
+fn minimumsHonored(display: u32) bool {
+    for (windows.items) |window| {
+        if (window.display != display or !visible(window) or window.floating or managedFullscreen(window)) continue;
+        if (window.goal.width < window.minimum[0] - 2 or window.goal.height < window.minimum[1] - 2) return false;
+    }
+    return true;
+}
 fn parkWindow(window: *Window) PlacementOutcome {
+    if (window.escape == .exempt) return .applied;
     const outcome: PlacementOutcome = outcome: {
         var actual: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
         const area = displays.items[displayIndex(window.display) orelse break :outcome .no_corner].frame;
-        var right = if (window.parked) window.parking_frame else actual;
-        right.top = area.top + area.height - 1;
-        right.left = area.left + area.width - 1;
-        var left = right;
-        left.left = area.left + 1 - right.width;
-        const candidates = [2]Rect{ right, left };
+        // A parked window keeps the size its application gave it, so a corner is never written with a size the application refuses.
+        if (window.parked) {
+            window.parking_frame.width = actual.width;
+            window.parking_frame.height = actual.height;
+        }
+        const candidates = parking.corners(actual, area);
         if (window.parked) for (candidates) |candidate| if (parkedFrameAccepted(actual, candidate, window.display)) {
             window.placement_error = null;
             return .applied;
         };
+        // A frame that only touches the display is a parked strip that a Dock resize exposed.
+        const horizontal = @min(actual.left + actual.width, area.left + area.width) - @max(actual.left, area.left);
+        const vertical = @min(actual.top + actual.height, area.top + area.height) - @max(actual.top, area.top);
+        if (window.parked and window.parked_at != null and horizontal > 3 and vertical > 3) {
+            const now = native.platform_monotonic();
+            if (now - topology_changed_at > 2) {
+                window.escape = switch (window.escape) {
+                    .escaped => |at| if (now - at <= 300) .exempt else .{ .escaped = now },
+                    else => .{ .escaped = now },
+                };
+                // Only a park verified after this one can escape again, so one refusal is not counted twice.
+                window.parked_at = null;
+                if (window.escape == .exempt) {
+                    window.parked = false;
+                    placementFailure(window, "Application keeps moving its window back on screen; window is no longer parked");
+                    return .applied;
+                }
+            }
+        }
         var attempted: PlacementOutcome = .no_corner;
         for (candidates) |candidate| {
             if (overlapsOtherDisplays(candidate, window.display)) continue;
@@ -1138,9 +1348,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
-fn reconcile() void {
-    if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
-    if (!deriveGoals()) return;
+fn placeWindows() enum { settled, relayout } {
     for (windows.items) |*window| {
         if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
             window.floating = true;
@@ -1157,7 +1365,7 @@ fn reconcile() void {
         }
         const target = targetFrame(window.*);
         if (window.parked) {
-            const outcome = placeVisibility(window, target, false);
+            const outcome = placeVisible(window);
             if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
             continue;
         }
@@ -1168,13 +1376,25 @@ fn reconcile() void {
             floatRejectedTile(window);
             continue;
         }
+        if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
+        if (!window.floating and learnMinimum(window, target, accepted)) return .relayout;
         // A launching application can refuse or override its first placements. Retry a new window before floating it.
         if (native.platform_monotonic() - window.discovered < 1.0) continue;
+        const tiled = !window.floating;
         window.floating = true;
         window.floating_restore = false;
-        if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
         window.floating_frame = accepted;
         placementFailure(window, "Application rejected layout geometry; window left floating");
+        if (tiled) return .relayout;
+    }
+    return .settled;
+}
+fn reconcile() void {
+    if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
+    if (!deriveGoals()) return;
+    var passes: usize = 0;
+    while (placeWindows() == .relayout and passes < windows.items.len) : (passes += 1) {
+        if (!deriveGoals()) return;
     }
     var borderIdentity: u64 = 0;
     if (focused) |identity| if (windowIndex(identity)) |index| {
@@ -1184,6 +1404,243 @@ fn reconcile() void {
         } else false)) borderIdentity = identity;
     };
     native.platform_border(borderIdentity, config.border_width, config.border_color);
+    saveParkingJournal(&.{});
+}
+fn reportParkingJournal(message: []const u8, err: anyerror) void {
+    var buffer: [256:0]u8 = @splat(0);
+    const formatted = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ message, @errorName(err) }) catch return;
+    buffer[formatted.len] = 0;
+    native.platform_error(&buffer);
+}
+fn writeParkingJournal(records: []const parking.Record) void {
+    parking_journal.save(allocator, std.mem.span(native.platform_filter()), records) catch |err| {
+        if (!parking_journal_failed) reportParkingJournal("Parking journal save failed", err);
+        parking_journal_failed = true;
+        return;
+    };
+    parking_journal_failed = false;
+}
+// A corner that touches another display is never used, so a window there is not a parked one.
+fn parkingRecord(window: *const Window) ?parking.Record {
+    const display = displays.items[displayIndex(window.display) orelse return null];
+    var corners = parking.corners(window.parking_frame, display.frame);
+    const blocked = [2]bool{ overlapsOtherDisplays(corners[0], window.display), overlapsOtherDisplays(corners[1], window.display) };
+    if (blocked[0] and blocked[1]) return null;
+    if (blocked[0]) corners[0] = corners[1];
+    if (blocked[1]) corners[1] = corners[0];
+    const record: parking.Record = .{ .bundle = text(&window.observation.bundle), .pid = window.observation.pid, .token = window.observation.process_token, .original = window.parking_frame, .corners = corners };
+    return if (parking.valid(record)) record else null;
+}
+fn orphanRecord(lost: *const Orphan) parking.Record {
+    return .{ .bundle = text(&lost.bundle), .pid = lost.pid, .token = lost.token, .original = lost.original, .corners = lost.corners };
+}
+fn orphanOf(record: parking.Record, since: f64) Orphan {
+    var result: Orphan = .{ .bundle = @splat(0), .pid = record.pid, .token = record.token, .original = record.original, .corners = record.corners, .since = since };
+    @memcpy(result.bundle[0..record.bundle.len], record.bundle);
+    return result;
+}
+// `prior` is the window state a rollback is about to return to. A window that the transaction showed goes back to its corner.
+fn saveParkingJournal(prior: []const Window) void {
+    var records: [parking.max_records]parking.Record = undefined;
+    var count: usize = 0;
+    for (windows.items) |*window| if ((window.parked or window.vanished_parked) and count < records.len) if (parkingRecord(window)) |record| {
+        records[count] = record;
+        count += 1;
+    };
+    for (prior) |*window| {
+        if (!window.parked or count == records.len) continue;
+        if (windowIndex(window.identity)) |index| if (windows.items[index].parked) continue;
+        records[count] = parkingRecord(window) orelse continue;
+        count += 1;
+    }
+    for (orphans.items) |*lost| if (count < records.len) {
+        records[count] = orphanRecord(lost);
+        count += 1;
+    };
+    writeParkingJournal(records[0..count]);
+}
+// After a verified restore only the orphans can still sit at a corner.
+fn settleParkingJournal() void {
+    var records: [256]parking.Record = undefined;
+    for (orphans.items, records[0..orphans.items.len]) |*lost, *record| record.* = orphanRecord(lost);
+    writeParkingJournal(records[0..orphans.items.len]);
+}
+// The display layout may have changed since the crash, so the frame is bounded to the display it overlaps most.
+fn recoveryFrame(frame: Rect) Rect {
+    var largest: f64 = 0;
+    var area = displays.items[0].frame;
+    for (displays.items) |display| {
+        const bounds = display.full_bounds;
+        const width = @min(frame.left + frame.width, bounds.left + bounds.width) - @max(frame.left, bounds.left);
+        const height = @min(frame.top + frame.height, bounds.top + bounds.height) - @max(frame.top, bounds.top);
+        if (width > 0 and height > 0 and width * height > largest) {
+            largest = width * height;
+            area = display.frame;
+        }
+    }
+    return boundedFloating(frame, area);
+}
+// Patches the observations with the readback so discovery assigns each window to the display it is on now.
+// The first call matches the journal of the previous process. Later calls match the orphans against windows not seen before.
+fn recoverParked(observed: []native.WMWindow, output: []parking.Recovery) []parking.Recovery {
+    var outcome: ParkingRecovery = parking_recovery orelse .{};
+    defer parking_recovery = outcome;
+    var records: [parking.max_records]parking.Record = undefined;
+    var since: [parking.max_records]f64 = undefined;
+    const now = native.platform_monotonic();
+    var count: usize = 0;
+    var loaded: ?std.json.Parsed(parking.Journal) = null;
+    defer if (loaded) |*parsed| parsed.deinit();
+    if (parking_recovery == null) {
+        loaded = parking.load(allocator, std.mem.span(native.platform_filter())) catch |err| {
+            reportParkingJournal("Parking journal rejected", err);
+            return output[0..0];
+        };
+        if (loaded) |parsed| {
+            count = parsed.value.records.len;
+            @memcpy(records[0..count], parsed.value.records);
+            @memset(since[0..count], now);
+            outcome.records = count;
+        }
+    } else for (orphans.items) |*lost| {
+        records[count] = orphanRecord(lost);
+        since[count] = lost.since;
+        count += 1;
+    }
+    if (count == 0) return output[0..0];
+    var eligible: [1024]bool = undefined;
+    for (observed, eligible[0..observed.len]) |observation, *open| open.* = windowIndex(observation.identity) == null;
+    var claimed: [parking.max_records]bool = @splat(false);
+    const recoveries = parking.match(records[0..count], observed, eligible[0..observed.len], claimed[0..count], output);
+    // An unmatched record stays for up to a minute while its application runs, because a scan can miss an application that does not answer.
+    var kept: [256]Orphan = undefined;
+    var kept_count: usize = 0;
+    for (records[0..count], claimed[0..count], since[0..count]) |record, used, lost_at| {
+        if (used or kept_count == kept.len or now - lost_at > orphan_lifetime or processExited(.{ .pid = record.pid, .token = record.token })) continue;
+        kept[kept_count] = orphanOf(record, lost_at);
+        kept_count += 1;
+    }
+    orphans.clearRetainingCapacity();
+    orphans.appendSliceAssumeCapacity(kept[0..kept_count]);
+    for (recoveries) |*recovery| {
+        const window = &observed[recovery.index];
+        recovery.original = recoveryFrame(recovery.original);
+        var actual = window.frame;
+        if (native.platform_adopt_original(window.identity, recovery.original, &actual)) outcome.recovered += 1 else outcome.failed += 1;
+        window.frame = actual;
+    }
+    if (recoveries.len > 0) native.platform_config_changed();
+    return recoveries;
+}
+const replacement_grace = 0.5;
+fn replaces(ghost: Window, successor: Window) bool {
+    const vanished = ghost.vanished orelse return false;
+    return successor.vanished == null and successor.observation.pid == ghost.observation.pid and @abs(successor.discovered - vanished) <= replacement_grace and framesNear(successor.discovered_frame, ghost.observation.frame, 4);
+}
+fn successorIndex(ghost_index: usize) ?usize {
+    var found: ?usize = null;
+    for (windows.items, 0..) |candidate, index| if (replaces(windows.items[ghost_index], candidate)) {
+        if (found != null) return null;
+        found = index;
+    };
+    const successor = windows.items[found orelse return null];
+    for (windows.items, 0..) |other, index| if (index != ghost_index and replaces(other, successor)) return null;
+    return found;
+}
+// The successor takes the ghost's slot because the master layout orders its stack by slot.
+fn replaceWindow(ghost_index: usize, successor_index: usize) void {
+    const ghost = windows.items[ghost_index];
+    var successor = windows.items[successor_index];
+    successor.workspace = ghost.workspace;
+    successor.display = ghost.display;
+    successor.floating = ghost.floating;
+    successor.floating_frame = ghost.floating_frame;
+    successor.floating_restore = ghost.floating;
+    successor.last_floating_frame = ghost.last_floating_frame;
+    successor.minimum = ghost.minimum;
+    // The successor appeared at the corner, so that frame must not become the geometry that restore writes back.
+    if (ghost.vanished_parked) {
+        successor.parking_frame = recoveryFrame(ghost.parking_frame);
+        successor.parked = true;
+        var actual = successor.observation.frame;
+        _ = native.platform_adopt_original(successor.identity, successor.parking_frame, &actual);
+        successor.observation.frame = actual;
+    }
+    layouts.replaceIdentity(ghost.identity, successor.identity);
+    focus_history.rename(ghost.identity, successor.identity);
+    if (last_observed_focus == ghost.identity) last_observed_focus = successor.identity;
+    windows.items[ghost_index] = successor;
+    _ = windows.orderedRemove(successor_index);
+}
+fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
+    if (window.observation.bundle[0] == 0) return null;
+    var entry: memory.Entry = .{ .bundle = window.observation.bundle, .floating = window.floating, .floating_frame = window.floating_frame, .frame = frame, .expires = expires };
+    const name = text(&config.workspaces[window.workspace].name);
+    @memcpy(entry.workspace[0..name.len], name);
+    return entry;
+}
+// An application can take seconds to exit after its windows close, so the entry waits for `settle` to see the exit.
+fn rememberPlacement(window: Window, now: f64) void {
+    if (!config.placement_memory or window.observation.process_token == 0) return;
+    var entry = placementEntry(window, window.observation.frame, now + 30) orelse return;
+    entry.owner = .{ .process = .{ .pid = window.observation.pid, .token = window.observation.process_token }, .since = now };
+    placement_memory.remember(entry);
+}
+// The token is a launch date in seconds since 2001.
+fn processAge(token: f64) f64 {
+    if (token == 0) return 0;
+    var clock: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &clock);
+    return @as(f64, @floatFromInt(clock.sec)) - 978307200 - token;
+}
+fn processExited(process: memory.Process) bool {
+    return native.platform_process_token(process.pid) != process.token;
+}
+fn claimPlacement(window: *Window, decision: rules.Decision, display: u32) void {
+    if (!config.placement_memory or decision.workspace != null) return;
+    const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered) orelse return;
+    const workspace = config.workspaceIndex(text(&entry.workspace)) orelse return;
+    placement_claims += 1;
+    window.workspace = workspace;
+    if (decision.floating == null) window.floating = entry.floating;
+    if (!window.floating or decision.geometry != null or decision.centered) return;
+    const destination = resolvePlacements()[workspace] orelse display;
+    window.floating_frame = boundedFloating(entry.floating_frame, inset(displays.items[displayIndex(destination).?].frame, config.gap));
+    window.floating_restore = true;
+}
+fn loadPlacements() void {
+    if (!config.placement_memory) return;
+    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+    const bytes = allocator.alloc(u8, memory.max_bytes) catch return native.platform_error("Placement memory: out of memory");
+    defer allocator.free(bytes);
+    var used: usize = 0;
+    switch (session.huen_session_read("placements", &hash, bytes.ptr, bytes.len, &used)) {
+        0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
+        1 => return,
+        else => return native.platform_error("Placement memory: file unreadable"),
+    }
+    writePlacements(&.{});
+}
+fn writePlacements(entries: []const memory.Entry) void {
+    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+    const encoded = memory.encode(allocator, entries) catch return native.platform_error("Placement memory: out of memory");
+    defer allocator.free(encoded);
+    if (!session.huen_session_write("placements", &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
+}
+// After restoration each window is where a restarted manager will discover it.
+fn persistPlacements() void {
+    if (!config.placement_memory) return;
+    const now = native.platform_monotonic();
+    var persisted = placement_memory;
+    persisted.prune(now);
+    // An entry whose application still runs is for a closed window, so the next manager must not hand it out.
+    persisted.settle(now, processExited);
+    persisted.dropPending();
+    for (windows.items) |window| {
+        var frame: Rect = undefined;
+        if (window.vanished == null and native.platform_read_frame(window.identity, &frame)) persisted.remember(placementEntry(window, frame, now) orelse continue);
+    }
+    writePlacements(persisted.entries[0..persisted.count]);
 }
 export fn wm_tick() void {
     if (pending_close) |pending| close: {
@@ -1195,6 +1652,7 @@ export fn wm_tick() void {
     if (!initialized) return;
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
     var updated: [monitor.capacity]Display = undefined;
@@ -1208,6 +1666,7 @@ export fn wm_tick() void {
         display.* = .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |known| known.workspace else 0, .previous_workspace = if (previous) |known| known.previous_workspace else null };
     }
     if (topology_changed) {
+        if (displays.items.len != 0) topology_changed_at = native.platform_monotonic();
         generation += 1;
         cancelTransition();
         workspace_shortcuts.clearRetainingCapacity();
@@ -1215,14 +1674,27 @@ export fn wm_tick() void {
     displays.clearRetainingCapacity();
     displays.appendSliceAssumeCapacity(updated[0..displayCount]);
     if (displays.items.len == 0) return;
+    if (!placement_memory_loaded) {
+        placement_memory_loaded = true;
+        loadPlacements();
+    }
+    if (placement_memory.count > 0) placement_memory.settle(native.platform_monotonic(), processExited);
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
+    var recovered: [1024]parking.Recovery = undefined;
+    const first_scan = parking_recovery == null;
+    const recoveries = if (first_scan or orphans.items.len > 0) recoverParked(observed[0..count], &recovered) else recovered[0..0];
     var observed_focus: ?u64 = null;
     for (observed[0..count]) |observation| {
         if (observation.focused) observed_focus = observation.identity;
         if (windowIndex(observation.identity)) |index| {
             var window = &windows.items[index];
             window.observation = observation;
+            if (window.vanished != null) {
+                window.vanished = null;
+                window.parked = window.vanished_parked;
+                window.vanished_parked = false;
+            }
             if (displayIndex(window.display) != null and transition == null and window.floating and !managedFullscreen(window.*) and !window.parked and !observation.stale and observation.motion == .idle) {
                 if (window.floating_restore) {
                     if (framesNear(observation.frame, window.floating_frame, 2)) window.floating_restore = false;
@@ -1245,7 +1717,7 @@ export fn wm_tick() void {
         const display = displays.items[displaySlot].identity;
         // With global routing, a window on an empty display joins the current workspace.
         const joined = placedWorkspace(displays.items[displaySlot]) orelse currentWorkspace(displaySlot);
-        var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame };
+        var window: Window = .{ .identity = observation.identity, .observation = observation, .display = display, .workspace = joined, .parking_frame = observation.frame, .floating_frame = observation.frame, .goal = observation.frame, .discovered_frame = observation.frame };
         const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&observation.bundle), .title = text(&observation.title), .title_complete = observation.title_complete });
         window.floating = decision.floating orelse false;
         if (decision.workspace) |workspace| window.workspace = workspace;
@@ -1262,15 +1734,52 @@ export fn wm_tick() void {
             window.floating_frame = boundedFloating(frame, area);
             window.floating_restore = true;
         }
+        // A recovered window stays owned even when it did not reach its frame or shares it with another window of its application.
+        for (recoveries) |recovery| if (observed[recovery.index].identity == observation.identity) {
+            window.parked = true;
+            window.parking_frame = recovery.original;
+        };
         window.discovered = native.platform_monotonic();
+        // A window the first scan finds predates the manager, but its application may have launched only moments before.
+        window.established = first_scan and processAge(observation.process_token) > 5;
+        claimPlacement(&window, decision, display);
         windows.appendAssumeCapacity(window);
+    }
+    var now: ?f64 = null;
+    for (windows.items) |*window| {
+        if (window.vanished != null) continue;
+        for (observed[0..count]) |observation| {
+            if (observation.identity == window.identity) break;
+        } else {
+            window.vanished = now orelse native.platform_monotonic();
+            now = window.vanished;
+            window.observation.stale = true;
+            window.observation.onscreen = false;
+            window.observation.focused = false;
+            window.observation.fullscreen = false;
+            window.vanished_parked = window.parked;
+            window.parked = false;
+            window.urgent = false;
+        }
     }
     var index: usize = 0;
     while (index < windows.items.len) {
-        const found = for (observed[0..count]) |observation| {
-            if (observation.identity == windows.items[index].identity) break true;
-        } else false;
-        if (!found) {
+        const vanished = windows.items[index].vanished orelse {
+            index += 1;
+            continue;
+        };
+        if (successorIndex(index)) |successor| {
+            replaceWindow(index, successor);
+            continue;
+        }
+        if (now == null) now = native.platform_monotonic();
+        if (now.? - vanished > replacement_grace) {
+            // The window can still sit at its corner, as when its application stops being a regular application.
+            if (windows.items[index].vanished_parked) if (parkingRecord(&windows.items[index])) |record| {
+                if (orphans.items.len == orphans.capacity) _ = orphans.orderedRemove(0);
+                orphans.appendAssumeCapacity(orphanOf(record, now.?));
+            };
+            rememberPlacement(windows.items[index], now.?);
             layouts.forgetIdentity(windows.items[index].identity);
             focus_history.forget(windows.items[index].identity);
             _ = windows.orderedRemove(index);
@@ -1444,7 +1953,7 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
             };
             defer transaction.deinit();
             layouts.reveal(state, identity) catch |err| {
-                transaction.rollback(0);
+                transaction.rollback(&.{});
                 transition_error = @errorName(err);
                 return;
             };
@@ -1469,7 +1978,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
     if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| layouts.reveal(state, identity) catch |err| {
-        transaction.rollback(0);
+        transaction.rollback(&.{});
         transition_error = @errorName(err);
         return false;
     };
@@ -1485,6 +1994,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const pending = transition orelse return;
     if (callbackGeneration != pending.generation) return;
     defer publishStatus();
+    defer journalTransition();
     native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
     if (displayIndex(pending.display)) |displaySlot| {
@@ -1592,7 +2102,46 @@ fn observeCommandState() void {
     trackCurrentDisplay();
 }
 export fn wm_hotkey_poll() void {
-    if (native.platform_monotonic() - activated >= activation_settle) placeShortcuts();
+    const now = native.platform_monotonic();
+    if (hotkey_watch.overdue(now)) |command| recoverHotkey(&command, now);
+    if (now - activated >= activation_settle) placeShortcuts();
+}
+export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
+    hotkey_watch.pressed(slot, std.mem.span(command), native.platform_monotonic());
+}
+export fn wm_hotkey_delivered(slot: u32, command: [*:0]const u8) void {
+    if (hotkey_watch.delivered(slot, native.platform_monotonic())) wm_hotkey(command);
+}
+export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {
+    if (!initialized or !config.swipe.enabled) return;
+    swipe_recognizer.fingers = config.swipe.fingers;
+    const step = swipe_recognizer.sample(fingers, horizontal, vertical, native.platform_monotonic()) orelse return;
+    if (suspended or transition != null or native.platform_pointer_buttons()) return;
+    var point: native.WMPoint = undefined;
+    if (native.platform_pointer(&point)) for (displays.items) |display| {
+        const bounds = display.full_bounds;
+        if (point.left < bounds.left or point.left >= bounds.left + bounds.width or point.top < bounds.top or point.top >= bounds.top + bounds.height) continue;
+        selectDisplay(display.identity);
+        break;
+    };
+    wm_hotkey(if (step == .next) "workspace occupied+1" else "workspace occupied-1");
+}
+// macOS can stop delivering registered hotkeys without an error.
+fn recoverHotkey(command: *const delivery.Command, now: f64) void {
+    hotkey_recovery.missed += 1;
+    var buffer: [256:0]u8 = @splat(0);
+    _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(command)}) catch {};
+    native.platform_error(&buffer);
+    _ = journal("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
+    if (now - hotkey_recovery.rebound >= 5) {
+        hotkey_recovery.rebound = now;
+        hotkey_recovery.rebinds += 1;
+        if (!native.platform_rebind()) {
+            native.platform_error("Hotkey re-registration failed");
+            _ = journal("error", .{ .message = "Hotkey re-registration failed" });
+        }
+    }
+    wm_hotkey(command);
 }
 fn placeShortcuts() void {
     if (workspace_shortcuts.items.len == 0) return;
@@ -1600,6 +2149,7 @@ fn placeShortcuts() void {
     if (suspended or displays.items.len == 0 or transition != null) return;
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     var remaining = workspace_shortcuts.items;
     while (remaining.len != 0) {
         observeCommandState();
@@ -1642,9 +2192,10 @@ export fn wm_hotkey(commandText: [*:0]const u8) void {
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishStatus();
     defer publishPointer();
+    defer journalTransition();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
-        .status, .windows, .monitors, .workspaces => {},
+        .status, .windows, .monitors, .workspaces, .wrong => {},
         .quit, .restore => workspace_shortcuts.clearRetainingCapacity(),
         else => placeShortcuts(),
     }
@@ -1675,8 +2226,14 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .snapshot_generation = generation,
                 .transition_pending = transition != null,
                 .transition_error = transition_error,
+                .hotkeys = .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds },
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = session_status,
+                .parking_recovery = parking_recovery,
+                .placement_memory = .{ .entries = if (placement_memory.count == 0) 0 else unexpired: {
+                    placement_memory.prune(native.platform_monotonic());
+                    break :unexpired placement_memory.count;
+                }, .claimed = placement_claims },
                 .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
             });
         },
@@ -1684,6 +2241,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const index = config.modeIndex(name.text()) orelse return failure("UnknownMode");
             const mode = &config.modes[index];
             if (!native.platform_bindings(&mode.bindings, mode.binding_count)) return failure("HotkeyCollision");
+            hotkey_watch.forgetPresses();
             active_mode = index;
             return json(.{ .ok = true, .active_mode = text(&mode.name) });
         },
@@ -1693,6 +2251,18 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             if (request_id == 0) return failure("ApplicationNotFound");
             return json(.{ .ok = true, .accepted = true, .request_id = request_id });
         },
+        .wrong => |note| {
+            if (!journaling()) return failure("JournalDisabledByFilter");
+            var length = @min(note.len, 200);
+            while (length < note.len and note[length] & 0xc0 == 0x80) length -= 1;
+            const Shown = struct { display: u32, workspace: ?usize };
+            var shown: [monitor.capacity]Shown = undefined;
+            for (displays.items, shown[0..displays.items.len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (placedWorkspace(display)) |workspace| workspace + 1 else null };
+            var parked: usize = 0;
+            for (windows.items) |window| parked += @intFromBool(window.parked);
+            if (!journal("mark", .{ .note = note[0..length], .window_count = windows.items.len, .parked_count = parked, .workspaces = shown[0..displays.items.len], .transition_error = transition_error })) return failure("JournalAppendFailed");
+            return json(.{ .ok = true });
+        },
         .exec_and_forget => |shell| {
             if (suspended) return failure("RuntimeSuspendedRestartToResume");
             var terminated: [512:0]u8 = @splat(0);
@@ -1701,9 +2271,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true });
         },
         .windows => {
-            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool };
+            const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 } };
             var items: [1024]Item = undefined;
-            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group };
+            for (windows.items, items[0..windows.items.len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focused == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = managedFullscreen(window.*), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and layouts.visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.minimum[0], .height = window.minimum[1] } };
             return json(items[0..windows.items.len]);
         },
         .monitors => {
@@ -1761,7 +2331,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             freezeSession();
             suspended = true;
             const outstanding = native.platform_restore();
-            if (outstanding == 0) saveSession(true);
+            persistPlacements();
+            if (outstanding == 0) {
+                saveSession(true);
+                settleParkingJournal();
+            }
             native.platform_border(0, 0, 0);
             if (outstanding != 0) return json(.{ .@"error" = true, .err_message = "Geometry restoration incomplete. Retry restore after unminimizing or leaving fullscreen.", .outstanding = outstanding, .suspended = true });
             return json(.{ .ok = true, .suspended = true, .note = "Restored live-session geometry. Restart to resume tiling." });
@@ -1810,6 +2384,33 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             } else null else null;
             return jumpToWindow(urgent orelse focus_history.pick(focused, focusable) orelse return failure("NoPreviousWindow"), displaySlot);
         },
+        .move_app => |request| {
+            const resolved = resolvePlacements();
+            const workspace = resolveWorkspace(request.workspace, displaySlot) catch |err| return failure(@errorName(err));
+            var identities: [1024]u64 = undefined;
+            var count: usize = 0;
+            for (windows.items) |window| if (window.vanished == null and std.mem.eql(u8, text(&window.observation.bundle), request.bundle.text())) {
+                identities[count] = window.identity;
+                count += 1;
+            };
+            var moved: usize = 0;
+            var first_error: ?[]const u8 = null;
+            for (identities[0..count]) |identity| {
+                const index = windowIndex(identity) orelse continue;
+                const window = windows.items[index];
+                const destination = resolved[workspace] orelse window.display;
+                if (workspace == window.workspace and destination == window.display) continue;
+                if (route(resolved, &.{}, .{ .index = index, .display = destination, .workspace = workspace })) moved += 1 else if (first_error == null) {
+                    first_error = transition_error orelse "MonitorRoutingFailed";
+                }
+            }
+            if (focused) |identity| if (windowIndex(identity)) |index| if (!visible(windows.items[index])) {
+                focused = null;
+            };
+            if (moved > 0) native.platform_config_changed();
+            if (first_error) |message| return json(.{ .@"error" = true, .err_message = message, .moved = moved });
+            return json(.{ .ok = true, .moved = moved });
+        },
         .layout => |layout| {
             if (placedWorkspace(display.*) == null) return failure("NoWorkspaceOnMonitor");
             const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));
@@ -1842,11 +2443,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     var target: ?u64 = null;
                     switch (command) {
                         .tilemove => |direction| layouts.tilemove(state, source.identity, direction) catch |err| {
-                            transaction.rollback(0);
+                            transaction.rollback(&.{});
                             return failure(@errorName(err));
                         },
                         .group => |action| target = layouts.editGroup(state, source.identity, action) catch |err| {
-                            transaction.rollback(0);
+                            transaction.rollback(&.{});
                             return failure(@errorName(err));
                         },
                         else => unreachable,
@@ -1910,7 +2511,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
                     if (source.floating) source.floating_restore = true else layouts.reveal(state, source.identity) catch |err| {
-                        transaction.rollback(0);
+                        transaction.rollback(&.{});
                         return failure(@errorName(err));
                     };
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
@@ -1932,6 +2533,8 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (source.floating) {
                         source.last_floating_frame = source.floating_frame;
                         source.floating = false;
+                        // Tiling a window again asks its application afresh, so a minimum that no longer holds can shrink.
+                        source.minimum = .{ 0, 0 };
                     } else {
                         // Like Hyprland: return to the last floating frame, or float at `floating_size`, centered.
                         const area = inset(displays.items[displayIndex(source.display).?].frame, config.gap);
@@ -2083,8 +2686,13 @@ export fn wm_shutdown() bool {
     if (pointer_controls.forced_stop) native.platform_error("Input release drain exceeded 250 ms; tap teardown forced");
     cancelTransition();
     const outstanding = native.platform_restore();
+    persistPlacements();
     saveSession(outstanding == 0);
-    if (outstanding != 0) native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
+    if (outstanding == 0) settleParkingJournal();
+    if (outstanding != 0) {
+        native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
+        _ = journal("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
+    }
     native.platform_border(0, 0, 0);
     return true;
 }

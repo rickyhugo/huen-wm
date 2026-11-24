@@ -50,8 +50,9 @@ pub const NativeAttributes = extern struct {
 };
 pub extern "c" fn huen_session_display_uuid(display: u32, output: [*]u8, capacity: usize) bool;
 pub extern "c" fn huen_session_boot_identity(output: [*]u8, capacity: usize) bool;
-extern "c" fn huen_session_read(hash: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize) c_int;
-extern "c" fn huen_session_write(hash: [*:0]const u8, bytes: [*]const u8, length: usize) bool;
+pub extern "c" fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize) c_int;
+pub extern "c" fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*]const u8, length: usize, durable: bool) bool;
+pub extern "c" fn huen_journal_append(line: [*]const u8, length: usize) bool;
 
 pub const Rect = struct { left: f64, top: f64, width: f64, height: f64 };
 pub const Window = struct {
@@ -117,7 +118,7 @@ pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
     const bytes = allocator.alloc(u8, max_bytes) catch return .{ .diagnostic = .rejected, .rejection = .storage };
     defer allocator.free(bytes);
     var used: usize = 0;
-    switch (huen_session_read(&hash, bytes.ptr, bytes.len, &used)) {
+    switch (huen_session_read("session", &hash, bytes.ptr, bytes.len, &used)) {
         0 => {},
         1 => return .{ .diagnostic = .none },
         else => return .{ .diagnostic = .rejected, .rejection = .storage },
@@ -140,7 +141,7 @@ pub fn save(allocator: std.mem.Allocator, checkpoint: Snapshot) !void {
     const bytes = try std.json.Stringify.valueAlloc(allocator, checkpoint, .{});
     defer allocator.free(bytes);
     if (bytes.len > max_bytes) return error.TooLarge;
-    if (!huen_session_write(&hash, bytes.ptr, bytes.len)) return error.Storage;
+    if (!huen_session_write("session", &hash, bytes.ptr, bytes.len, true)) return error.Storage;
 }
 
 fn terminated(bytes: []const u8) ![]const u8 {

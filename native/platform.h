@@ -12,11 +12,12 @@
 typedef struct { double left, top, width, height; } WMRect;
 typedef enum { WMFrameIntentVisibleGoal = 0, WMFrameIntentVerifiedPlacement = 1 } WMFrameIntent;
 typedef enum { WMMotionIdle, WMMotionAnimating, WMMotionRejected } WMMotionState;
-typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete, hit_eligible; uint32_t public_window_id; char bundle[256], title[512]; } WMWindow;
+typedef struct { uint64_t identity; int pid; WMRect frame; WMMotionState motion; bool minimized, fullscreen, focused, stale, onscreen, title_complete, hit_eligible; uint32_t public_window_id; char bundle[256], title[512]; double process_token; uint32_t stack_order; } WMWindow;
 typedef struct { uint32_t identity; WMRect frame; WMRect full_bounds; char name[128]; bool built_in; } WMDisplay;
 typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);
 bool platform_warp_pointer(WMPoint point);
+bool platform_pointer_buttons(void);
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
 typedef struct { char title[160], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;
@@ -31,6 +32,9 @@ bool platform_input_rect_unobscured(uint32_t window_id, WMRect frame);
 size_t platform_displays(WMDisplay *output, size_t capacity);
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent);
 bool platform_read_frame(uint64_t identity, WMRect *frame);
+// Makes `frame` the geometry that restore writes back, writes it, and stores the readback in `actual` when readable.
+// Returns whether the readback is near `frame`. A window that did not get there stays eligible for restore.
+bool platform_adopt_original(uint64_t identity, WMRect frame, WMRect *actual);
 bool platform_focus(uint64_t identity);
 uint64_t platform_focused_window(void);
 uint64_t platform_launch(const char *bundle, bool new_instance, bool hidden);
@@ -43,7 +47,10 @@ int platform_close_state(uint64_t identity, int pid, double process_token);
 void platform_close_cancel(void);
 double platform_monotonic(void);
 bool platform_terminate_if_empty(uint64_t identity, int pid, double process_token);
+// The process's launch date, or 0 when it is not running. Two calls agree only for one launch of the process.
+double platform_process_token(int pid);
 bool platform_bindings(const WMBinding *bindings, size_t count);
+bool platform_rebind(void);
 void platform_border(uint64_t identity, double width, uint32_t color);
 void platform_quit(void);
 size_t platform_restore(void);
@@ -61,5 +68,7 @@ extern void wm_tick(void);
 extern void wm_input_poll(void);
 extern const char *wm_command(const char *command);
 extern void wm_hotkey(const char *command);
+extern void wm_hotkey_pressed(uint32_t slot, const char *command);
+extern void wm_hotkey_delivered(uint32_t slot, const char *command);
 extern void wm_hotkey_poll(void);
 extern bool wm_shutdown(void);

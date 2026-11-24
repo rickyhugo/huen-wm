@@ -31,7 +31,7 @@ cp config/example.lua ~/.config/huen-wm/config.lua
 open -n -g -a "$HOME/Applications/Huen WM.app" --args doctor
 ```
 
-Grant Accessibility to the installed app manually in System Settings. Launch through `open` so macOS checks the app's permissions rather than the terminal's permission context. `doctor` never prompts. Use `open --stdout /absolute/path/doctor.json` to save its output. Screen Recording is optional. Without it, workspace changes are instant and tiling still works.
+Grant Accessibility to the installed app manually in System Settings. Launch through `open` so macOS checks the app's permissions rather than the terminal's permission context. `doctor` never prompts. Use `open --stdout /absolute/path/doctor.json` to save its output. Screen Recording is optional. Without it, workspace changes are instant and tiling still works. Input Monitoring is optional. With it, the manager recovers hotkeys that macOS fails to deliver.
 
 First native check should manage only the disposable fixture. Do not run another tiling manager against the same windows.
 
@@ -79,12 +79,13 @@ huen-wm workspace previous
 huen-wm workspace occupied+1
 huen-wm send-to-workspace 3
 huen-wm move-to-workspace name:Browse
+huen-wm move-app com.apple.Safari 2
 huen-wm reload
 huen-wm restore
 huen-wm stop
 ```
 
-Lists and command results are JSON. Workspace indices start at one. Workspace commands also accept `previous`, signed offsets, occupied offsets, `empty`, `next-empty`, and `name:` selectors. `move-to-workspace` sends the focused window and follows it. `focus last` returns to the previous window, `focus urgent` goes to a window that asked for focus on a hidden workspace, and `cycle` steps through the visible windows. `center`, `move-by`, and `resize-by` adjust floating geometry; `resize-by` also resizes tiles. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `restore`, also named `recover`, attempts to restore geometry recorded during this live session and suspends tiling until restart. An incomplete restore returns an error with an `outstanding` count. Unminimize affected windows or leave native fullscreen, then retry `restore`. `stop`, `quit`, SIGINT, and SIGTERM attempt restoration before exiting and log outstanding failures.
+Lists and command results are JSON. Workspace indices start at one. Workspace commands also accept `previous`, signed offsets, occupied offsets, `empty`, `next-empty`, and `name:` selectors. `move-to-workspace` sends the focused window and follows it. `move-app` sends every window of one bundle ID and does not follow. `focus last` returns to the previous window, `focus urgent` goes to a window that asked for focus on a hidden workspace, and `cycle` steps through the visible windows. `center`, `move-by`, and `resize-by` adjust floating geometry; `resize-by` also resizes tiles. `resize` changes the split ratio. `move` makes the focused window floating and moves it 40 points from its current frame. `restore`, also named `recover`, attempts to restore geometry recorded during this live session and suspends tiling until restart. An incomplete restore returns an error with an `outstanding` count. Unminimize affected windows or leave native fullscreen, then retry `restore`. `stop`, `quit`, SIGINT, and SIGTERM attempt restoration before exiting and log outstanding failures.
 
 `resize width DELTA` and `resize height DELTA` resize the focused tile in logical points. `split` changes its nearest binary split. Managed `fullscreen` fills the visible display without creating a macOS Space and preserves the underlying layout. See [layout controls](docs/layout.md).
 
@@ -102,11 +103,17 @@ Lua must return a table. `config/example.lua` provides basic settings. The [Aero
 
 `floating_size = { width = 0.5, height = 0.5 }` sets the size, as fractions of the usable display area from `0.1` to `1`, of a window that `toggle-floating` floats for the first time. It floats centered. A window that floated before returns to its last floating frame.
 
+`single_window_max_width = 1800` limits the width, in points, of a window that is the only tiled window on its display. It is centered horizontally. The value is at least `400`, and absent or `0` means no limit. A larger learned application minimum wins. Managed fullscreen ignores the limit.
+
 `border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count.
 
 Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. On a floating window, the left button moves it and the right button resizes it from the nearest corner, as in Hyprland. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](docs/mouse-controls.md).
 
+Set `swipe = { enabled = true, fingers = 3 }` to switch workspaces with a trackpad swipe. `fingers` is 3 or 4. Moving the fingers left runs `workspace occupied+1` on the display under the pointer, and moving them right runs `workspace occupied-1`. One swipe switches once, and the next switch needs the fingers to lift first. A swipe with a mouse button held does nothing. Swipes need Input Monitoring permission, which the manager never requests. Turn off the macOS gesture that uses the same number of fingers in System Settings, Trackpad, More Gestures, or both act on the same swipe.
+
 Set `session = { enabled = true }` to save logical layout after clean original-frame restoration. A normal manager restart can restore uniquely identified windows while their applications remain open. Missing or ambiguous public identities remain unmatched. This does not restore arbitrary application relaunches or reboots. See [session continuity](docs/session.md).
+
+`placement_memory = true` is the default. When an application quits, the manager remembers the workspace and floating state of each of its windows for 30 seconds. A window that the relaunched application opens returns to its remembered workspace. A clean manager exit also stores each window's placement, and the next start applies it for 60 seconds. A rule with a workspace takes priority. Set `placement_memory = false` to remember, store, and apply nothing. `status.placement_memory` reports the number of unexpired entries and the number of windows placed from memory. See [placement memory](docs/session.md#placement-memory).
 
 `status_bar = { enabled = true, label = "name" }` is the default, including when omitted. Labels accept `name`, `index`, or `index_and_name`. Combined labels omit a name equal to its index. The menu-bar title shows the active monitor's committed workspace, shortened to 24 Unicode characters. With `workspace_monitors`, a monitor without a placed workspace shows `—`. Its tooltip includes the monitor and full workspace name.
 
@@ -130,4 +137,4 @@ Workspaces use reversible corner parking through public Accessibility APIs. macO
 
 With Screen Recording permission, a nonactivating display snapshot covers a workspace transaction. Source parking and destination placement are read back before focus changes and the snapshot fades. Rejected placements trigger rollback. This is not an atomic compositor operation. Apps may constrain geometry or reject parking, and status reports the last transition error. Public on-screen window metadata is a conservative native-space safety hint, not a private Space identifier.
 
-`restore` can recover only windows retained by the current process. SIGKILL, crashes, and reboot cannot guarantee recovery because public AX identity is not durable. Do not rely on this build for unattended workspace parking. See [runtime details](docs/runtime.md).
+`restore` returns windows retained by the current process. After SIGKILL or a crash, the next start returns parked windows of still-running applications to their pre-parking frames from a parking journal. It does not recover workspace membership. Applications that a reboot ends cannot be recovered. Do not rely on this build for unattended workspace parking. See [runtime details](docs/runtime.md).

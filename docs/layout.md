@@ -67,12 +67,11 @@ In dwindle, point resizing changes the nearest ancestor with the requested axis 
 two participating children. Intervening perpendicular splits preserve the requested
 dimension, so the returned delta describes the focused leaf's dimension change.
 Hidden siblings do not absorb the resize.
-The clamp accounts for gaps, nested ratios, and the 80-point minimum of every
-participating leaf.
+The clamp accounts for gaps and the minimum of every participating leaf.
 An unavailable axis, a single window, or an infeasible minimum returns an applied
 delta of zero.
 
-Master retains its column and equal-height stack.
+Master retains its column and stack. Stack rows have equal heights unless a learned minimum binds.
 Point resizing supports width for either column.
 Height returns `MasterHeightResizeUnsupported`, rather than changing an unrelated
 ratio. Floating and managed fullscreen windows return `WindowNotTiled`.
@@ -124,6 +123,42 @@ The existing parking readback and rollback checks still control workspace commit
 Tiles smaller than 80 points recover as floating windows during reconciliation.
 Projection during a tentative workspace commit does not apply this fallback.
 Application placement failures remain visible in the per-window error fields.
+
+## Application minimum sizes
+
+Every tiled leaf has a minimum of 80 points in each dimension.
+An application can refuse a tile and answer with a larger frame.
+A width or height more than two points above the request becomes the window's learned minimum.
+It is capped at the usable extent of the window's display.
+A refusal in the first second after a window appears teaches nothing, because a launching application can restore its own larger frame.
+Windows that the manager's first scan finds are exempt from that wait when their application has run for more than 5 seconds.
+Learned minimums only grow. They last until the window closes or until `toggle-floating` tiles the window again.
+`windows` reports them as `minimum.width` and `minimum.height`, with zero for unknown.
+
+A branch gives each child at least its minimum along the branch axis when both minimums fit.
+The rest follows the ratio. The stored ratio does not change, so the requested split returns when the minimum no longer binds.
+When the minimums do not fit, the branch splits by ratio.
+A branch needs the sum of its children's minimums plus the gap along its axis and the larger minimum across it.
+
+Master bounds its column split by the master's minimum width and the largest minimum width in the stack.
+Stack rows keep minimum heights larger than an equal share, and the other rows share the rest equally.
+When the minimum heights do not fit in the column, the rows have equal heights.
+
+Reconciliation learns from a rejected tile, derives the goals again, and places the windows again in the same tick.
+A workspace switch learns from a rolled-back tile and retries that window once.
+A minimum is kept only when the derived layout gives every window on that display its learned minimum.
+Otherwise it is dropped, so the window that does not fit is the one that floats.
+A rejection that teaches no larger minimum floats the window as before, after the one-second grace for new windows.
+
+## Lone window width
+
+`single_window_max_width` limits the width of a window that is the only tiled window on its display.
+The drag region of the mouse controls covers the narrowed window, not the full width of its layout leaf.
+The window is centered horizontally at the smaller of the usable width and the limit.
+A learned minimum width larger than the limit wins.
+Absent or `0` means no limit. Other values are from 400 to 100000 points.
+Managed fullscreen ignores the limit.
+A second tiled window returns both windows to normal tiling.
 
 ## Pure container model
 
@@ -220,7 +255,7 @@ Tabbed mode emits one horizontal row.
 Stacked mode emits one row per direct child.
 Each row requests 24 points.
 Header height is bounded by the selected subtree's recursive minimum so content keeps priority when space is tight.
-Leaves retain the existing 80-point minimum.
+Leaves have an 80-point minimum or their learned minimum, whichever is larger.
 Nested visible groups emit their own headers.
 Unavailable direct children retain a header but cannot be selected.
 

@@ -18,9 +18,10 @@ pub const Node = struct {
     visible: bool = false,
     frame: Rect = std.mem.zeroes(Rect),
     minimum: [2]f64 = .{ 0, 0 },
+    learned: [2]f64 = .{ 0, 0 },
 };
 
-pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect };
+pub const Member = struct { identity: u64, display: u32, workspace: usize, active: bool, tiled: bool, area: Rect, minimum: [2]f64, vanished: bool = false };
 pub const WorkspaceLayout = struct {
     display: u32,
     workspace: usize,
@@ -190,8 +191,9 @@ pub const Store = struct {
                 if (state.root != root) continue;
                 for (members) |member| {
                     if (!member.tiled or member.identity != node.content.leaf or member.display != state.display or member.workspace != state.workspace) continue;
-                    if (node.active != member.active) self.revision +%= 1;
+                    if (node.active != member.active or !std.meta.eql(node.learned, member.minimum)) self.revision +%= 1;
                     node.active = member.active;
+                    node.learned = member.minimum;
                     break;
                 } else self.remove(state, @intCast(index));
                 break;
@@ -214,12 +216,12 @@ pub const Store = struct {
                 var target = if (focused) |identity| self.leaf(identity) orelse root else root;
                 if (self.rootOf(target) != root) target = root;
                 while (self.firstChild(target)) |first| target = switch (self.nodes[target].content) {
-                    .branch => |branch| branch.children[1],
+                    .branch => |branch| if (self.vanishedLeaf(members, branch.children[1])) branch.children[0] else branch.children[1],
                     .group => |group| group.selected,
                     else => first,
                 };
                 const preferred = self.nodes[target];
-                if (destination.layout == .dwindle and member.active and target != root and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
+                if (destination.layout == .dwindle and member.active and self.survivingParent(members, target) != null and preferred.visible and preferred.active and !fitsPair(preferred.frame, gap)) {
                     var largest: f64 = 0;
                     for (&self.nodes, 0..) |*node, index| {
                         if (node.content != .leaf or !node.active or !node.visible or !fitsPair(node.frame, gap)) continue;
@@ -234,16 +236,16 @@ pub const Store = struct {
                 const bounds = if (frame.width > 0 and frame.height > 0) frame else member.area;
                 const branch = available[1];
                 self.serial +%= 1;
-                self.nodes[branch] = .{ .generation = self.serial, .content = .{ .branch = .{ .axis = if (bounds.width >= bounds.height) .width else .height, .ratio = if (self.nodes[target].parent == null) destination.ratio else 0.5, .children = .{ target, added } } } };
+                self.nodes[branch] = .{ .generation = self.serial, .content = .{ .branch = .{ .axis = if (bounds.width >= bounds.height) .width else .height, .ratio = if (self.survivingParent(members, target) == null) destination.ratio else 0.5, .children = .{ target, added } } } };
                 self.replace(destination, target, branch);
                 self.nodes[target].parent = branch;
                 self.nodes[target].previous = null;
                 self.nodes[target].next = null;
                 self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .parent = branch, .content = .{ .leaf = member.identity }, .active = member.active };
+                self.nodes[added] = .{ .generation = self.serial, .parent = branch, .content = .{ .leaf = member.identity }, .active = member.active, .learned = member.minimum };
             } else {
                 self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .content = .{ .leaf = member.identity }, .active = member.active };
+                self.nodes[added] = .{ .generation = self.serial, .content = .{ .leaf = member.identity }, .active = member.active, .learned = member.minimum };
                 destination.root = added;
             }
             self.revision +%= 1;
@@ -255,10 +257,32 @@ pub const Store = struct {
         };
     }
 
+    fn vanishedLeaf(self: *const Store, members: []const Member, handle: Handle) bool {
+        const identity = switch (self.nodes[handle].content) {
+            .leaf => |leaf_identity| leaf_identity,
+            else => return false,
+        };
+        for (members) |member| if (member.identity == identity) return member.vanished;
+        return false;
+    }
+
+    // A vanished leaf can still go to a successor, so a new leaf is placed as if the vanished leaves were already removed.
+    fn survivingParent(self: *const Store, members: []const Member, handle: Handle) ?Handle {
+        var child = handle;
+        while (self.nodes[child].parent) |ancestor| : (child = ancestor) {
+            const branch = switch (self.nodes[ancestor].content) {
+                .branch => |branch| branch,
+                else => return ancestor,
+            };
+            if (!self.vanishedLeaf(members, branch.children[if (branch.children[0] == child) @as(usize, 1) else 0])) return ancestor;
+        }
+        return null;
+    }
+
     fn measure(self: *Store, handle: Handle, gap: f64) void {
         var node = &self.nodes[handle];
         switch (node.content) {
-            .leaf => node.minimum = if (node.active) .{ minimum_tile_extent, minimum_tile_extent } else .{ 0, 0 },
+            .leaf => node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.learned[0]), @max(minimum_tile_extent, node.learned[1]) } else .{ 0, 0 },
             .branch => |branch| {
                 for (branch.children) |child| self.measure(child, gap);
                 const first = self.nodes[branch.children[0]];
@@ -271,7 +295,7 @@ pub const Store = struct {
                 } else {
                     node.minimum = .{ @max(first.minimum[0], second.minimum[0]), @max(first.minimum[1], second.minimum[1]) };
                     const dimension: usize = if (branch.axis == .width) 0 else 1;
-                    node.minimum[dimension] = @max(first.minimum[dimension] / branch.ratio, second.minimum[dimension] / (1 - branch.ratio)) + gap;
+                    node.minimum[dimension] = first.minimum[dimension] + second.minimum[dimension] + gap;
                 }
             },
             .group => |*group| {
@@ -327,7 +351,8 @@ pub const Store = struct {
             if (self.nodes[second].active) self.project(second, frame, gap);
             return;
         }
-        const halves = split(frame, branch.axis, branch.ratio, gap);
+        const dimension: usize = if (branch.axis == .width) 0 else 1;
+        const halves = split(frame, branch.axis, branch.ratio, gap, .{ self.nodes[first].minimum[dimension], self.nodes[second].minimum[dimension] });
         self.project(first, halves[0], gap);
         self.project(second, halves[1], gap);
     }
@@ -385,7 +410,7 @@ pub const Store = struct {
             const minimum = self.nodes[first].minimum[dimension];
             const maximum = available - self.nodes[second].minimum[dimension];
             if (available <= 0 or maximum < minimum) return 0;
-            const previous = available * branch.ratio;
+            const previous = std.math.clamp(available * branch.ratio, minimum, maximum);
             const sign: f64 = if (child == first) 1 else -1;
             const next = std.math.clamp(previous + sign * delta, minimum, maximum);
             branch.ratio = next / available;
@@ -418,7 +443,7 @@ pub const Store = struct {
         node.frame = frame;
         if (node.content == .leaf and node.active) {
             if (count > 1) {
-                const columns = split(frame, .width, ratio, gap);
+                const columns = split(frame, .width, ratio, gap, .{ 0, 0 });
                 if (ordinal.* == 0) {
                     node.frame = columns[0];
                 } else {
@@ -505,6 +530,16 @@ pub const Store = struct {
             if (state.last_focused == identity) state.last_focused = null;
             if (state.fullscreen == identity) state.fullscreen = null;
         };
+    }
+
+    pub fn replaceIdentity(self: *Store, old: u64, new: u64) void {
+        self.removeIdentity(new);
+        if (self.leaf(old)) |handle| self.nodes[handle].content.leaf = new;
+        for (&self.roots) |*slot| if (slot.*) |*state| {
+            if (state.last_focused == old) state.last_focused = new;
+            if (state.fullscreen == old) state.fullscreen = new;
+        };
+        self.revision +%= 1;
     }
 
     pub fn removeIdentity(self: *Store, identity: u64) void {
@@ -862,10 +897,10 @@ pub const Store = struct {
         const dimension: usize = if (branch.axis == .width) 0 else 1;
         const extent = if (branch.axis == .width) node.frame.width else node.frame.height;
         const available = extent - @min(gap, @max(0, extent - 2));
-        const previous = available * branch.ratio;
         const minimum = first.minimum[dimension];
         const maximum = available - second.minimum[dimension];
         if (available <= 0 or maximum < minimum) return .{ .boundary = boundary, .ratio = branch.ratio, .applied_delta = 0 };
+        const previous = std.math.clamp(available * branch.ratio, minimum, maximum);
         const next = std.math.clamp(previous + delta, minimum, maximum);
         return .{ .boundary = boundary, .ratio = next / available, .applied_delta = next - previous };
     }
@@ -967,16 +1002,22 @@ fn fitsPair(frame: Rect, gap: f64) bool {
     return @min(frame.width, frame.height) >= minimum_tile_extent and @max(frame.width, frame.height) >= 2 * minimum_tile_extent + gap;
 }
 
-pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64) [2]Rect {
+/// Each side keeps its minimum when both minimums fit. Otherwise the split follows the ratio.
+pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, minimums: [2]f64) [2]Rect {
     var first = frame;
     var second = frame;
-    const spacing = @min(gap, @max(0, (if (axis == .width) frame.width else frame.height) - 2));
+    const extent = if (axis == .width) frame.width else frame.height;
+    const spacing = @min(gap, @max(0, extent - 2));
+    const available = extent - spacing;
+    const proportional = available * ratio;
+    const maximum = available - minimums[1];
+    const leading = if (maximum >= minimums[0]) std.math.clamp(proportional, minimums[0], maximum) else proportional;
     if (axis == .width) {
-        first.width = (frame.width - spacing) * ratio;
+        first.width = leading;
         second.left += first.width + spacing;
         second.width = frame.width - first.width - spacing;
     } else {
-        first.height = (frame.height - spacing) * ratio;
+        first.height = leading;
         second.top += first.height + spacing;
         second.height = frame.height - first.height - spacing;
     }

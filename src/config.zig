@@ -21,6 +21,7 @@ pub const Session = struct { enabled: bool = false };
 // Fractions of the usable display area for a window that toggle-floating floats for the first time.
 pub const FloatingSize = struct { width: f64 = 0.5, height: f64 = 0.5 };
 pub const Mouse = struct { enabled: bool = false, modifiers: u32 = 4096 | 2048 };
+pub const Swipe = struct { enabled: bool = false, fingers: u32 = 3 };
 pub const StatusLabel = enum { name, index, index_and_name };
 pub const StatusBar = struct { enabled: bool = true, label: StatusLabel = .name };
 pub const Mode = struct {
@@ -35,10 +36,13 @@ pub const ConfigCandidate = struct {
     mouse_follows_monitor: bool = false,
     workspace_back_and_forth: bool = false,
     focus_on_activate: bool = false,
+    placement_memory: bool = true,
     status_bar: StatusBar = .{},
     session: Session = .{},
     mouse: Mouse = .{},
+    swipe: Swipe = .{},
     floating_size: FloatingSize = .{},
+    single_window_max_width: f64 = 0,
     gap: f64 = 12,
     border_width: f64 = 2,
     border_color: u32 = 0x9bafff,
@@ -138,7 +142,7 @@ pub fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callcon
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .focus_on_activate = wire.focus_on_activate, .floating_size = wire.floating_size, .border_single_window = wire.border_single_window };
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .swipe = wire.swipe, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .focus_on_activate = wire.focus_on_activate, .placement_memory = wire.placement_memory, .floating_size = wire.floating_size, .single_window_max_width = wire.single_window_max_width, .border_single_window = wire.border_single_window };
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -192,10 +196,13 @@ const WireConfig = struct {
     mouse_follows_monitor: bool,
     workspace_back_and_forth: bool,
     focus_on_activate: bool,
+    placement_memory: bool = true,
     status_bar: StatusBar,
     session: Session,
     mouse: Mouse,
+    swipe: Swipe,
     floating_size: FloatingSize,
+    single_window_max_width: f64 = 0,
     gap: f64,
     border_width: f64,
     border_color: u32,
@@ -223,6 +230,7 @@ fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
 
 fn validate(candidate: *const ConfigCandidate) !void {
     if (candidate.mouse.modifiers == 0 or candidate.mouse.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
+    if (candidate.swipe.fingers != 3 and candidate.swipe.fingers != 4) return error.InvalidSwipeFingers;
     if (candidate.workspace_monitors) |preferences| {
         if (preferences.count == 0 or preferences.count > 2) return error.InvalidMonitorPreferences;
         if (preferences.count == 2 and preferences.order[0] == preferences.order[1]) return error.DuplicateMonitor;
@@ -230,6 +238,7 @@ fn validate(candidate: *const ConfigCandidate) !void {
     try checkNumber(candidate.gap, 0, 100);
     try checkNumber(candidate.border_width, 0, 12);
     try checkNumber(candidate.duration, 0, 0.5);
+    if (candidate.single_window_max_width != 0) try checkNumber(candidate.single_window_max_width, 400, 100000);
     if (candidate.border_color > 0xffffff) return error.InvalidColor;
     for (candidate.workspaces[0..candidate.workspace_count]) |*workspace| {
         if (text(&workspace.name).len == 0) return error.EmptyWorkspaceName;
@@ -266,6 +275,7 @@ fn validate(candidate: *const ConfigCandidate) !void {
                     if (binding.key == 0x35 and binding.modifiers == 0 and std.mem.eql(u8, name.text(), "main")) escape_to_main = true;
                 },
                 .workspace, .send_to_workspace, .move_to_workspace => |selection| if (selection == .name and candidate.workspaceIndex(selection.name.text()) == null) return error.UnknownWorkspaceName,
+                .move_app => |request| if (request.workspace == .name and candidate.workspaceIndex(request.workspace.name.text()) == null) return error.UnknownWorkspaceName,
                 else => {},
             }
             for (mode.bindings[0..index]) |previous| if (previous.key == binding.key and previous.modifiers == binding.modifiers) return error.DuplicateBinding;
@@ -446,7 +456,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "focus_on_activate", "session", "mouse", "floating_size" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "focus_on_activate", "placement_memory", "session", "mouse", "swipe", "floating_size", "single_window_max_width" });
     if (rawField(state, "session") != native.LUA_TNIL) {
         try checkKeys(state, &.{"enabled"});
         result.session.enabled = try fieldBool(state, "enabled", false);
@@ -461,15 +471,25 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         }
     }
     pop(state);
+    if (rawField(state, "swipe") != native.LUA_TNIL) {
+        try checkKeys(state, &.{ "enabled", "fingers" });
+        result.swipe.enabled = try fieldBool(state, "enabled", false);
+        const fingers = try fieldNumber(state, "fingers", 3, 3, 4);
+        if (fingers != 3 and fingers != 4) return error.InvalidSwipeFingers;
+        result.swipe.fingers = @intFromFloat(fingers);
+    }
+    pop(state);
     if (rawField(state, "floating_size") != native.LUA_TNIL) {
         try checkKeys(state, &.{ "width", "height" });
         result.floating_size.width = try fieldNumber(state, "width", 0.5, 0.1, 1);
         result.floating_size.height = try fieldNumber(state, "height", 0.5, 0.1, 1);
     }
     pop(state);
+    result.single_window_max_width = try fieldNumber(state, "single_window_max_width", 0, 0, 100000);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
     result.workspace_back_and_forth = try fieldBool(state, "workspace_back_and_forth", false);
     result.focus_on_activate = try fieldBool(state, "focus_on_activate", false);
+    result.placement_memory = try fieldBool(state, "placement_memory", true);
     result.border_single_window = try fieldBool(state, "border_single_window", true);
     if (rawField(state, "workspace_monitors") != native.LUA_TNIL) {
         const count = try arrayCount(state, 2);
@@ -637,10 +657,13 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .mouse_follows_monitor = result.mouse_follows_monitor,
         .workspace_back_and_forth = result.workspace_back_and_forth,
         .focus_on_activate = result.focus_on_activate,
+        .placement_memory = result.placement_memory,
         .status_bar = result.status_bar,
         .session = result.session,
         .mouse = result.mouse,
+        .swipe = result.swipe,
         .floating_size = result.floating_size,
+        .single_window_max_width = result.single_window_max_width,
         .gap = result.gap,
         .border_width = result.border_width,
         .border_color = result.border_color,

@@ -21,7 +21,7 @@ def invoke(*arguments, success=True):
     return completed
 
 help_text = invoke("--help").stdout
-assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces"))
+assert all(command in help_text for command in ("send-to-workspace", "move-to-workspace", "focus last", "cycle", "resize-by", "focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces", "move-app"))
 doctor = json.loads(invoke("doctor").stdout)
 assert doctor["zig"] == "0.17.1" and not doctor["permission_prompted"]
 assert not doctor["screen_capture_required_for_tiling"]
@@ -76,6 +76,12 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
         "return { bindings = {{ mods='alt', key='h', command='resize-by 0 20 20' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus --wrap last' }} }",
         "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-to-workspace name:two' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-app' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-app com.apple.Terminal' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-app com.apple.Terminal 99' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-app com.apple.Terminal 1 2' }} }",
+        "return { bindings = {{ mods='alt', key='h', command='move-app com.apple.Terminal sideways' }} }",
+        "return { workspaces = {'one'}, bindings = {{ mods='alt', key='h', command='move-app com.apple.Terminal name:two' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor sideways' }} }",
         "return { bindings = {{ mods='alt', key='h', command='focus-monitor builtin' }} }",
@@ -117,6 +123,8 @@ with tempfile.TemporaryDirectory(prefix="smoke-", dir=root / ".zig-cache") as di
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     selectors = ("previous", "+1", "-10", "occupied+1", "occupied-2", "empty", "next-empty", "name:web dev")
     config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt',key='{key}',command='workspace {selector}'}},{{mods='alt+shift',key='{key}',command='send-to-workspace {selector}'}},{{mods='ctrl',key='{key}',command='move-to-workspace {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
+    assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
+    config.write_text("return {workspaces={'web dev','mail'},bindings={" + ",".join(f"{{mods='alt+ctrl',key='{key}',command='move-app com.apple.Terminal {selector}'}}" for key, selector in zip("asdfghjk", selectors)) + "}}")
     assert json.loads(invoke("validate", "--config", str(config)).stdout)["ok"]
     monitor_selectors = ("left", "right", "up", "down", "next", "previous", "built-in", "external", "name:DELL U2725QE")
     monitor_verbs = ("focus-monitor", "send-to-monitor", "move-to-monitor", "move-workspace-to-monitor", "swap-monitor-workspaces")

@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include "platform.h"
 #include "scene.h"
+#include "observe.h"
 
 typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedNotified, WMRecordInvalidPending };
 
@@ -416,6 +417,7 @@ static void scanWindows(pid_t onlyProcess) {
                 BOOL unique = frames.count == windows.count && matchingAX == 1;
                 BOOL assumedVisible = unique && matchingCG == 0 && CACurrentMediaTime() < record.assumedVisibleDeadline;
                 observation.onscreen = unique && (matchingCG == 1 || assumedVisible);
+                observation.stack_order = matchedOrder == NSNotFound ? UINT32_MAX : (uint32_t)matchedOrder;
                 if (!observation.onscreen) observation.public_window_id = 0;
                 observation.hit_eligible = observation.public_window_id != 0;
                 for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
@@ -429,6 +431,7 @@ static void scanWindows(pid_t onlyProcess) {
                 if (!observation.minimized && !observation.fullscreen && unique && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
                 observation.focused = application.active && focused && CFEqual((__bridge CFTypeRef)focused, element);
                 copyUTF8(observation.bundle, sizeof(observation.bundle), application.bundleIdentifier);
+                observation.process_token = application.launchDate ? application.launchDate.timeIntervalSinceReferenceDate : 0;
                 NSString *title = attribute(element, kAXTitleAttribute);
                 observation.title_complete = copyUTF8(observation.title, sizeof(observation.title), [title isKindOfClass:NSString.class] ? title : @"");
                 record.observation = observation;
@@ -537,6 +540,7 @@ bool platform_pointer(WMPoint *point) {
     return true;
 }
 
+bool platform_pointer_buttons(void) { return NSEvent.pressedMouseButtons != 0; }
 bool platform_warp_pointer(WMPoint point) {
     return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
@@ -569,6 +573,19 @@ bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameInt
 
 bool platform_read_frame(uint64_t identity, WMRect *frame) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) return readFrame(record.element, frame);
+    return false;
+}
+
+bool platform_adopt_original(uint64_t identity, WMRect frame, WMRect *actual) {
+    for (WindowRecord *record in records) if (record.observation.identity == identity) {
+        record.original = frame;
+        writeFrame(record, frame, YES);
+        BOOL readable = readFrame(record.element, actual);
+        BOOL verified = readable && framesNear(*actual, frame, 2);
+        record.changed = !verified;
+        if (readable) { WMWindow observation = record.observation; observation.frame = *actual; record.observation = observation; }
+        return verified;
+    }
     return false;
 }
 
@@ -736,6 +753,11 @@ bool platform_terminate_if_empty(uint64_t identity, int pid, double process_toke
     return application.launchDate.timeIntervalSinceReferenceDate == process_token && [application terminate];
 }
 
+double platform_process_token(int pid) {
+    NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+    return application && !application.terminated && application.launchDate ? application.launchDate.timeIntervalSinceReferenceDate : 0;
+}
+
 static void scanAndTick(pid_t process) {
     lastProcessScan = CACurrentMediaTime();
     if (!process) { dirty = NO; commandScanNeeded = NO; lastScan = lastProcessScan; }
@@ -837,8 +859,21 @@ void platform_status_present(const WMStatusPresentation *presentation) {
 static OSStatus hotkeyCallback(EventHandlerCallRef next, EventRef event, void *context) {
     (void)next; (void)context;
     EventHotKeyID identity;
-    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_hotkey(currentBindings[identity.id].command); }
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(identity), NULL, &identity) == noErr && identity.id < 256 && hotkeyRefs[identity.id]) { platform_settle_budget_begin(); wm_hotkey_delivered(identity.id, currentBindings[identity.id].command); }
     return noErr;
+}
+void platform_hotkey_pressed(uint32_t key, uint32_t modifiers) {
+    for (uint32_t slot = 0; slot < 256; slot++) if (currentBindings[slot].command[0] && currentBindings[slot].key == key && currentBindings[slot].modifiers == modifiers) { wm_hotkey_pressed(slot, currentBindings[slot].command); return; }
+}
+bool platform_rebind(void) {
+    bool complete = true;
+    // A slot that failed to register keeps its binding, so the key press still runs it and the next call registers it again.
+    for (size_t slot = 0; slot < 256; slot++) if (currentBindings[slot].command[0]) {
+        if (hotkeyRefs[slot]) UnregisterEventHotKey(hotkeyRefs[slot]);
+        EventHotKeyID identity = {'HUEN', (UInt32)slot};
+        if (RegisterEventHotKey(currentBindings[slot].key, currentBindings[slot].modifiers, identity, GetApplicationEventTarget(), 0, &hotkeyRefs[slot]) != noErr) { hotkeyRefs[slot] = NULL; complete = false; }
+    }
+    return complete;
 }
 
 bool platform_bindings(const WMBinding *bindings, size_t count) {
@@ -889,6 +924,26 @@ void platform_drag_active(bool active) {
     lastScan = 0;
 }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
+static NSDictionary *journalReport(void) {
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM"];
+    NSMutableDictionary<NSString *, NSNumber *> *events = [NSMutableDictionary dictionary];
+    id lastMark = NSNull.null;
+    // The rotated file is older, so it is read first.
+    for (NSString *name in @[@"journal.1.jsonl", @"journal.jsonl"]) {
+        NSData *contents = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:name] options:NSDataReadingMappedIfSafe error:NULL];
+        const char *bytes = contents.bytes; NSUInteger start = 0;
+        while (start < contents.length) {
+            const char *newline = memchr(bytes + start, '\n', contents.length - start);
+            NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
+            NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
+            start = end + 1;
+            if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
+            events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
+            if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
+        }
+    }
+    return @{ @"path": [directory stringByAppendingPathComponent:@"journal.jsonl"], @"events": events, @"last_mark": lastMark };
+}
 
 int platform_main(int argc, char **argv) {
     @autoreleasepool {
@@ -917,9 +972,9 @@ int platform_main(int argc, char **argv) {
         if (argc == 1 && getppid() == 1) [arguments addObject:@"start"];
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
-        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nWorkspace parking is reversible during a live session. Hard-kill recovery is not guaranteed."); return 0; }
+        if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nhuen-wm move-app BUNDLE SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nhuen-wm wrong [NOTE...]\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"live-session-only", @"permission_prompted": @NO };
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @"0.17.1", @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()), @"journal": journalReport() };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }
@@ -972,6 +1027,7 @@ int platform_main(int argc, char **argv) {
         if (!wm_initialize(configPath.fileSystemRepresentation)) { close(lockDescriptor); return 1; }
         EventTypeSpec hotkeyEvent = {kEventClassKeyboard, kEventHotKeyPressed}; InstallApplicationEventHandler(hotkeyCallback, 1, &hotkeyEvent, NULL, NULL);
         if (!wm_activate_config()) { close(lockDescriptor); return 1; }
+        huen_observe_start();
         serverSocket = socket(AF_UNIX, SOCK_STREAM, 0);
         if (serverSocket < 0) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         struct sockaddr_un address = {0}; address.sun_family = AF_UNIX; strlcpy(address.sun_path, socketPath.fileSystemRepresentation, sizeof(address.sun_path));
@@ -1099,7 +1155,7 @@ int platform_main(int argc, char **argv) {
             }
             if (stopping && wm_shutdown()) { [NSApp stop:nil]; NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0]; [NSApp postEvent:wake atStart:NO]; }
         }];
-        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; serviceActive = YES; [NSApp run]; serviceActive = NO; [timer invalidate];
+        [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes]; serviceActive = YES; [NSApp run]; serviceActive = NO; [timer invalidate]; huen_observe_stop();
         close(serverSocket); unlink(socketPath.fileSystemRepresentation); close(lockDescriptor); return 0;
     }
 }

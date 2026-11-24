@@ -18,6 +18,12 @@ pub const Ring = struct {
         self.count -= 1;
     }
 
+    pub fn rename(self: *Ring, old: u64, new: u64) void {
+        self.forget(new);
+        const index = std.mem.indexOfScalar(u64, self.entries[0..self.count], old) orelse return;
+        self.entries[index] = new;
+    }
+
     pub fn pick(self: *const Ring, current: ?u64, eligible: *const fn (u64) bool) ?u64 {
         for (self.entries[0..self.count]) |identity| if (current != identity and eligible(identity)) return identity;
         return null;

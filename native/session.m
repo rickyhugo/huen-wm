@@ -99,10 +99,18 @@ static int session_directory(void) {
     return descriptor;
 }
 
-int huen_session_read(const char *hash, void *output, size_t capacity, size_t *used) {
-    char name[96];
-    snprintf(name, sizeof(name), "session-%s.json", hash);
+static bool stem_valid(const char *stem) {
+    size_t length = strnlen(stem, 17);
+    if (length == 0 || length > 16) return false;
+    for (size_t index = 0; index < length; index++) if (stem[index] < 'a' || stem[index] > 'z') return false;
+    return true;
+}
+
+int huen_session_read(const char *stem, const char *hash, void *output, size_t capacity, size_t *used) {
     *used = 0;
+    if (!stem_valid(stem)) return -1;
+    char name[96];
+    snprintf(name, sizeof(name), "%s-%s.json", stem, hash);
     int directory = session_directory();
     if (directory < 0) return -1;
     int descriptor = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
@@ -132,9 +140,10 @@ int huen_session_read(const char *hash, void *output, size_t capacity, size_t *u
     return 0;
 }
 
-bool huen_session_write(const char *hash, const void *bytes, size_t length) {
+bool huen_session_write(const char *stem, const char *hash, const void *bytes, size_t length, bool durable) {
+    if (!stem_valid(stem)) return false;
     char name[96];
-    snprintf(name, sizeof(name), "session-%s.json", hash);
+    snprintf(name, sizeof(name), "%s-%s.json", stem, hash);
     int directory = session_directory();
     if (directory < 0) return false;
     struct stat existing;
@@ -148,7 +157,7 @@ bool huen_session_write(const char *hash, const void *bytes, size_t length) {
         return false;
     }
     char temporary[128];
-    snprintf(temporary, sizeof(temporary), ".session-%s-%08x.tmp", hash, arc4random());
+    snprintf(temporary, sizeof(temporary), ".%s-%s-%08x.tmp", stem, hash, arc4random());
     int descriptor = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (descriptor < 0) { close(directory); return false; }
     bool success = private_file(descriptor, S_IFREG, 0600);
@@ -159,11 +168,40 @@ bool huen_session_write(const char *hash, const void *bytes, size_t length) {
         if (count <= 0) { success = false; break; }
         offset += (size_t)count;
     }
-    if (success) success = fsync(descriptor) == 0;
+    if (success && durable) success = fsync(descriptor) == 0;
     if (close(descriptor) != 0) success = false;
     if (success) success = renameat(directory, temporary, directory, name) == 0;
-    if (success) success = fsync(directory) == 0;
+    if (success && durable) success = fsync(directory) == 0;
     if (!success) unlinkat(directory, temporary, 0);
     close(directory);
+    return success;
+}
+
+bool huen_journal_append(const char *line, size_t length) {
+    int directory = session_directory();
+    if (directory < 0) return false;
+    struct stat existing;
+    if (fstatat(directory, "journal.jsonl", &existing, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(existing.st_mode) || existing.st_uid != geteuid() || (existing.st_mode & 0777) != 0600 ||
+            ((uint64_t)existing.st_size + length > 1024 * 1024 && renameat(directory, "journal.jsonl", directory, "journal.1.jsonl") != 0)) {
+            close(directory);
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        close(directory);
+        return false;
+    }
+    int descriptor = openat(directory, "journal.jsonl", O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+    close(directory);
+    if (descriptor < 0) return false;
+    bool success = private_file(descriptor, S_IFREG, 0600);
+    size_t offset = 0;
+    while (success && offset < length) {
+        ssize_t count = write(descriptor, line + offset, length - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { success = false; break; }
+        offset += (size_t)count;
+    }
+    if (close(descriptor) != 0) success = false;
     return success;
 }

@@ -43,6 +43,7 @@ pub const MonitorSelector = union(enum) {
     name: Name,
 };
 pub const Launch = struct { bundle: Name, new_instance: bool = false, hidden: bool = false };
+pub const MoveApp = struct { bundle: Name, workspace: WorkspaceSelector };
 pub const Command = union(enum) {
     status,
     windows,
@@ -58,6 +59,7 @@ pub const Command = union(enum) {
     mode: Name,
     launch: Launch,
     exec_and_forget: []const u8,
+    wrong: []const u8,
     close: bool,
     swap: Direction,
     swap_cycle: Step,
@@ -77,6 +79,7 @@ pub const Command = union(enum) {
     workspace: WorkspaceSelector,
     send_to_workspace: WorkspaceSelector,
     move_to_workspace: WorkspaceSelector,
+    move_app: MoveApp,
     focus_monitor: MonitorSelector,
     send_to_monitor: MonitorSelector,
     move_to_monitor: MonitorSelector,
@@ -98,6 +101,28 @@ pub fn parseMonitorSelector(value: []const u8) !MonitorSelector {
     return error.InvalidMonitorSelector;
 }
 
+fn parseWorkspaceSelector(input: []const u8, value: []const u8, tokens: *std.mem.TokenIterator(u8, .any), workspace_count: usize) !WorkspaceSelector {
+    if (std.mem.startsWith(u8, value, "name:")) {
+        const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr) + "name:".len;
+        return .{ .name = try Name.init(std.mem.trimEnd(u8, input[start..], " \t")) };
+    }
+    if (tokens.next() != null) return error.ExtraArgument;
+    if (std.mem.eql(u8, value, "previous")) return .previous;
+    if (std.mem.eql(u8, value, "empty")) return .{ .empty = .first };
+    if (std.mem.eql(u8, value, "next-empty")) return .{ .empty = .next };
+    const occupied = std.mem.startsWith(u8, value, "occupied");
+    const offset_text = if (occupied) value["occupied".len..] else value;
+    if (offset_text.len > 0 and (offset_text[0] == '+' or offset_text[0] == '-')) {
+        const offset = std.fmt.parseInt(i8, offset_text, 10) catch return error.InvalidWorkspaceOffset;
+        if (offset == 0 or @abs(offset) > 10) return error.InvalidWorkspaceOffset;
+        return .{ .relative = .{ .scope = if (occupied) .occupied else .all, .offset = offset } };
+    }
+    if (!std.ascii.isDigit(value[0])) return error.InvalidWorkspaceSelector;
+    const index = std.fmt.parseInt(usize, value, 10) catch return error.InvalidWorkspaceSelector;
+    if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
+    return .{ .index = index - 1 };
+}
+
 pub fn parse(input: []const u8, workspace_count: usize) !Command {
     if (input.len > 511 or std.mem.indexOfScalar(u8, input, 0) != null or std.mem.indexOfAny(u8, input, "\r\n") != null or !std.unicode.utf8ValidateSlice(input)) return error.InvalidCommandText;
     var tokens = std.mem.tokenizeAny(u8, input, " \t");
@@ -107,31 +132,15 @@ pub fn parse(input: []const u8, workspace_count: usize) !Command {
         if (shell.len == 0) return error.MissingArgument;
         return .{ .exec_and_forget = shell };
     }
+    if (std.mem.eql(u8, verb, "wrong")) return .{ .wrong = std.mem.trim(u8, tokens.rest(), " \t") };
     var argument = tokens.next();
     inline for (.{ .{ "workspace", "workspace" }, .{ "send-to-workspace", "send_to_workspace" }, .{ "move-to-workspace", "move_to_workspace" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
-        const value = argument orelse return error.MissingArgument;
-        if (std.mem.startsWith(u8, value, "name:")) {
-            const start = @intFromPtr(value.ptr) - @intFromPtr(input.ptr) + "name:".len;
-            return @unionInit(Command, verb_tag[1], .{ .name = try Name.init(std.mem.trimEnd(u8, input[start..], " \t")) });
-        }
-        if (tokens.next() != null) return error.ExtraArgument;
-        return @unionInit(Command, verb_tag[1], selector: {
-            if (std.mem.eql(u8, value, "previous")) break :selector .previous;
-            if (std.mem.eql(u8, value, "empty")) break :selector .{ .empty = .first };
-            if (std.mem.eql(u8, value, "next-empty")) break :selector .{ .empty = .next };
-            const occupied = std.mem.startsWith(u8, value, "occupied");
-            const offset_text = if (occupied) value["occupied".len..] else value;
-            if (offset_text.len > 0 and (offset_text[0] == '+' or offset_text[0] == '-')) {
-                const offset = std.fmt.parseInt(i8, offset_text, 10) catch return error.InvalidWorkspaceOffset;
-                if (offset == 0 or @abs(offset) > 10) return error.InvalidWorkspaceOffset;
-                break :selector .{ .relative = .{ .scope = if (occupied) .occupied else .all, .offset = offset } };
-            }
-            if (!std.ascii.isDigit(value[0])) return error.InvalidWorkspaceSelector;
-            const index = std.fmt.parseInt(usize, value, 10) catch return error.InvalidWorkspaceSelector;
-            if (index == 0 or index > workspace_count) return error.InvalidWorkspace;
-            break :selector .{ .index = index - 1 };
-        });
+        return @unionInit(Command, verb_tag[1], try parseWorkspaceSelector(input, argument orelse return error.MissingArgument, &tokens, workspace_count));
     };
+    if (std.mem.eql(u8, verb, "move-app")) {
+        const bundle = try Name.init(argument orelse return error.MissingArgument);
+        return .{ .move_app = .{ .bundle = bundle, .workspace = try parseWorkspaceSelector(input, tokens.next() orelse return error.MissingArgument, &tokens, workspace_count) } };
+    }
     inline for (.{ .{ "focus-monitor", "focus_monitor" }, .{ "send-to-monitor", "send_to_monitor" }, .{ "move-to-monitor", "move_to_monitor" }, .{ "move-workspace-to-monitor", "move_workspace_to_monitor" }, .{ "swap-monitor-workspaces", "swap_monitor_workspaces" } }) |verb_tag| if (std.mem.eql(u8, verb, verb_tag[0])) {
         const value = argument orelse return error.MissingArgument;
         if (std.mem.startsWith(u8, value, "name:")) {

@@ -1,11 +1,12 @@
 pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const WMFrameIntent = enum(c_uint) { visible_goal = 0, verified_placement = 1 };
 pub const WMMotionState = enum(c_uint) { idle, animating, rejected };
-pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, motion: WMMotionState, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, title_complete: bool, hit_eligible: bool, public_window_id: u32, bundle: [256]u8, title: [512]u8 };
+pub const WMWindow = extern struct { identity: u64, pid: c_int, frame: WMRect, motion: WMMotionState, minimized: bool, fullscreen: bool, focused: bool, stale: bool, onscreen: bool, title_complete: bool, hit_eligible: bool, public_window_id: u32, bundle: [256]u8, title: [512]u8, process_token: f64, stack_order: u32 };
 pub const WMDisplay = extern struct { identity: u32, frame: WMRect, full_bounds: WMRect, name: [128]u8, built_in: bool };
 pub const WMPoint = extern struct { left: f64, top: f64 };
 pub extern "c" fn platform_pointer(point: *WMPoint) bool;
 pub extern "c" fn platform_warp_pointer(point: WMPoint) bool;
+pub extern "c" fn platform_pointer_buttons() bool;
 pub const WMBinding = extern struct { key: u32, modifiers: u32, command: [128]u8 };
 pub const WMStatusRow = extern struct { title: [80]u8, command: [128]u8, checked: bool, enabled: bool };
 pub const WMStatusPresentation = extern struct { title: [160]u8, tooltip: [256]u8, row_count: usize, rows: [12]WMStatusRow };
@@ -27,6 +28,7 @@ pub extern "c" fn platform_input_rect_unobscured(window_id: u32, frame: WMRect) 
 pub extern "c" fn platform_displays(output: [*]WMDisplay, capacity: usize) usize;
 pub extern "c" fn platform_frame(identity: u64, frame: WMRect, duration: f64, intent: WMFrameIntent) bool;
 pub extern "c" fn platform_read_frame(identity: u64, frame: *WMRect) bool;
+pub extern "c" fn platform_adopt_original(identity: u64, frame: WMRect, actual: *WMRect) bool;
 pub extern "c" fn platform_focus(identity: u64) bool;
 pub extern "c" fn platform_focused_window() u64;
 pub extern "c" fn platform_launch(bundle: [*:0]const u8, new_instance: bool, hidden: bool) u64;
@@ -40,7 +42,9 @@ pub extern "c" fn platform_monotonic() f64;
 /// Returns 1 for a match, 0 for no match, and -1 for a pattern that does not compile.
 pub extern "c" fn platform_regex_match(pattern: [*:0]const u8, text: [*]const u8, length: usize) c_int;
 pub extern "c" fn platform_terminate_if_empty(identity: u64, pid: c_int, process_token: f64) bool;
+pub extern "c" fn platform_process_token(pid: c_int) f64;
 pub extern "c" fn platform_bindings(bindings: [*]const WMBinding, count: usize) bool;
+pub extern "c" fn platform_rebind() bool;
 pub extern "c" fn platform_border(identity: u64, width: f64, color: u32) void;
 pub extern "c" fn platform_quit() void;
 pub extern "c" fn platform_restore() usize;
@@ -64,3 +68,5 @@ pub extern "c" fn huen_scene_capture_allowed() bool;
 pub extern "c" fn huen_scene_begin(display: u32, generation: u64, duration: f64, callback: *const fn (?*anyopaque, bool) callconv(.c) void, context: ?*anyopaque) void;
 pub extern "c" fn huen_scene_finish(generation: u64) void;
 pub extern "c" fn huen_scene_cancel() void;
+pub extern "c" fn huen_observe_active() bool;
+pub extern "c" fn huen_observe_gestures(enabled: bool) void;
