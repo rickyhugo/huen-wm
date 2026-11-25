@@ -26,15 +26,13 @@ pub const Memory = struct {
     pub fn settle(self: *Memory, now: f64, exited: *const fn (Process) bool) void {
         var index: usize = 0;
         while (index < self.count) {
-            const owner = self.entries[index].owner orelse {
-                index += 1;
-                continue;
-            };
-            if (exited(owner.process)) {
-                self.entries[index].owner = null;
-            } else if (now - owner.since > release_window) {
-                self.remove(index);
-                continue;
+            if (self.entries[index].owner) |owner| {
+                if (exited(owner.process)) {
+                    self.entries[index].owner = null;
+                } else if (now - owner.since > release_window) {
+                    self.remove(index);
+                    continue;
+                }
             }
             index += 1;
         }
@@ -52,9 +50,8 @@ pub const Memory = struct {
         self.prune(now);
         var chosen: ?usize = null;
         for (self.entries[0..self.count], 0..) |*entry, index| {
-            if (!std.mem.eql(u8, std.mem.sliceTo(&entry.bundle, 0), bundle)) continue;
-            if (entry.owner != null) continue;
-            if (near(entry.frame, frame)) {
+            if (!std.mem.eql(u8, std.mem.sliceTo(&entry.bundle, 0), bundle) or entry.owner != null) continue;
+            if (@abs(entry.frame.left - frame.left) <= 4 and @abs(entry.frame.top - frame.top) <= 4 and @abs(entry.frame.width - frame.width) <= 4 and @abs(entry.frame.height - frame.height) <= 4) {
                 chosen = index;
                 break;
             }
@@ -78,10 +75,6 @@ pub const Memory = struct {
         self.count -= 1;
     }
 };
-
-fn near(first: Rect, second: Rect) bool {
-    return @abs(first.left - second.left) <= 4 and @abs(first.top - second.top) <= 4 and @abs(first.width - second.width) <= 4 and @abs(first.height - second.height) <= 4;
-}
 
 pub fn scopeHash(filter: []const u8) [64:0]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
