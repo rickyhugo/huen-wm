@@ -3,7 +3,7 @@ const native = @import("native.zig");
 const session = @import("session.zig");
 const continuity = @import("continuity.zig");
 const world = @import("world.zig");
-const main = @import("main.zig");
+const routing = @import("routing.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
 
@@ -71,8 +71,7 @@ pub fn freeze() void {
     const current = sessionWindows() catch |err| return saveFailed(err);
     defer allocator.free(current);
     var screens: [32]continuity.Screen = undefined;
-    var homes: [10][128]u8 = undefined;
-    for (&homes, main.placements) |*home, placement| home.* = placement.home;
+    var homes = routing.homeSnapshot();
     session_frozen = continuity.freeze(world.layouts(), current, sessionScreens(&screens), world.config(), homes[0..world.config().workspace_count], sessionScope()) catch |err| return saveFailed(err);
     session_status.save = .frozen;
 }
@@ -117,12 +116,8 @@ pub fn restore() void {
         };
         defer allocator.free(current);
         var screens: [32]continuity.Screen = undefined;
-        // Saved runtime homes are seeded before placement so moved workspaces restore on their homes.
-        if (world.config().workspace_monitors != null) for (continuity.savedHomes(checkpoint, world.config()), &main.placements) |saved, *placement| if (saved) |hint| {
-            placement.home = @splat(0);
-            @memcpy(placement.home[0..hint.len], hint);
-        };
-        const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), world.config(), main.resolvePlacements()) catch |err| {
+        if (world.config().workspace_monitors != null) routing.seedHomes(continuity.savedHomes(checkpoint, world.config()));
+        const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), world.config(), routing.resolve()) catch |err| {
             sessionError(@errorName(err));
             session_status.load = .failed;
             break :restore;

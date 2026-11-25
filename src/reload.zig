@@ -3,6 +3,7 @@ const native = @import("native.zig");
 const configuration = @import("config.zig");
 const reply = @import("reply.zig");
 const world = @import("world.zig");
+const scene = @import("scene.zig");
 
 pub const State = enum { idle, pending, ready, failed };
 pub const Status = struct { request_id: u64, state: State, err_message: ?[]const u8 };
@@ -23,6 +24,7 @@ pub fn markReady() void {
 }
 
 pub fn start() reply.Reply {
+    if (scene.pending()) return reply.failure("WorkspaceTransitionPending");
     if (world.isSuspended()) return reply.failure("RuntimeSuspendedRestartToResume");
     const request_id = generation + 1;
     request.start(native.platform_config_path(), request_id) catch |err| return reply.failure(@errorName(err));

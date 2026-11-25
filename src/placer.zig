@@ -7,7 +7,9 @@ const parking = @import("parking.zig");
 const world = @import("world.zig");
 const journal = @import("journal.zig");
 const recovery = @import("recovery.zig");
-const main = @import("main.zig");
+const routing = @import("routing.zig");
+const scene = @import("scene.zig");
+const focus = @import("focus.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
 const Rect = world.Rect;
@@ -176,7 +178,7 @@ pub fn deriveGoals() bool {
         _ = world.workspaceLayout(display.identity, workspace);
     };
     var members: [1024]tiling.Member = undefined;
-    world.layouts().sync(world.layoutMembers(&members), main.focused, world.config().gap) catch |err| {
+    world.layouts().sync(world.layoutMembers(&members), focus.current(), world.config().gap) catch |err| {
         journal.setError(@errorName(err));
         return false;
     };
@@ -428,7 +430,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
     return outcome;
 }
 pub fn reconcile() void {
-    if (world.isSuspended() or main.transition != null or world.displays().len == 0 or main.routing_blocked) return;
+    if (world.isSuspended() or scene.pending() or world.displays().len == 0 or routing.blocked()) return;
     if (!deriveGoals()) return;
     var passes: usize = 0;
     while (true) : (passes += 1) {
@@ -508,7 +510,7 @@ pub fn reconcile() void {
     var borderIdentity: u64 = 0;
     var borderWidth = world.config().border_width;
     var borderColor = world.config().border_color;
-    if (main.focused) |identity| if (world.windowIndex(identity)) |index| {
+    if (focus.current()) |identity| if (world.windowIndex(identity)) |index| {
         const window = world.windows()[index];
         // Border actions resolve against the current title, so a reload or a title change applies without rediscovery.
         const decision = world.ruleDecision(&window.observation);

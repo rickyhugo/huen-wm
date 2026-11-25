@@ -5,7 +5,7 @@ const session = @import("session.zig");
 const rules = @import("rules.zig");
 const world = @import("world.zig");
 const recovery = @import("recovery.zig");
-const main = @import("main.zig");
+const routing = @import("routing.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
 const Rect = world.Rect;
@@ -74,7 +74,7 @@ pub fn claim(window: *Window, decision: rules.Decision, display: u32) void {
         window.workspace = workspace;
         if (decision.floating == null) window.floating = entry.floating;
         if (!window.floating or decision.geometry != null or decision.centered) break :claim;
-        const destination = main.resolvePlacements()[workspace] orelse display;
+        const destination = routing.resolve()[workspace] orelse display;
         window.floating_frame = world.boundedFloating(entry.floating_frame, world.displayArea(destination));
         window.floating_restore = true;
     }
