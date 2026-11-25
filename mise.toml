@@ -12,6 +12,10 @@ run = "zig build"
 description = "Run the manager-seam test suite, one process per case"
 run = "zig build test"
 
+[tasks.install]
+description = "Build, sign and install the app, the huen-wm command, and a starter config"
+run = "sh scripts/bundle.sh --install"
+
 [tasks.check]
 description = "Check authored source formatting, names, and Lua syntax"
 run = "hk check --all"

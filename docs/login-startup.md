@@ -5,20 +5,13 @@ The helper does not start the WM when you enable login startup.
 
 ## Prepare the app
 
-1. Install the signed development app.
+1. Install the signed development app. This also creates your configuration if it does not exist.
 
    ```sh
-   sh scripts/bundle.sh --install
+   mise run install
    ```
 
-2. Create your configuration if it does not exist.
-
-   ```sh
-   mkdir -p "$HOME/.config/huen-wm"
-   cp -n config/example.lua "$HOME/.config/huen-wm/config.lua"
-   ```
-
-3. Grant Accessibility to `~/Applications/Huen WM.app` as described in
+2. Grant Accessibility to `~/Applications/Huen WM.app` as described in
    [Get it running](../README.md#get-it-running).
    Confirm that the app works before you enable login startup.
    Do not run another tiling manager against the same windows.

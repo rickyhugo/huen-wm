@@ -13,19 +13,18 @@ You need macOS 14 or later and Zig 0.17.x. mise installs 0.17.1.
 ## Get it running
 
 ```sh
+git clone https://github.com/rickyhugo/huen-wm && cd huen-wm
 mise trust && mise install
-mise run build
-mise run smoke                     # headless checks
-sh scripts/bundle.sh --install     # signs and copies to ~/Applications/Huen WM.app
+mise run install
 ```
+
+`mise run install` builds the app and copies it to `~/Applications/Huen WM.app`. It adds a `huen-wm` command to `~/.local/bin`. It also creates `~/.config/huen-wm/config.lua` from [`config/example.lua`](config/example.lua) if you have no config. Run it again to update.
 
 Nothing launches itself, and nothing adds a login item. The [login helper](docs/login-startup.md) does that if you want it. The app is ad-hoc signed as `dev.huen-wm`, so macOS can ask for permission again after a rebuild.
 
-Then add a config and ask the doctor:
+Then ask the doctor:
 
 ```sh
-mkdir -p ~/.config/huen-wm
-cp config/example.lua ~/.config/huen-wm/config.lua
 open -n -g -a "$HOME/Applications/Huen WM.app" --args doctor
 ```
 
@@ -67,7 +66,7 @@ huen-wm restore                    # put every window back and pause tiling
 huen-wm stop                       # restore, then exit
 ```
 
-`huen-wm` means the binary in `~/Applications/Huen WM.app/Contents/MacOS/`. A bare `huen-wm` prints help. The [command reference](docs/commands.md) lists every command and selector.
+`huen-wm` is the command that `mise run install` puts in `~/.local/bin`. It runs the binary in `~/Applications/Huen WM.app/Contents/MacOS/`. A bare `huen-wm` prints help. The [command reference](docs/commands.md) lists every command and selector.
 
 ## Configure it
 

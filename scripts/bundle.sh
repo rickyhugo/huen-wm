@@ -17,6 +17,24 @@ if [ "${1:-}" = "--install" ]; then
 	"$lsregister" -u "$bundle" 2>/dev/null || true
 	"$lsregister" -f "$HOME/Applications/Huen WM.app"
 	printf '%s\n' "Installed $HOME/Applications/Huen WM.app. Not launched."
+	config="$HOME/.config/huen-wm/config.lua"
+	if [ ! -e "$config" ]; then
+		mkdir -p "$(dirname "$config")"
+		cp config/example.lua "$config"
+		printf '%s\n' "Created $config from config/example.lua."
+	fi
+	# A wrapper, not a symlink, so the binary still runs from inside the bundle.
+	cli="$HOME/.local/bin/huen-wm"
+	marker="# huen-wm cli wrapper"
+	if [ ! -e "$cli" ] || grep -q "$marker" "$cli"; then
+		mkdir -p "$(dirname "$cli")"
+		printf '#!/bin/sh\n%s\nexec "$HOME/Applications/Huen WM.app/Contents/MacOS/huen-wm" "$@"\n' "$marker" >"$cli"
+		chmod +x "$cli"
+		case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) printf '%s\n' "Add $HOME/.local/bin to PATH to run huen-wm from a shell." ;; esac
+	else
+		printf '%s\n' "Left $cli alone because it is not the huen-wm wrapper."
+	fi
+	printf '%s\n' "Next: grant Accessibility to Huen WM in System Settings, then open the app."
 else
 	printf '%s\n' "Built $bundle. Not installed or launched."
 fi
