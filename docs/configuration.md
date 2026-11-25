@@ -38,7 +38,7 @@ The example binds:
 
 [Window rules](window-rules.md) match a bundle ID and an optional title, each by exact text, glob, or regular expression. They set floating state, a numbered workspace, floating geometry, or centering on first discovery. Later matching rules replace only the actions they specify.
 
-`floating_size = { width = 0.5, height = 0.5 }` sets the size, as fractions of the usable display area from `0.1` to `1`, of a window that `toggle-floating` floats for the first time. It floats centered. A window that floated before returns to its last floating frame.
+`floating_size = { width = 0.5, height = 0.5 }` sets the size, as fractions from `0.1` to `1` of the usable display area inside the gap, of a window that `toggle-floating` floats for the first time. It floats centered. A window that floated before returns to its last floating frame.
 
 `single_window_max_width = 1800` limits the width, in points, of a window that is the only tiled window on its display. It is centered horizontally. The value is at least `400`, and absent or `0` means no limit. A larger learned application minimum wins. Managed fullscreen ignores the limit.
 
