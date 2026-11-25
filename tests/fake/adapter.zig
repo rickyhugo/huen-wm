@@ -18,23 +18,13 @@ export fn platform_filter() [*:0]const u8 {
     return "";
 }
 
-export fn platform_error(message: [*:0]const u8) void {
-    _ = message;
-}
+export fn platform_error(_: [*:0]const u8) void {}
 
-export fn platform_border(identity: u64, width: f64, color: u32) void {
-    _ = identity;
-    _ = width;
-    _ = color;
-}
+export fn platform_border(_: u64, _: f64, _: u32) void {}
 
-export fn platform_status_present(presentation: ?*const anyopaque) void {
-    _ = presentation;
-}
+export fn platform_status_present(_: ?*const anyopaque) void {}
 
-export fn platform_bindings(bindings: [*]const abi.Binding, count: usize) bool {
-    _ = bindings;
-    _ = count;
+export fn platform_bindings(_: [*]const abi.Binding, _: usize) bool {
     return true;
 }
 
@@ -89,8 +79,7 @@ export fn platform_read_frame(identity: u64, frame: *abi.Rect) bool {
 
 /// Writes at once: the fake screen has no animation. A visible goal within 2 points, or a verified placement at
 /// the exact frame, is not written again, as in native/platform.m.
-export fn platform_frame(identity: u64, frame: abi.Rect, duration: f64, intent: abi.FrameIntent) bool {
-    _ = duration;
+export fn platform_frame(identity: u64, frame: abi.Rect, _: f64, intent: abi.FrameIntent) bool {
     const entry = world.record(identity) orelse return false;
     if (entry.observation.stale or entry.observation.minimized or entry.observation.fullscreen) return false;
     const truth = world.window(identity) orelse return false;
@@ -157,8 +146,7 @@ export fn platform_session_attributes(identity: u64, output: *abi.SessionAttribu
     return true;
 }
 
-export fn platform_input_rect_unobscured(window_id: u32, frame: abi.Rect) bool {
-    _ = frame;
+export fn platform_input_rect_unobscured(window_id: u32, _: abi.Rect) bool {
     return window_id != 0;
 }
 
@@ -209,10 +197,7 @@ export fn platform_terminate_if_empty(identity: u64, pid: c_int, process_token: 
     return true;
 }
 
-export fn platform_launch(bundle: [*:0]const u8, new_instance: bool, hidden: bool) u64 {
-    _ = bundle;
-    _ = new_instance;
-    _ = hidden;
+export fn platform_launch(_: [*:0]const u8, _: bool, _: bool) u64 {
     return 0;
 }
 
@@ -220,8 +205,7 @@ export fn platform_launch_status() abi.LaunchStatus {
     return std.mem.zeroes(abi.LaunchStatus);
 }
 
-export fn platform_exec(shell: [*:0]const u8) bool {
-    _ = shell;
+export fn platform_exec(_: [*:0]const u8) bool {
     return true;
 }
 
@@ -235,8 +219,7 @@ export fn platform_process_token(pid: c_int) f64 {
     return if (world.app(pid)) |owner| owner.launch else 0;
 }
 
-export fn huen_input_configure(enabled: bool, carbon_modifiers: u32) abi.InputAvailability {
-    _ = carbon_modifiers;
+export fn huen_input_configure(enabled: bool, _: u32) abi.InputAvailability {
     world.input = if (enabled) .available else .disabled;
     return world.input;
 }
@@ -258,8 +241,7 @@ export fn huen_input_publish(snapshot: *const abi.InputSnapshot) bool {
 }
 
 /// The fake world has no mouse.
-export fn huen_input_poll(event: *anyopaque) bool {
-    _ = event;
+export fn huen_input_poll(_: *anyopaque) bool {
     return false;
 }
 
@@ -271,20 +253,16 @@ export fn huen_input_stop_ready() bool {
     return true;
 }
 
-export fn huen_input_finish_stop(force: bool) bool {
-    _ = force;
+export fn huen_input_finish_stop(_: bool) bool {
     world.input = .disabled;
     return true;
 }
 
-export fn huen_groups_publish(presentation: *const anyopaque) bool {
-    _ = presentation;
+export fn huen_groups_publish(_: *const anyopaque) bool {
     return true;
 }
 
-export fn huen_groups_preview(preview: ?*const anyopaque) void {
-    _ = preview;
-}
+export fn huen_groups_preview(_: ?*const anyopaque) void {}
 
 export fn huen_groups_clear() void {}
 
@@ -293,16 +271,11 @@ export fn huen_scene_capture_allowed() bool {
     return false;
 }
 
-export fn huen_scene_begin(display: u32, generation: u64, duration: f64, callback: abi.SceneReady, context: ?*anyopaque) void {
-    _ = display;
-    _ = generation;
-    _ = duration;
+export fn huen_scene_begin(_: u32, _: u64, _: f64, callback: abi.SceneReady, context: ?*anyopaque) void {
     callback(context, false);
 }
 
-export fn huen_scene_finish(generation: u64) void {
-    _ = generation;
-}
+export fn huen_scene_finish(_: u64) void {}
 
 export fn huen_scene_cancel() void {}
 
@@ -310,15 +283,10 @@ export fn huen_observe_active() bool {
     return world.observe_active;
 }
 
-export fn huen_observe_gestures(enabled: bool) void {
-    _ = enabled;
-}
+export fn huen_observe_gestures(_: bool) void {}
 
 /// Answers with the world's config, encoded as the Lua worker would encode it.
-export fn config_worker_run(path: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize, diagnostic: [*]u8, diagnostic_capacity: usize, cancelled: abi.ConfigCancelled, context: ?*anyopaque) c_int {
-    _ = path;
-    _ = cancelled;
-    _ = context;
+export fn config_worker_run(_: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize, diagnostic: [*]u8, diagnostic_capacity: usize, _: abi.ConfigCancelled, _: ?*anyopaque) c_int {
     if (diagnostic_capacity > 0) diagnostic[0] = 0;
     const encoded = std.json.Stringify.valueAlloc(allocator, world.config, .{}) catch return 1;
     defer allocator.free(encoded);
@@ -350,15 +318,10 @@ export fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*
     return 0;
 }
 
-export fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*]const u8, length: usize, durable: bool) bool {
-    _ = durable;
+export fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*]const u8, length: usize, _: bool) bool {
     const copy = allocator.dupe(u8, bytes[0..length]) catch return false;
     const name = std.fmt.allocPrint(allocator, "{s}-{s}", .{ stem, hash }) catch return false;
-    if (world.file(name)) |stored| {
-        stored.bytes = copy;
-        return true;
-    }
-    world.files.append(allocator, .{ .name = name, .bytes = copy }) catch return false;
+    if (world.file(name)) |stored| stored.bytes = copy else world.files.append(allocator, .{ .name = name, .bytes = copy }) catch return false;
     return true;
 }
 

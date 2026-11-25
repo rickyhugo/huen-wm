@@ -110,7 +110,7 @@ fn parkThenCrashOnce(manager: *Manager) !void {
 fn expectNothingRecovered(manager: *Manager) !void {
     try manager.start();
     manager.tick(1);
-    const recovery = (try manager.status()).parking_recovery orelse return error.ExpectationFailed;
+    const recovery = (try manager.parse(suite.Status, "status")).parking_recovery orelse return error.ExpectationFailed;
     try expect(recovery.records == 1 and recovery.recovered == 0 and recovery.failed == 0, "1 journal record and no window recovered, got records={d} recovered={d} failed={d}", .{ recovery.records, recovery.recovered, recovery.failed });
 }
 
@@ -144,7 +144,8 @@ fn escapeTwice(manager: *Manager, interval: f64) !u64 {
     manager.tick(1);
     for (0..2) |_| {
         manager.advance(interval);
-        manager.appMovesWindow(mover, home);
+        manager.world.window(mover).?.frame = home;
+        manager.world.scan_needed = true;
         manager.tick(1);
     }
     return mover;

@@ -176,9 +176,9 @@ pub const World = struct {
         // native/platform.m pairs an AX window with on-screen bounds only when no other window of its
         // application has a frame within 4 points, so two such windows are both not on screen.
         var matching: usize = 0;
-        for (siblings) |sibling| if (framesNear(sibling.frame, truth.frame, 4)) {
-            matching += 1;
-        };
+        for (siblings) |sibling| matching += @intFromBool(framesNear(sibling.frame, truth.frame, 4));
+        var in_front: u32 = 0;
+        for (self.windows.items) |member| in_front += @intFromBool(member.stacking > truth.stacking and !member.minimized and self.listed(member.frame));
         var observation = entry.observation;
         observation.identity = truth.identity;
         observation.pid = truth.pid;
@@ -192,18 +192,10 @@ pub const World = struct {
         observation.focused = self.focused == truth.identity;
         observation.title_complete = true;
         observation.process_token = owner.launch;
-        observation.stack_order = if (self.listed(truth.frame) and !truth.minimized) self.frontCount(truth) else std.math.maxInt(u32);
+        observation.stack_order = if (self.listed(truth.frame) and !truth.minimized) in_front else std.math.maxInt(u32);
         copyText(&observation.bundle, owner.bundle);
         copyText(&observation.title, truth.title);
         entry.observation = observation;
-    }
-
-    fn frontCount(self: *World, truth: Window) u32 {
-        var count: u32 = 0;
-        for (self.windows.items) |member| if (member.stacking > truth.stacking and !member.minimized and self.listed(member.frame)) {
-            count += 1;
-        };
-        return count;
     }
 
     /// WindowServer lists a window that touches any display.
@@ -221,20 +213,17 @@ pub const World = struct {
         return best;
     }
 
-    /// macOS hands focus to the application's frontmost remaining window when the focused one goes away.
-    pub fn forgetFocus(self: *World, identity: u64, pid: i32) void {
-        if (self.focused != identity) return;
-        self.focused = 0;
-        var best: u64 = 0;
-        for (self.windows.items) |member| if (member.pid == pid and member.identity != identity and !member.minimized and member.stacking > best) {
-            best = member.stacking;
-            self.focused = member.identity;
-        };
-    }
-
     pub fn removeWindow(self: *World, identity: u64) bool {
         for (self.windows.items, 0..) |member, index| if (member.identity == identity) {
-            self.forgetFocus(identity, member.pid);
+            // macOS hands focus to the application's frontmost remaining window when the focused one goes away.
+            if (self.focused == identity) {
+                self.focused = 0;
+                var best: u64 = 0;
+                for (self.windows.items) |other| if (other.pid == member.pid and other.identity != identity and !other.minimized and other.stacking > best) {
+                    best = other.stacking;
+                    self.focused = other.identity;
+                };
+            }
             _ = self.windows.orderedRemove(index);
             self.scan_needed = true;
             return true;
@@ -276,25 +265,24 @@ pub const World = struct {
             .config = self.config,
             .remembered = self.remembered.items,
         }, .{});
-        const stream = fopen(path, "wb") orelse return error.StateFileUnwritable;
-        defer _ = fclose(stream);
-        if (fwrite(encoded.ptr, 1, encoded.len, stream) != encoded.len) return error.StateFileUnwritable;
+        const stream = std.c.fopen(path, "wb") orelse return error.StateFileUnwritable;
+        defer _ = std.c.fclose(stream);
+        if (std.c.fwrite(encoded.ptr, 1, encoded.len, stream) != encoded.len) return error.StateFileUnwritable;
     }
 
     /// Records stay empty: the loaded world meets a new manager process.
     pub fn load(self: *World, path: [:0]const u8) !void {
-        const stream = fopen(path, "rb") orelse return error.StateFileMissing;
-        defer _ = fclose(stream);
+        const stream = std.c.fopen(path, "rb") orelse return error.StateFileMissing;
+        defer _ = std.c.fclose(stream);
         var bytes: std.ArrayList(u8) = .empty;
         var chunk: [65536]u8 = undefined;
         while (true) {
-            const amount = fread(&chunk, 1, chunk.len, stream);
+            const amount = std.c.fread(&chunk, 1, chunk.len, stream);
             if (amount == 0) break;
             try bytes.appendSlice(allocator, chunk[0..amount]);
         }
         const saved = (try std.json.parseFromSlice(Saved, allocator, bytes.items, .{ .allocate = .alloc_always })).value;
         self.clock = saved.clock;
-        self.displays = .empty;
         try self.displays.appendSlice(allocator, saved.displays);
         try self.apps.appendSlice(allocator, saved.apps);
         try self.windows.appendSlice(allocator, saved.windows);
@@ -331,8 +319,3 @@ pub fn copyText(destination: []u8, source: []const u8) void {
     const length = @min(source.len, destination.len - 1);
     @memcpy(destination[0..length], source[0..length]);
 }
-
-extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
-extern "c" fn fread(output: [*]u8, size: usize, count: usize, stream: *anyopaque) usize;
-extern "c" fn fwrite(input: [*]const u8, size: usize, count: usize, stream: *anyopaque) usize;
-extern "c" fn fclose(stream: *anyopaque) c_int;

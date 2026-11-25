@@ -68,7 +68,7 @@ pub fn @"a third window beside two overlapped windows gets a tile clear of both"
     try expect(!(try manager.report(third)).floating and suite.inside(frame, usable), "the third window tiled inside the display, got ({d}, {d}, {d}, {d})", .{ frame.left, frame.top, frame.width, frame.height });
     for ([_]u64{ pair.first, pair.second }) |identity| {
         const other = manager.frame(identity);
-        try expect(!suite.overlap(frame, other), "the third window clear of window {d}, got ({d}, {d}, {d}, {d}) and ({d}, {d}, {d}, {d})", .{ identity, frame.left, frame.top, frame.width, frame.height, other.left, other.top, other.width, other.height });
+        try expect(@import("../fake/world.zig").intersection(frame, other) == null, "the third window clear of window {d}, got ({d}, {d}, {d}, {d}) and ({d}, {d}, {d}, {d})", .{ identity, frame.left, frame.top, frame.width, frame.height, other.left, other.top, other.width, other.height });
         try expect(!(try manager.report(identity)).floating and other.width >= 900, "window {d} still tiled at least 900 wide, got width {d}", .{ identity, other.width });
     }
 }

@@ -2,7 +2,6 @@
 //! because the manager keeps its state in globals: `manager-tests NAME [--save STATE | --load STATE]`.
 const std = @import("std");
 const wm = @import("wm");
-const abi = @import("fake/abi.zig");
 const model = @import("fake/world.zig");
 const cases = @import("cases.zig");
 
@@ -31,13 +30,10 @@ comptime {
     }
     for (modules) |module| for (std.meta.declarations(module)) |declaration| {
         if (@typeInfo(@TypeOf(@field(module, declaration))) != .@"fn") continue;
-        if (!listed(declaration)) @compileError("case \"" ++ declaration ++ "\" is missing from tests/cases.zig");
+        for (cases.all) |case| {
+            if (std.mem.eql(u8, case.name, declaration)) break;
+        } else @compileError("case \"" ++ declaration ++ "\" is missing from tests/cases.zig");
     };
-}
-
-fn listed(comptime name: []const u8) bool {
-    for (cases.all) |case| if (std.mem.eql(u8, case.name, name)) return true;
-    return false;
 }
 
 pub fn main(initial: std.process.Init.Minimal) u8 {
@@ -48,13 +44,9 @@ pub fn main(initial: std.process.Init.Minimal) u8 {
     if (vector.len == 4) {
         const flag = std.mem.span(vector[2]);
         const path = std.mem.span(vector[3]);
-        if (std.mem.eql(u8, flag, "--save")) {
-            save = path;
-        } else if (std.mem.eql(u8, flag, "--load")) {
-            model.current.load(path) catch |err| {
-                std.debug.print("{s}: cannot load {s}: {s}\n", .{ name, path, @errorName(err) });
-                return 1;
-            };
+        if (std.mem.eql(u8, flag, "--save")) save = path else if (std.mem.eql(u8, flag, "--load")) model.current.load(path) catch |err| {
+            std.debug.print("{s}: cannot load {s}: {s}\n", .{ name, path, @errorName(err) });
+            return 1;
         } else return usage();
     }
     var manager: Manager = .{};
@@ -93,10 +85,6 @@ pub fn expectFrame(actual: Rect, expected: Rect, comptime label: []const u8) !vo
 
 pub fn inside(frame: Rect, area: Rect) bool {
     return frame.left >= area.left and frame.top >= area.top and frame.left + frame.width <= area.left + area.width and frame.top + frame.height <= area.top + area.height;
-}
-
-pub fn overlap(first: Rect, second: Rect) bool {
-    return model.intersection(first, second) != null;
 }
 
 pub fn near(first: Rect, second: Rect) bool {
@@ -201,13 +189,6 @@ pub const Manager = struct {
         self.world.scan_needed = true;
     }
 
-    /// The application moves its own window.
-    pub fn appMovesWindow(self: *Manager, identity: u64, destination: Rect) void {
-        const target = self.world.window(identity) orelse return;
-        target.frame = destination;
-        self.world.scan_needed = true;
-    }
-
     /// Moves the clock without a timer firing.
     pub fn advance(self: *Manager, seconds: f64) void {
         self.world.clock += seconds;
@@ -255,10 +236,6 @@ pub const Manager = struct {
         for (try self.windows()) |item| if (item.id == identity) return item;
         std.debug.print("expected window {d} in the windows reply\n", .{identity});
         return error.ExpectationFailed;
-    }
-
-    pub fn status(self: *Manager) !Status {
-        return self.parse(Status, "status");
     }
 
     /// The workspace shown on the first display, numbered from 1.
