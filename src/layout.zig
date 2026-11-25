@@ -309,7 +309,7 @@ pub const Store = struct {
                 node.minimum = if (node.active) .{ @max(minimum_tile_extent, node.bounds.minimumAt(.width)), @max(minimum_tile_extent, node.bounds.minimumAt(.height)) } else .{ 0, 0 };
                 node.compact = node.minimum;
                 node.layers = .{ 1, 1 };
-                node.ceiling = if (node.active) node.bounds.ceilings() else .{ null, null };
+                node.ceiling = if (node.active) .{ node.bounds.ceilingAt(.width), node.bounds.ceilingAt(.height) } else .{ null, null };
             },
             .branch => |branch| {
                 for (branch.children) |child| self.measure(child, gap);

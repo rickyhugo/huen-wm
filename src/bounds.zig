@@ -11,42 +11,27 @@ pub const Ceiling = struct {
     pub fn binds(self: Ceiling, offer: f64) bool {
         return offer > self.accepted + tolerance and offer <= self.largest_refused + tolerance;
     }
-
-    pub fn take(self: Ceiling, offer: f64) f64 {
-        return if (self.binds(offer)) self.accepted else offer;
-    }
 };
 
 pub const Span = struct {
     minimum: f64 = 0,
     ceiling: ?Ceiling = null,
 
-    pub fn take(self: Span, offer: f64) f64 {
+    fn take(self: Span, offer: f64) f64 {
         const ceiling = self.ceiling orelse return offer;
-        return ceiling.take(offer);
+        return if (ceiling.binds(offer)) ceiling.accepted else offer;
     }
 };
 
 pub const Bounds = struct {
     spans: [2]Span = .{ .{}, .{} },
 
-    fn index(axis: Axis) usize {
-        return switch (axis) {
-            .width => 0,
-            .height => 1,
-        };
-    }
-
     pub fn minimumAt(self: Bounds, axis: Axis) f64 {
-        return self.spans[index(axis)].minimum;
+        return self.spans[@backingInt(axis)].minimum;
     }
 
     pub fn ceilingAt(self: Bounds, axis: Axis) ?Ceiling {
-        return self.spans[index(axis)].ceiling;
-    }
-
-    pub fn ceilings(self: Bounds) [2]?Ceiling {
-        return .{ self.spans[0].ceiling, self.spans[1].ceiling };
+        return self.spans[@backingInt(axis)].ceiling;
     }
 
     pub fn learn(self: Bounds, requested: [2]f64, accepted: [2]f64, usable: [2]f64) Bounds {
@@ -60,14 +45,11 @@ pub const Bounds = struct {
                 };
             } else if (answer < offer - tolerance) {
                 const capped = @max(1, @min(answer, limit));
-                const next_refused = if (span.ceiling) |existing|
-                    if (@abs(offer - existing.accepted) <= tolerance or @abs(capped - existing.accepted) <= tolerance)
-                        @max(existing.largest_refused, offer)
-                    else
-                        offer
-                else
-                    offer;
-                span.ceiling = .{ .accepted = capped, .largest_refused = next_refused };
+                var largest_refused = offer;
+                if (span.ceiling) |existing| if (@abs(offer - existing.accepted) <= tolerance or @abs(capped - existing.accepted) <= tolerance) {
+                    largest_refused = @max(existing.largest_refused, offer);
+                };
+                span.ceiling = .{ .accepted = capped, .largest_refused = largest_refused };
                 if (span.minimum > capped) span.minimum = capped;
             } else if (span.ceiling) |existing| if (offer > existing.accepted + tolerance) {
                 span.ceiling = null;
