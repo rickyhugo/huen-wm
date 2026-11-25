@@ -1,12 +1,8 @@
 local excluded = {
-    vendor = true,
-    vendored = true,
-    third_party = true,
-    ["third-party"] = true,
-    [".zig-cache"] = true,
-    ["zig-out"] = true,
-    ["zig-pkg"] = true,
+    vendor = true, vendored = true, third_party = true, ["third-party"] = true,
+    [".zig-cache"] = true, ["zig-out"] = true, ["zig-pkg"] = true,
 }
+local languages = { zig = true, lua = true, ["c"] = true, ["m"] = true, mm = true, ["h"] = true }
 
 local function long_bracket_end(source, offset)
     local equals = source:sub(offset):match("^%[(=*)%[")
@@ -40,10 +36,10 @@ local function check_file(filename)
         end
     end
     local language = filename:match("%.([^.]+)$")
-    if language ~= "zig" and language ~= "lua" and language ~= "c" and language ~= "m"
-        and language ~= "mm" and language ~= "h" then
+    if not languages[language] then
         return true
     end
+    local c_family = language ~= "lua" and language ~= "zig"
     local file, message = io.open(filename, "rb")
     if not file then
         io.stderr:write(message, "\n")
@@ -58,24 +54,21 @@ local function check_file(filename)
         local remainder = source:sub(offset)
         local pair = remainder:sub(1, 2)
         local character = remainder:sub(1, 1)
-        local next_offset
-        local token
+        local next_offset, token
         if language == "lua" and pair == "--" then
             next_offset = long_bracket_end(source, offset + 2)
                 or source:find("\n", offset, true) or #source + 1
-        elseif language ~= "lua" and pair == "//" then
+        elseif (language ~= "lua" and pair == "//") or (language == "zig" and pair == "\\\\") then
             next_offset = source:find("\n", offset, true) or #source + 1
-        elseif language ~= "lua" and language ~= "zig" and pair == "/*" then
+        elseif c_family and pair == "/*" then
             local _, closing = source:find("*/", offset + 2, true)
             next_offset = closing and closing + 1 or #source + 1
-        elseif language == "zig" and pair == "\\\\" then
-            next_offset = source:find("\n", offset, true) or #source + 1
         elseif language == "lua" and character == "[" then
             next_offset = long_bracket_end(source, offset)
             if next_offset then
                 token = "literal"
             end
-        elseif language ~= "lua" and language ~= "zig" and character == "#" then
+        elseif c_family and character == "#" then
             local header, directive = remainder:match("^(#[ \t]*([a-z_]+)[ \t]*<[^>\r\n]*>)")
             if directive == "include" or directive == "import" or directive == "include_next" then
                 next_offset = offset + #header
@@ -85,42 +78,36 @@ local function check_file(filename)
         if not next_offset then
             local member_access = previous_token == "."
                 or (language == "lua" and previous_token == ":")
-                or (language ~= "lua" and language ~= "zig" and previous_token == "->")
+                or (c_family and previous_token == "->")
+            local identifier
             if language == "zig" and pair == '@"' then
                 next_offset = quoted_end(source, offset + 1)
-                local identifier = source:sub(offset + 2, next_offset - 2)
+                identifier = source:sub(offset + 2, next_offset - 2)
+            elseif character == '"' or character == "'" then
+                next_offset = quoted_end(source, offset)
+                token = "literal"
+            elseif character:match("%d") then
+                next_offset = offset + #remainder:match("^[%w_.]+")
+                token = "number"
+            else
+                identifier = remainder:match("^[A-Za-z_][A-Za-z_0-9]*")
+                if identifier then
+                    next_offset = offset + #identifier
+                elseif pair == ".." then
+                    token = remainder:sub(1, 3) == "..." and "..." or ".."
+                elseif c_family and pair == "->" then
+                    token = pair
+                elseif not character:match("%s") then
+                    token = character
+                end
+                next_offset = next_offset or offset + (token and #token or 1)
+            end
+            if identifier then
                 token = identifier
                 if identifier:match("^[A-Za-z]$") and not member_access then
                     io.stderr:write(filename, ":", line, ":", column,
                         ": single-letter identifier '", identifier, "'\n")
                     valid = false
-                end
-            elseif character == '"' or character == "'" then
-                next_offset = quoted_end(source, offset)
-                token = "literal"
-            elseif character:match("%d") then
-                local number = remainder:match("^[%w_.]+")
-                next_offset = offset + #number
-                token = "number"
-            else
-                local identifier = remainder:match("^[A-Za-z_][A-Za-z_0-9]*")
-                if identifier then
-                    next_offset = offset + #identifier
-                    token = identifier
-                    if identifier:match("^[A-Za-z]$") and not member_access then
-                        io.stderr:write(filename, ":", line, ":", column,
-                            ": single-letter identifier '", identifier, "'\n")
-                        valid = false
-                    end
-                else
-                    if pair == ".." then
-                        token = remainder:sub(1, 3) == "..." and "..." or ".."
-                    elseif language ~= "lua" and language ~= "zig" and pair == "->" then
-                        token = pair
-                    elseif not character:match("%s") then
-                        token = character
-                    end
-                    next_offset = offset + (token and #token or 1)
                 end
             end
         end
@@ -145,8 +132,6 @@ end
 
 local valid = true
 for _, filename in ipairs(arg) do
-    if not check_file(filename) then
-        valid = false
-    end
+    valid = check_file(filename) and valid
 end
 os.exit(valid and 0 or 1)
