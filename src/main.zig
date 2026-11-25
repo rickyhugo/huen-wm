@@ -17,6 +17,7 @@ const delivery = @import("delivery.zig");
 const swipe = @import("swipe.zig");
 const memory = @import("memory.zig");
 const reply = @import("reply.zig");
+const journal = @import("journal.zig");
 const json = reply.json;
 const failure = reply.failure;
 const allocator = std.heap.c_allocator;
@@ -67,7 +68,6 @@ const SnapshotPresentation = enum { idle, pending, instant, captured, fallback }
 var transition: ?Transition = null;
 var generation: u64 = 0;
 var snapshot_presentation: SnapshotPresentation = .idle;
-var transition_error: ?[]const u8 = null;
 var shortcut_buffer: [64]commands.WorkspaceSelector = undefined;
 var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer(&shortcut_buffer);
 // A workspace switch within about 250 ms of an activation makes the applications involved wait on WindowServer for 300
@@ -77,8 +77,6 @@ var activated: f64 = -std.math.inf(f64);
 var hotkey_watch: delivery.Watch = .{};
 var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
 var swipe_recognizer: swipe.Recognizer = .{};
-var journal_failed = false;
-var journaled_transition: ?[]const u8 = null;
 var gestures_enabled = false;
 var config_request: configuration.Request = .{};
 var config_generation: u64 = 0;
@@ -362,7 +360,7 @@ fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
     @memcpy(destination[0..length], source[0..length]);
 }
 fn publishState() void {
-    journalTransition();
+    journal.flushTransition();
     publishPointer();
     publishStatus();
 }
@@ -404,7 +402,7 @@ fn publishStatus() void {
             if (display) |current| text(&current.name) else "No display",
             name,
             text(&config.modes[active_mode].name),
-            if (transition_error != null) " · Workspace switch failed" else "",
+            if (journal.lastError() != null) " · Workspace switch failed" else "",
         }) catch unreachable;
         statusText(&presentation.tooltip, tooltip, 255);
         for (config.workspaces[0..config.workspace_count], 0..) |*workspace, index| {
@@ -721,13 +719,13 @@ fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: 
         count += 1;
     }
     const transaction = PlacementTransaction.begin(.all) catch |err| {
-        transition_error = @errorName(err);
+        journal.setError(@errorName(err));
         return false;
     };
     defer transaction.deinit();
     var staged: [1024]u32 = undefined;
     for (activations[0..count]) |activation| if (displayBlocked(activation.display)) {
-        transition_error = "Native fullscreen window blocks routing destination";
+        journal.setError("Native fullscreen window blocks routing destination");
         return false;
     };
     for (windows.items, 0..) |window, index| {
@@ -737,18 +735,18 @@ fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: 
         if (window.vanished != null) continue;
         if (window.observation.minimized or window.observation.fullscreen or (!window.observation.onscreen and !window.parked)) {
             if (destination != window.display or (window.observation.fullscreen and sent)) {
-                transition_error = "Routing deferred for unavailable or native fullscreen window";
+                journal.setError("Routing deferred for unavailable or native fullscreen window");
                 return false;
             }
             continue;
         }
         if (window.observation.stale or displayBlocked(destination) or displayBlocked(window.display)) {
-            transition_error = "Routing blocked by stale or native fullscreen window";
+            journal.setError("Routing blocked by stale or native fullscreen window");
             return false;
         }
         var original: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &original)) {
-            transition_error = "Routing geometry could not be read";
+            journal.setError("Routing geometry could not be read");
             return false;
         }
     }
@@ -894,10 +892,10 @@ const PlacementTransaction = struct {
                 if (window.floating and deriveGoals() and placeVisible(window) == .applied) continue;
             }
             self.rollback(order[0 .. position + 1]);
-            transition_error = "Placement rejected; reverse rollback attempted; inspect window recovery errors";
+            journal.setError("Placement rejected; reverse rollback attempted; inspect window recovery errors");
             return false;
         }
-        transition_error = null;
+        journal.setError(null);
         return true;
     }
     // Unknown stack positions are `maxInt(u32)`, so they come first.
@@ -947,7 +945,7 @@ fn rememberFocus(identity: u64) void {
     focus_history.push(identity);
     var members: [1024]tiling.Member = undefined;
     layouts.rememberFocus(workspaceLayout(window.display, window.workspace), identity, layoutMembers(&members)) catch |err| {
-        transition_error = @errorName(err);
+        journal.setError(@errorName(err));
     };
 }
 fn focusVerified(identity: u64) bool {
@@ -1059,7 +1057,7 @@ fn deriveGoals() bool {
     };
     var members: [1024]tiling.Member = undefined;
     layouts.sync(layoutMembers(&members), focused, config.gap) catch |err| {
-        transition_error = @errorName(err);
+        journal.setError(@errorName(err));
         return false;
     };
     for (&layouts.roots) |*slot| if (slot.*) |*state| {
@@ -1165,53 +1163,16 @@ fn overlap(first: Rect, second: Rect, comptime axis: enum { horizontal, vertical
 fn placementFailure(window: *Window, message: []const u8) void {
     const repeated = if (window.placement_error) |previous| std.mem.eql(u8, previous, message) else false;
     window.placement_error = message;
-    transition_error = message;
-    journaled_transition = message;
+    journal.placementError(message);
     if (repeated) return;
-    if (journaling()) {
+    if (journal.enabled()) {
         var actual: Rect = undefined;
         const readable = native.platform_read_frame(window.identity, &actual);
-        _ = journal("placement", .{ .window = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .message = message, .workspace = window.workspace + 1, .display = window.display, .goal = window.goal, .target = targetFrame(window.*), .actual = if (readable) actual else null });
+        _ = journal.append("placement", .{ .window = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .message = message, .workspace = window.workspace + 1, .display = window.display, .goal = window.goal, .target = targetFrame(window.*), .actual = if (readable) actual else null });
     }
     var buffer: [256:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&buffer, "Window {d}: {s}", .{ window.identity, message }) catch return;
     native.platform_error(&buffer);
-}
-fn journaling() bool {
-    return native.platform_filter()[0] == 0;
-}
-fn journal(event: []const u8, fields: anytype) bool {
-    if (!journaling()) return false;
-    var buffer: [4096]u8 = undefined;
-    const line = journalLine(&buffer, event, fields) catch return false;
-    if (session.huen_journal_append(line.ptr, line.len)) return true;
-    if (!journal_failed) native.platform_error("Journal append failed; later failures are not reported");
-    journal_failed = true;
-    return false;
-}
-fn journalLine(buffer: []u8, event: []const u8, fields: anytype) ![]const u8 {
-    var clock: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &clock);
-    var writer: std.Io.Writer = .fixed(buffer);
-    var stream: std.json.Stringify = .{ .writer = &writer };
-    try stream.beginObject();
-    try stream.objectField("at");
-    try stream.write(clock.sec);
-    try stream.objectField("event");
-    try stream.write(event);
-    inline for (comptime std.meta.fieldNames(@TypeOf(fields))) |name| {
-        try stream.objectField(name);
-        try stream.write(@field(fields, name));
-    }
-    try stream.endObject();
-    try writer.writeByte('\n');
-    return writer.buffered();
-}
-fn journalTransition() void {
-    const message = transition_error orelse return;
-    if (journaled_transition) |previous| if (std.mem.eql(u8, previous, message)) return;
-    journaled_transition = message;
-    _ = journal("transition", .{ .message = message });
 }
 fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
     for (displays.items) |display| {
@@ -1737,9 +1698,7 @@ export fn wm_tick() void {
         window.established = first_scan and age: {
             if (observation.process_token == 0) break :age false;
             // The token is a launch date in seconds since 2001.
-            var clock: std.c.timespec = undefined;
-            _ = std.c.clock_gettime(.REALTIME, &clock);
-            break :age @as(f64, @floatFromInt(clock.sec)) - 978307200 - observation.process_token > 5;
+            break :age @as(f64, @floatFromInt(journal.wallSeconds())) - 978307200 - observation.process_token > 5;
         };
         if (config.placement_memory and decision.workspace == null) claim: {
             const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered) orelse break :claim;
@@ -1933,7 +1892,7 @@ fn swapWindows(source_index: usize, target_index: usize) [*:0]const u8 {
     std.mem.swap(u32, &source.display, &target.display);
     std.mem.swap(usize, &source.workspace, &target.workspace);
     std.mem.swap(Window, source, target);
-    if (!transaction.commit()) return failure(transition_error orelse "SwapPlacementFailed");
+    if (!transaction.commit()) return failure(journal.lastError() orelse "SwapPlacementFailed");
     return json(.{ .ok = true, .verified = focusVerified(identity) });
 }
 // How far the candidate's center lies ahead of the source's in `direction`, and how far it lies off that line.
@@ -1994,12 +1953,12 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
         const window = windows.items[windowIndex(identity) orelse return];
         if (!visible(window) or window.parked) {
             const transaction = PlacementTransaction.begin(.{ .display = displayIdentity }) catch |err| {
-                transition_error = @errorName(err);
+                journal.setError(@errorName(err));
                 return;
             };
             defer transaction.deinit();
             layouts.reveal(state, identity) catch |err| {
-                transition_error = transaction.abort(err);
+                journal.setError(transaction.abort(err));
                 return;
             };
             if (!transaction.commit()) return;
@@ -2011,11 +1970,11 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
 fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_target: ?u64) bool {
     const displayIdentity = displays.items[displaySlot].identity;
     if (displayBlocked(displayIdentity)) {
-        transition_error = "Native fullscreen window blocks this display";
+        journal.setError("Native fullscreen window blocks this display");
         return false;
     }
     const transaction = PlacementTransaction.begin(.{ .display = displayIdentity }) catch |err| {
-        transition_error = @errorName(err);
+        journal.setError(@errorName(err));
         return false;
     };
     defer transaction.deinit();
@@ -2023,13 +1982,13 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
     if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| layouts.reveal(state, identity) catch |err| {
-        transition_error = transaction.abort(err);
+        journal.setError(transaction.abort(err));
         return false;
     };
     if (!transaction.commit()) return false;
     recordPrevious(displaySlot, from, workspace);
     focusWorkspace(displayIdentity, focus_target);
-    transition_error = null;
+    journal.setError(null);
     native.platform_config_changed();
     return true;
 }
@@ -2038,12 +1997,12 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const pending = transition orelse return;
     if (callbackGeneration != pending.generation) return;
     defer publishStatus();
-    defer journalTransition();
+    defer journal.flushTransition();
     native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
     if (displayIndex(pending.display)) |displaySlot| {
         _ = commitWorkspace(displaySlot, pending.workspace, pending.from, pending.focus_target);
-    } else transition_error = "Display disconnected during workspace capture";
+    } else journal.setError("Display disconnected during workspace capture");
     transition = null;
     if (covered) native.huen_scene_finish(pending.generation);
 }
@@ -2056,7 +2015,7 @@ fn switchWorkspace(display_slot: usize, workspace: usize, from: usize, focus_tar
     generation += 1;
     if (config.duration == 0 or !native.huen_scene_capture_allowed()) {
         snapshot_presentation = .instant;
-        if (!commitWorkspace(display_slot, workspace, from, focus_target)) return failure(transition_error orelse "WorkspacePlacementFailed");
+        if (!commitWorkspace(display_slot, workspace, from, focus_target)) return failure(journal.lastError() orelse "WorkspacePlacementFailed");
         return json(.{ .ok = true });
     }
     snapshot_presentation = .pending;
@@ -2080,14 +2039,14 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
     if (migration) {
         generation += 1;
         snapshot_presentation = .instant;
-        if (!route(resolved, &.{.{ .display = owner, .workspace = workspace }}, null)) return failure(transition_error orelse "MonitorRoutingFailed");
+        if (!route(resolved, &.{.{ .display = owner, .workspace = workspace }}, null)) return failure(journal.lastError() orelse "MonitorRoutingFailed");
         recordPrevious(destination_slot, from, workspace);
         focusWorkspace(owner, focus_target);
         native.platform_config_changed();
         return json(.{ .ok = true, .monitor = owner, .verified = selected_display == owner, .target = focus_target });
     }
     routing_blocked = !routeMembership();
-    if (routing_blocked) return failure(transition_error orelse "MonitorRoutingFailed");
+    if (routing_blocked) return failure(journal.lastError() orelse "MonitorRoutingFailed");
     if (displays.items[destination_slot].workspace != workspace) return switchWorkspace(destination_slot, workspace, from, focus_target);
     focusWorkspace(owner, focus_target);
     const verified = selected_display == owner and (focus_target == null or focused == focus_target);
@@ -2116,13 +2075,13 @@ export fn wm_hotkey_poll() void {
         var buffer: [256:0]u8 = @splat(0);
         _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(&command)}) catch {};
         native.platform_error(&buffer);
-        _ = journal("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
+        _ = journal.append("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
         if (now - hotkey_recovery.rebound >= 5) {
             hotkey_recovery.rebound = now;
             hotkey_recovery.rebinds += 1;
             if (!native.platform_rebind()) {
                 native.platform_error("Hotkey re-registration failed");
-                _ = journal("error", .{ .message = "Hotkey re-registration failed" });
+                _ = journal.append("error", .{ .message = "Hotkey re-registration failed" });
             }
         }
         wm_hotkey(&command);
@@ -2221,7 +2180,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .snapshot_presentation = snapshot_presentation,
                 .snapshot_generation = generation,
                 .transition_pending = transition != null,
-                .transition_error = transition_error,
+                .transition_error = journal.lastError(),
                 .hotkeys = .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds },
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = session_status,
@@ -2248,7 +2207,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{ .ok = true, .accepted = true, .request_id = request_id });
         },
         .wrong => |note| {
-            if (!journaling()) return failure("JournalDisabledByFilter");
+            if (!journal.enabled()) return failure("JournalDisabledByFilter");
             var length = @min(note.len, 200);
             while (length < note.len and note[length] & 0xc0 == 0x80) length -= 1;
             const Shown = struct { display: u32, workspace: ?usize };
@@ -2256,7 +2215,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             for (displays.items, shown[0..displays.items.len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (placedWorkspace(display)) |workspace| workspace + 1 else null };
             var parked: usize = 0;
             for (windows.items) |window| parked += @intFromBool(window.parked);
-            if (!journal("mark", .{ .note = note[0..length], .window_count = windows.items.len, .parked_count = parked, .workspaces = shown[0..displays.items.len], .transition_error = transition_error })) return failure("JournalAppendFailed");
+            if (!journal.append("mark", .{ .note = note[0..length], .window_count = windows.items.len, .parked_count = parked, .workspaces = shown[0..displays.items.len], .transition_error = journal.lastError() })) return failure("JournalAppendFailed");
             return json(.{ .ok = true });
         },
         .exec_and_forget => |shell| {
@@ -2394,7 +2353,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             snapshot_presentation = .instant;
             if (!route(resolved, forced[0..count], null)) {
                 for (&placements, homes) |*placement, home| placement.home = home;
-                return failure(transition_error orelse "MonitorRoutingFailed");
+                return failure(journal.lastError() orelse "MonitorRoutingFailed");
             }
             focusWorkspace(target, null);
             native.platform_config_changed();
@@ -2428,7 +2387,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 const destination = resolved[workspace] orelse window.display;
                 if (workspace == window.workspace and destination == window.display) continue;
                 if (route(resolved, &.{}, .{ .index = index, .display = destination, .workspace = workspace })) moved += 1 else if (first_error == null) {
-                    first_error = transition_error orelse "MonitorRoutingFailed";
+                    first_error = journal.lastError() orelse "MonitorRoutingFailed";
                 }
             }
             if (focused) |identity| if (windowIndex(identity)) |index| if (!visible(windows.items[index])) {
@@ -2443,7 +2402,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const transaction = PlacementTransaction.begin(.{ .display = display.identity }) catch |err| return failure(@errorName(err));
             defer transaction.deinit();
             workspaceLayout(display.identity, display.workspace).layout = layout;
-            if (!transaction.commit()) return failure(transition_error orelse "LayoutPlacementFailed");
+            if (!transaction.commit()) return failure(journal.lastError() orelse "LayoutPlacementFailed");
             native.platform_config_changed();
             return json(.{ .ok = true });
         },
@@ -2473,7 +2432,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                         else => unreachable,
                     };
                     const target = edited catch |err| return failure(transaction.abort(err));
-                    if (!transaction.commit()) return failure(transition_error orelse "GroupPlacementFailed");
+                    if (!transaction.commit()) return failure(journal.lastError() orelse "GroupPlacementFailed");
                     const verified = if (target) |identity| focusVerified(identity) else true;
                     native.platform_config_changed();
                     return json(.{ .ok = true, .target = target, .verified = verified });
@@ -2486,13 +2445,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 },
                 .resize_points => |resize| {
                     if (source.floating or managedFullscreen(source.*)) return failure("WindowNotTiled");
-                    if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                    if (!deriveGoals()) return failure(journal.lastError() orelse "LayoutProjectionFailed");
                     const identity = source.identity;
                     const before = source.goal;
                     var applied = resizeTiled(sourceIndex, resize.axis, resize.delta) catch |err| return failure(@errorName(err));
                     const retried = @abs(resize.delta - applied) > size_bounds.tolerance and forgetWorkspaceBounds(source.display, source.workspace);
                     if (retried) {
-                        if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                        if (!deriveGoals()) return failure(journal.lastError() orelse "LayoutProjectionFailed");
                         _ = resizeTiled(sourceIndex, resize.axis, resize.delta - applied) catch |err| return failure(@errorName(err));
                     }
                     reconcile();
@@ -2508,7 +2467,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (managedFullscreen(source.*)) return failure("ManagedFullscreenActive");
                     if (!source.floating) {
                         if (offset.vertical != 0 and workspaceLayout(source.display, source.workspace).layout == .master) return failure("MasterHeightResizeUnsupported");
-                        if (!deriveGoals()) return failure(transition_error orelse "LayoutProjectionFailed");
+                        if (!deriveGoals()) return failure(journal.lastError() orelse "LayoutProjectionFailed");
                         const width = if (offset.horizontal != 0) resizeTiled(sourceIndex, .width, offset.horizontal) catch |err| return failure(@errorName(err)) else 0;
                         const height = if (offset.vertical != 0) resizeTiled(sourceIndex, .height, offset.vertical) catch |err| return failure(@errorName(err)) else 0;
                         reconcile();
@@ -2545,7 +2504,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const state = workspaceLayout(source.display, source.workspace);
                     if (source.floating) source.floating_restore = true else layouts.reveal(state, source.identity) catch |err| return failure(transaction.abort(err));
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
-                    if (!transaction.commit()) return failure(transition_error orelse "FullscreenPlacementFailed");
+                    if (!transaction.commit()) return failure(journal.lastError() orelse "FullscreenPlacementFailed");
                     return json(.{ .ok = true, .verified = focusVerified(source.identity) });
                 },
                 .close => |quit_if_last| {
@@ -2603,7 +2562,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const destination = resolved[workspace] orelse source.display;
                     if (workspace == source.workspace and destination == source.display) return json(.{ .ok = true, .changed = false });
                     if (command == .send_to_workspace) {
-                        if (!route(resolved, &.{}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
+                        if (!route(resolved, &.{}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(journal.lastError() orelse "MonitorRoutingFailed");
                         if (!visible(source.*)) focused = null;
                         native.platform_config_changed();
                         return json(.{ .ok = true });
@@ -2613,7 +2572,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const identity = source.identity;
                     generation += 1;
                     snapshot_presentation = .instant;
-                    if (!route(resolved, &.{.{ .display = destination, .workspace = workspace }}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    if (!route(resolved, &.{.{ .display = destination, .workspace = workspace }}, .{ .index = sourceIndex, .display = destination, .workspace = workspace })) return failure(journal.lastError() orelse "MonitorRoutingFailed");
                     recordPrevious(destination_slot, from, workspace);
                     const verified = focusVerified(identity);
                     native.platform_config_changed();
@@ -2630,7 +2589,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (target == origin) return json(.{ .ok = true, .changed = false, .monitor = target, .workspace = source.workspace + 1 });
                     const resolved = resolvePlacements();
                     if (config.workspace_monitors != null and resolved[workspace] != target) return failure("NoWorkspaceOnMonitor");
-                    if (!route(resolved, &.{.{ .display = target, .workspace = workspace }}, .{ .index = sourceIndex, .display = target, .workspace = workspace })) return failure(transition_error orelse "MonitorRoutingFailed");
+                    if (!route(resolved, &.{.{ .display = target, .workspace = workspace }}, .{ .index = sourceIndex, .display = target, .workspace = workspace })) return failure(journal.lastError() orelse "MonitorRoutingFailed");
                     native.platform_config_changed();
                     if (command == .move_to_monitor) return json(.{ .ok = true, .monitor = target, .workspace = workspace + 1, .verified = focusVerified(source.identity), .target = source.identity });
                     // The selection stays, so keyboard focus returns to the selected display's candidate.
@@ -2708,7 +2667,7 @@ export fn wm_shutdown() bool {
     saveSession(outstanding == 0);
     if (outstanding == 0) settleParkingJournal() else {
         native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
-        _ = journal("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
+        _ = journal.append("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
     }
     native.platform_border(0, 0, 0);
     return true;
