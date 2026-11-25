@@ -24,7 +24,6 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
 @implementation HuenFixtureDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    (void)notification;
     NSMenu *mainMenu = [[NSMenu alloc] init];
     NSMenuItem *applicationItem = [[NSMenuItem alloc] init];
     NSMenu *applicationMenu = [[NSMenu alloc] init];
@@ -147,7 +146,6 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
 }
 
 - (void)writeReport:(NSNotification *)notification {
-    (void)notification;
     if (!self.reportPath) {
         return;
     }
@@ -193,7 +191,6 @@ static NSDictionary *AXFrame(NSRect frame, CGFloat referenceHeight) {
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)application {
-    (void)application;
     return YES;
 }
 
