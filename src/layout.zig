@@ -242,10 +242,7 @@ pub const Store = struct {
                     }
                 }
                 // A new tile beside one side of an overlapped split would overlap the other side, so it goes beside the split.
-                while (self.nodes[target].parent) |parent| {
-                    if (!self.overlapped(parent)) break;
-                    target = parent;
-                }
+                while (self.nodes[target].parent) |parent| : (target = parent) if (!self.overlapped(parent)) break;
                 const frame = self.nodes[target].frame;
                 const bounds = if (frame.width > 0 and frame.height > 0) frame else member.area;
                 const branch = available[1];
@@ -336,41 +333,28 @@ pub const Store = struct {
             },
             .group => |*group| {
                 node.active = false;
-                node.minimum = .{ 0, 0 };
-                node.compact = .{ 0, 0 };
-                node.layers = .{ 1, 1 };
-                node.ceiling = .{ null, null };
-                var selected_active = false;
                 var child: ?Handle = group.first;
                 while (child) |current| : (child = self.nodes[current].next) {
                     self.measure(current, gap);
-                    if (!self.nodes[current].active) continue;
-                    if (current == group.selected) selected_active = true;
-                    node.active = true;
+                    if (self.nodes[current].active) node.active = true;
                 }
-                if (!selected_active and node.active) {
-                    var candidate = group.selected;
-                    var remaining: usize = group.count;
-                    while (remaining > 0) : (remaining -= 1) {
-                        candidate = self.nodes[candidate].next orelse group.first;
-                        if (self.nodes[candidate].active) {
-                            group.selected = candidate;
-                            break;
-                        }
-                    }
+                if (!node.active) {
+                    node.minimum = .{ 0, 0 };
+                    node.compact = .{ 0, 0 };
+                    node.layers = .{ 1, 1 };
+                    node.ceiling = .{ null, null };
+                    return;
                 }
-                if (node.active) {
-                    const header = 24 * @as(f64, @floatFromInt(if (group.mode == .tabbed) @as(usize, 1) else group.count));
-                    node.minimum = self.nodes[group.selected].minimum;
-                    node.minimum[1] += header;
-                    node.compact = self.nodes[group.selected].compact;
-                    node.compact[1] += header;
-                    node.layers = self.nodes[group.selected].layers;
-                    node.ceiling = self.nodes[group.selected].ceiling;
-                    if (node.ceiling[1]) |*vertical| {
-                        vertical.accepted += header;
-                        vertical.largest_refused += header;
-                    }
+                while (!self.nodes[group.selected].active) group.selected = self.nodes[group.selected].next orelse group.first;
+                const selected_child = self.nodes[group.selected];
+                const header = 24 * @as(f64, @floatFromInt(if (group.mode == .tabbed) @as(usize, 1) else group.count));
+                node.minimum = .{ selected_child.minimum[0], selected_child.minimum[1] + header };
+                node.compact = .{ selected_child.compact[0], selected_child.compact[1] + header };
+                node.layers = selected_child.layers;
+                node.ceiling = selected_child.ceiling;
+                if (node.ceiling[1]) |*vertical| {
+                    vertical.accepted += header;
+                    vertical.largest_refused += header;
                 }
             },
             .free => unreachable,
@@ -685,11 +669,10 @@ pub const Store = struct {
             if (placement == .join) {
                 self.nodes[container].content = .{ .group = .{ .mode = .tabbed, .first = target, .last = source, .selected = source, .count = 2 } };
             } else {
-                const before = placement == .left or placement == .up;
                 self.nodes[container].content = .{ .branch = .{
                     .axis = if (placement == .left or placement == .right) .width else .height,
                     .ratio = if (self.nodes[target].parent == null) state.ratio else 0.5,
-                    .children = if (before) .{ source, target } else .{ target, source },
+                    .children = if (placement == .left or placement == .up) .{ source, target } else .{ target, source },
                 } };
             }
             self.replace(state, target, container);
