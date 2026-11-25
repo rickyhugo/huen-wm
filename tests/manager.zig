@@ -141,8 +141,7 @@ pub const Manager = struct {
     world: *World = &model.current,
 
     /// wm_initialize and wm_activate_config, as `huen-wm start` does before its first tick.
-    pub fn start(self: *Manager) !void {
-        _ = self;
+    pub fn start(_: *Manager) !void {
         if (!wm_initialize("/tests/config.lua") or !wm_activate_config()) return error.StartFailed;
     }
 
@@ -210,8 +209,7 @@ pub const Manager = struct {
     }
 
     /// The reply stays valid until the next command.
-    pub fn command(self: *Manager, text: []const u8) []const u8 {
-        _ = self;
+    pub fn command(_: *Manager, text: []const u8) []const u8 {
         const terminated = allocator.dupeSentinel(u8, text, 0) catch @panic("out of memory");
         defer allocator.free(terminated);
         return std.mem.trimEnd(u8, std.mem.span(wm_command(terminated)), "\n");
@@ -256,14 +254,12 @@ pub const Manager = struct {
     }
 
     /// The observe tap sees a registered combination go down.
-    pub fn press(self: *Manager, slot: u32, text: [:0]const u8) void {
-        _ = self;
+    pub fn press(_: *Manager, slot: u32, text: [:0]const u8) void {
         wm_hotkey_pressed(slot, text);
     }
 
     /// Carbon delivers the hotkey registered in `slot`.
-    pub fn deliver(self: *Manager, slot: u32, text: [:0]const u8) void {
-        _ = self;
+    pub fn deliver(_: *Manager, slot: u32, text: [:0]const u8) void {
         wm_hotkey_delivered(slot, text);
     }
 

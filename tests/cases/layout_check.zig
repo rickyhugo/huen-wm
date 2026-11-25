@@ -8,8 +8,7 @@ extern const huen_test_window_layout_count: usize;
 extern const huen_test_struct_sizes: [5]usize;
 
 /// The linker matches the fake adapter's symbols by name only, so a mirror that drifts from the C header corrupts memory silently.
-pub fn @"the WMWindow mirror matches native/platform.h"(manager: *Manager) !void {
-    _ = manager;
+pub fn @"the WMWindow mirror matches native/platform.h"(_: *Manager) !void {
     const fields = comptime std.meta.fieldNames(abi.Window);
     try suite.expect(huen_test_window_layout_count == fields.len + 1, "tests/layout.c to list {d} WMWindow fields, got {d}", .{ fields.len, huen_test_window_layout_count - 1 });
     try suite.expect(huen_test_window_layout[0] == @sizeOf(abi.Window), "sizeof(WMWindow) {d}, the mirror has {d}", .{ huen_test_window_layout[0], @sizeOf(abi.Window) });
@@ -18,8 +17,7 @@ pub fn @"the WMWindow mirror matches native/platform.h"(manager: *Manager) !void
     }
 }
 
-pub fn @"the other C struct mirrors match their headers"(manager: *Manager) !void {
-    _ = manager;
+pub fn @"the other C struct mirrors match their headers"(_: *Manager) !void {
     const mirrors = [_]struct { []const u8, usize }{
         .{ "WMDisplay", @sizeOf(abi.Display) },
         .{ "WMLaunchStatus", @sizeOf(abi.LaunchStatus) },
