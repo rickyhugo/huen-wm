@@ -33,8 +33,9 @@ The repository has no Python. Helpers are Zig programs under `tools/`, built by 
 `mise run check` checks Zig formatting, Lua syntax, and source names without a build.
 `mise run fmt` formats Zig files and runs the other checks.
 Pre-commit applies the same checks to staged files and stages Zig formatting fixes.
-Pre-commit also runs `zig build test` when a staged file is Zig, C, or `build.zig.zon`. This adds about 10 seconds.
-hk preserves unstaged work with its default pre-commit stash behavior, so the suite tests the staged content.
+Pre-commit also runs `zig build install test smoke` when a staged file is Zig, C, Objective-C, Lua, `build.zig.zon`, or `mise.toml`. The headless smoke takes about 7 seconds, and a build after a source change about 10 more.
+hk preserves unstaged work with its default pre-commit stash behavior, so the build and the suite use the staged content.
+The repository has no CI. The pre-commit hook is the only automatic build and test, so install the hooks in every clone and do not commit with `--no-verify`.
 
 Use a Conventional Commit title for each new commit.
 The format is `type(scope)!: subject`. The scope and `!` are optional.
