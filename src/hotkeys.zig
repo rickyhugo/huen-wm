@@ -5,7 +5,7 @@ const delivery = @import("delivery.zig");
 const selector = @import("selector.zig");
 const reply = @import("reply.zig");
 const journal = @import("journal.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const routing = @import("routing.zig");
 const scene = @import("scene.zig");
 const focus = @import("focus.zig");
@@ -22,12 +22,12 @@ var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f6
 pub fn flush() void {
     if (workspace_shortcuts.items.len == 0) return;
     defer workspace_shortcuts.clearRetainingCapacity();
-    if (world.isSuspended() or world.displays().len == 0 or scene.pending()) return;
+    if (desktop.isSuspended() or desktop.displays().len == 0 or scene.pending()) return;
     defer presenter.present();
     var remaining = workspace_shortcuts.items;
     while (remaining.len != 0) {
         focus.observeCommandState();
-        const slot = world.activeDisplay();
+        const slot = desktop.activeDisplay();
         var view = routing.view(slot);
         const from = view.current;
         const owners = routing.resolve();
@@ -37,25 +37,25 @@ pub fn flush() void {
                 remaining = remaining[1..];
                 continue;
             };
-            const owner = owners[target] orelse world.displays()[slot].identity;
+            const owner = owners[target] orelse desktop.displays()[slot].identity;
             if (destination != null and destination != owner) break;
             destination = owner;
             if (target != view.current) view.previous = view.current;
             view.current = target;
-            view.back_and_forth = world.config().workspace_back_and_forth;
+            view.back_and_forth = desktop.config().workspace_back_and_forth;
             remaining = remaining[1..];
         }
-        if (destination != null) _ = if (world.config().workspace_monitors != null) scene.show(view.current, from, null) else scene.switchTo(slot, view.current, from, null);
+        if (destination != null) _ = if (desktop.config().workspace_monitors != null) scene.show(view.current, from, null) else scene.switchTo(slot, view.current, from, null);
     }
 }
 
 pub fn activate() bool {
-    if (!native.platform_bindings(&world.config().modes[0].bindings, world.config().modes[0].binding_count)) return false;
+    if (!native.platform_bindings(&desktop.config().modes[0].bindings, desktop.config().modes[0].binding_count)) return false;
     active_mode = 0;
     return true;
 }
 
-pub fn bind(source: *const world.Config, index: usize) bool {
+pub fn bind(source: *const desktop.Config, index: usize) bool {
     if (!native.platform_bindings(&source.modes[index].bindings, source.modes[index].binding_count)) return false;
     hotkey_watch.forgetPresses();
     return true;
@@ -70,9 +70,9 @@ pub fn activeMode() usize {
 }
 
 pub fn selectMode(name: []const u8) reply.Reply {
-    const index = world.config().modeIndex(name) orelse return reply.failure("UnknownMode");
-    const mode = &world.config().modes[index];
-    if (!bind(world.config(), index)) return reply.failure("HotkeyCollision");
+    const index = desktop.config().modeIndex(name) orelse return reply.failure("UnknownMode");
+    const mode = &desktop.config().modes[index];
+    if (!bind(desktop.config(), index)) return reply.failure("HotkeyCollision");
     active_mode = index;
     return reply.json(.{ .ok = true, .active_mode = text(&mode.name) });
 }
@@ -81,8 +81,8 @@ pub const Route = enum { ignored, queued, run };
 
 // Queues a workspace shortcut that can wait for activations to settle. Every other command runs now.
 pub fn route(command_text: [*:0]const u8) Route {
-    const command = commands.parse(std.mem.span(command_text), world.config().workspace_count) catch return .ignored;
-    if (command != .workspace or world.isSuspended() or scene.pending() or world.displays().len == 0 or (world.config().duration != 0 and native.huen_scene_capture_allowed())) {
+    const command = commands.parse(std.mem.span(command_text), desktop.config().workspace_count) catch return .ignored;
+    if (command != .workspace or desktop.isSuspended() or scene.pending() or desktop.displays().len == 0 or (desktop.config().duration != 0 and native.huen_scene_capture_allowed())) {
         return .run;
     }
     if (workspace_shortcuts.items.len == workspace_shortcuts.capacity) flush();

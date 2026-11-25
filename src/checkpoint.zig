@@ -2,7 +2,7 @@ const std = @import("std");
 const native = @import("native.zig");
 const session = @import("session.zig");
 const continuity = @import("continuity.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const routing = @import("routing.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
@@ -33,8 +33,8 @@ fn sessionError(message: []const u8) void {
 }
 
 pub fn configure() void {
-    if (!world.config().session.enabled) return;
-    const encoded = std.json.Stringify.valueAlloc(allocator, world.config().*, .{}) catch |err| {
+    if (!desktop.config().session.enabled) return;
+    const encoded = std.json.Stringify.valueAlloc(allocator, desktop.config().*, .{}) catch |err| {
         sessionError(@errorName(err));
         return;
     };
@@ -52,9 +52,9 @@ fn sessionWindows() ![]continuity.LiveWindow {
     var result: std.ArrayList(continuity.LiveWindow) = .empty;
     errdefer result.deinit(allocator);
     session_status.unavailable = 0;
-    for (world.windows()) |window| {
+    for (desktop.windows()) |window| {
         var attributes: session.NativeAttributes = undefined;
-        if (window.eligible() and world.displayIndex(window.display) != null and native.platform_session_attributes(window.identity, &attributes)) if (attributes.key()) |_| {
+        if (window.eligible() and desktop.displayIndex(window.display) != null and native.platform_session_attributes(window.identity, &attributes)) if (attributes.key()) |_| {
             try result.append(allocator, .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .floating = window.floating, .frame = window.floating_frame, .attributes = attributes });
             continue;
         } else |_| {};
@@ -64,22 +64,22 @@ fn sessionWindows() ![]continuity.LiveWindow {
 }
 
 fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
-    for (world.displays(), 0..) |display, index| {
+    for (desktop.displays(), 0..) |display, index| {
         output[index] = .{ .identity = display.identity, .workspace = display.workspace, .full_bounds = display.full_bounds, .hint = @splat(0) };
         _ = session.huen_session_display_uuid(display.identity, &output[index].hint, output[index].hint.len);
     }
-    return output[0..world.displays().len];
+    return output[0..desktop.displays().len];
 }
 
 pub fn freeze() void {
     if (session_freeze_attempted) return;
     session_freeze_attempted = true;
-    if (!world.config().session.enabled) return;
+    if (!desktop.config().session.enabled) return;
     const current = sessionWindows() catch |err| return saveFailed(err);
     defer allocator.free(current);
     var screens: [32]continuity.Screen = undefined;
     var homes = routing.homeSnapshot();
-    session_frozen = continuity.freeze(world.layouts(), current, sessionScreens(&screens), world.config(), homes[0..world.config().workspace_count], sessionScope()) catch |err| return saveFailed(err);
+    session_frozen = continuity.freeze(desktop.layouts(), current, sessionScreens(&screens), desktop.config(), homes[0..desktop.config().workspace_count], sessionScope()) catch |err| return saveFailed(err);
     session_status.save = .frozen;
 }
 
@@ -89,7 +89,7 @@ fn saveFailed(err: anyerror) void {
 }
 
 pub fn save(clean: bool) void {
-    if (session_save_attempted or !world.config().session.enabled) return;
+    if (session_save_attempted or !desktop.config().session.enabled) return;
     session_save_attempted = true;
     const checkpoint = if (session_frozen) |*frozen| frozen else return;
     defer {
@@ -108,7 +108,7 @@ pub fn save(clean: bool) void {
 pub fn restore() void {
     if (!session_loaded) restore: {
         session_loaded = true;
-        if (!world.config().session.enabled) break :restore;
+        if (!desktop.config().session.enabled) break :restore;
         var loaded = session.load(allocator, sessionScope());
         defer if (loaded.parsed) |*parsed| parsed.deinit();
         session_status.load = switch (loaded.diagnostic) {
@@ -125,27 +125,27 @@ pub fn restore() void {
         };
         defer allocator.free(current);
         var screens: [32]continuity.Screen = undefined;
-        if (world.config().workspace_monitors != null) routing.seedHomes(continuity.savedHomes(checkpoint, world.config()));
-        const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), world.config(), routing.resolve()) catch |err| {
+        if (desktop.config().workspace_monitors != null) routing.seedHomes(continuity.savedHomes(checkpoint, desktop.config()));
+        const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), desktop.config(), routing.resolve()) catch |err| {
             sessionError(@errorName(err));
             session_status.load = .failed;
             break :restore;
         };
         defer imported.deinit();
-        world.layouts().* = imported.store.*;
+        desktop.layouts().* = imported.store.*;
         for (imported.assignments) |assignment| {
-            const window = &world.windows()[world.windowIndex(assignment.identity) orelse continue];
+            const window = &desktop.windows()[desktop.windowIndex(assignment.identity) orelse continue];
             window.display = assignment.display;
             window.workspace = assignment.workspace;
             window.floating = assignment.floating;
             if (assignment.frame) |frame| {
-                const screen = world.displays()[world.displayIndex(assignment.display).?];
-                window.floating_frame = world.boundedFloating(frame, screen.area());
+                const screen = desktop.displays()[desktop.displayIndex(assignment.display).?];
+                window.floating_frame = desktop.boundedFloating(frame, screen.area());
                 window.floating_restore = true;
             }
         }
-        for (imported.active) |active| if (world.displayIndex(active.display)) |slot| {
-            world.displays()[slot].workspace = active.workspace;
+        for (imported.active) |active| if (desktop.displayIndex(active.display)) |slot| {
+            desktop.displays()[slot].workspace = active.workspace;
         };
         session_status.matched = imported.matched;
         session_status.unmatched = checkpoint.windows.len - imported.matched;

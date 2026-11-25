@@ -7,13 +7,13 @@ const selector = @import("selector.zig");
 const monitor = @import("monitor.zig");
 const reply = @import("reply.zig");
 const journal = @import("journal.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const placer = @import("placer.zig");
 const routing = @import("routing.zig");
 const scene = @import("scene.zig");
 const discovery = @import("discovery.zig");
-const Rect = world.Rect;
-const Window = world.Window;
+const Rect = desktop.Rect;
+const Window = desktop.Window;
 const Direction = commands.Direction;
 
 var focused: ?u64 = null;
@@ -29,12 +29,12 @@ const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
 
 pub fn select(identity: u32) void {
-    if (world.selected() == identity) return;
-    world.setSelected(identity);
+    if (desktop.selected() == identity) return;
+    desktop.setSelected(identity);
     routing.trackCurrentDisplay();
-    if (!world.config().mouse_follows_monitor) return;
-    const index = world.displayIndex(identity) orelse return;
-    const bounds = world.displays()[index].full_bounds;
+    if (!desktop.config().mouse_follows_monitor) return;
+    const index = desktop.displayIndex(identity) orelse return;
+    const bounds = desktop.displays()[index].full_bounds;
     var point: native.WMPoint = undefined;
     if (!native.platform_pointer(&point)) return;
     if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
@@ -42,11 +42,11 @@ pub fn select(identity: u32) void {
 }
 
 fn rememberFocus(identity: u64) void {
-    const index = world.windowIndex(identity) orelse return;
-    const window = world.windows()[index];
+    const index = desktop.windowIndex(identity) orelse return;
+    const window = desktop.windows()[index];
     focus_history.push(identity);
     var members: [1024]tiling.Member = undefined;
-    world.layouts().rememberFocus(world.workspaceLayout(window.display, window.workspace), identity, world.layoutMembers(&members)) catch |err| {
+    desktop.layouts().rememberFocus(desktop.workspaceLayout(window.display, window.workspace), identity, desktop.layoutMembers(&members)) catch |err| {
         journal.setError(@errorName(err));
     };
 }
@@ -57,9 +57,9 @@ pub fn verify(identity: u64) bool {
     focused = identity;
     last_observed_focus = identity;
     rememberFocus(identity);
-    if (world.windowIndex(identity)) |index| {
-        world.windows()[index].urgent = false;
-        select(world.windows()[index].display);
+    if (desktop.windowIndex(identity)) |index| {
+        desktop.windows()[index].urgent = false;
+        select(desktop.windows()[index].display);
     }
     return true;
 }
@@ -69,8 +69,8 @@ pub fn verify(identity: u64) bool {
 // others as it was, so a tick confirms a request against live focus.
 pub fn observe(observed: ?u64, settle: bool) void {
     focused = observed;
-    if (observed) |identity| if (world.windowIndex(identity)) |slot| if (world.windows()[slot].visible()) {
-        world.windows()[slot].urgent = false;
+    if (observed) |identity| if (desktop.windowIndex(identity)) |slot| if (desktop.windows()[slot].visible()) {
+        desktop.windows()[slot].urgent = false;
     };
     if (observed == last_observed_focus) return;
     const previous = last_observed_focus;
@@ -78,10 +78,10 @@ pub fn observe(observed: ?u64, settle: bool) void {
     // A new window that a rule placed there is not a request. Neither is focus that macOS moves there because the focused
     // window went away, nor focus that comes back to the window that had it last, such as one that a command sent there.
     const requested = if (observed) |identity| requested: {
-        if (world.isSuspended() or (focus_history.count > 0 and focus_history.entries[0] == identity)) break :requested false;
-        const window = world.windows()[world.windowIndex(identity) orelse break :requested false];
-        const slot = world.displayIndex(window.display) orelse break :requested false;
-        if (!window.eligible() or window.workspace == world.displays()[slot].workspace) break :requested false;
+        if (desktop.isSuspended() or (focus_history.count > 0 and focus_history.entries[0] == identity)) break :requested false;
+        const window = desktop.windows()[desktop.windowIndex(identity) orelse break :requested false];
+        const slot = desktop.displayIndex(window.display) orelse break :requested false;
+        if (!window.eligible() or window.workspace == desktop.displays()[slot].workspace) break :requested false;
         const now = native.platform_monotonic();
         if (now - window.discovered < 1.0) break :requested false;
         const asked = if (previous) |holder| focusable(holder) else now - focus_lost > 1.0;
@@ -97,22 +97,22 @@ pub fn observe(observed: ?u64, settle: bool) void {
     // asks for focus to return to the window that had it. routing.Activation of another application completes later, so the
     // next observation records the returned focus.
     if (requested) {
-        const taker = &world.windows()[world.windowIndex(identity).?];
+        const taker = &desktop.windows()[desktop.windowIndex(identity).?];
         taker.urgent = true;
-        const decision = world.ruleDecision(&taker.observation);
-        if (decision.focus_on_activate orelse world.config().focus_on_activate) {
-            _ = scene.jump(identity, world.activeDisplay());
-        } else if (previous) |holder_identity| if (world.windowIndex(holder_identity)) |holder_index| {
-            const holder = world.windows()[holder_index];
+        const decision = desktop.ruleDecision(&taker.observation);
+        if (decision.focus_on_activate orelse desktop.config().focus_on_activate) {
+            _ = scene.jump(identity, desktop.activeDisplay());
+        } else if (previous) |holder_identity| if (desktop.windowIndex(holder_identity)) |holder_index| {
+            const holder = desktop.windows()[holder_index];
             if (holder.visible() and !holder.parked and native.platform_focus(holder.identity)) {
                 focused = previous;
                 return;
             }
         };
     }
-    const window = world.windows()[world.windowIndex(identity) orelse return];
+    const window = desktop.windows()[desktop.windowIndex(identity) orelse return];
     rememberFocus(identity);
-    if (world.displayIndex(window.display) != null) select(window.display);
+    if (desktop.displayIndex(window.display) != null) select(window.display);
 }
 
 pub fn readingOrder(display: u32, kind: ?commands.WindowKind, output: []u64) []u64 {
@@ -129,7 +129,7 @@ pub fn readingOrder(display: u32, kind: ?commands.WindowKind, output: []u64) []u
     };
     var entries: [1024]Entry = undefined;
     var count: usize = 0;
-    for (world.windows()) |window| {
+    for (desktop.windows()) |window| {
         if (window.display != display or !window.visible() or window.parked) continue;
         if (kind) |wanted| if ((wanted == .floating) != window.floating) continue;
         entries[count] = .{ .floating = window.floating, .frame = window.targetFrame(), .identity = window.identity };
@@ -157,9 +157,9 @@ fn offsets(source: *const Window, candidate: *const Window, direction: Direction
 pub fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     var best: f64 = std.math.inf(f64);
     var result: ?usize = null;
-    for (world.windows(), 0..) |candidate, index| {
+    for (desktop.windows(), 0..) |candidate, index| {
         if (index == sourceIndex or !candidate.visible() or candidate.parked) continue;
-        const forward, const cross = offsets(&world.windows()[sourceIndex], &candidate, direction);
+        const forward, const cross = offsets(&desktop.windows()[sourceIndex], &candidate, direction);
         if (forward <= 1) continue;
         const score = forward + cross * 2;
         if (score < best) {
@@ -171,25 +171,25 @@ pub fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
 }
 
 pub fn focusable(identity: u64) bool {
-    const window = world.windows()[world.windowIndex(identity) orelse return false];
-    return window.eligible() and world.displayIndex(window.display) != null;
+    const window = desktop.windows()[desktop.windowIndex(identity) orelse return false];
+    return window.eligible() and desktop.displayIndex(window.display) != null;
 }
 
 pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     discovery.refresh();
     if (!placer.deriveGoals()) return;
-    const index = world.displayIndex(displayIdentity) orelse return;
-    const state = world.workspaceLayout(displayIdentity, world.displays()[index].workspace);
+    const index = desktop.displayIndex(displayIdentity) orelse return;
+    const state = desktop.workspaceLayout(displayIdentity, desktop.displays()[index].workspace);
     var members: [1024]tiling.Member = undefined;
-    if (focus_target orelse world.layouts().focusCandidate(state, world.layoutMembers(&members))) |identity| {
-        const window = world.windows()[world.windowIndex(identity) orelse return];
+    if (focus_target orelse desktop.layouts().focusCandidate(state, desktop.layoutMembers(&members))) |identity| {
+        const window = desktop.windows()[desktop.windowIndex(identity) orelse return];
         if (!window.visible() or window.parked) {
             const transaction = placer.Transaction.begin(.{ .display = displayIdentity }) catch |err| {
                 journal.setError(@errorName(err));
                 return;
             };
             defer transaction.deinit();
-            world.layouts().reveal(state, identity) catch |err| {
+            desktop.layouts().reveal(state, identity) catch |err| {
                 journal.setError(transaction.abort(err));
                 return;
             };
@@ -208,45 +208,45 @@ pub fn observeCommandState() void {
 }
 
 pub fn toMonitor(selection: commands.MonitorSelector, slot: usize) reply.Reply {
-    const display = &world.displays()[slot];
+    const display = &desktop.displays()[slot];
     var screens: [monitor.capacity]monitor.Screen = undefined;
-    const target = monitor.resolve(selection, world.monitorScreens(&screens), display.identity) catch |err| return reply.failure(@errorName(err));
-    const changed = world.selected() != target;
+    const target = monitor.resolve(selection, desktop.monitorScreens(&screens), display.identity) catch |err| return reply.failure(@errorName(err));
+    const changed = desktop.selected() != target;
     focusWorkspace(target, null);
-    return reply.json(.{ .ok = true, .accepted = true, .changed = changed, .monitor = target, .verified = world.selected() == target, .focused = focused });
+    return reply.json(.{ .ok = true, .accepted = true, .changed = changed, .monitor = target, .verified = desktop.selected() == target, .focused = focused });
 }
 
 pub fn cycle(request: commands.Cycle, slot: usize) reply.Reply {
-    const display = &world.displays()[slot];
+    const display = &desktop.displays()[slot];
     var identities: [1024]u64 = undefined;
     const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return reply.failure("NoWindowToCycle");
     return reply.json(.{ .ok = true, .accepted = true, .verified = verify(target), .target = target });
 }
 
 pub fn jumpBack(prefer_urgent: bool, slot: usize) reply.Reply {
-    const urgent: ?u64 = if (prefer_urgent) for (world.windows()) |window| {
+    const urgent: ?u64 = if (prefer_urgent) for (desktop.windows()) |window| {
         if (window.urgent and focusable(window.identity)) break window.identity;
     } else null else null;
     return scene.jump(urgent orelse focus_history.pick(focused, focusable) orelse return reply.failure("NoPreviousWindow"), slot);
 }
 
 pub fn toward(source_index: usize, request: commands.Focus) reply.Reply {
-    const source = &world.windows()[source_index];
+    const source = &desktop.windows()[source_index];
     const target = if (request.wrap) wrapped: {
         var forward_target: ?usize = null;
         var forward_score = std.math.inf(f64);
         var wrap_target = source_index;
         var wrap_distance: f64 = 0;
         var wrap_cross = std.math.inf(f64);
-        for (world.windows(), 0..) |candidate, index| {
+        for (desktop.windows(), 0..) |candidate, index| {
             if (index == source_index or !candidate.visible() or candidate.parked or candidate.display != source.display or candidate.workspace != source.workspace) continue;
             const forward, const cross = offsets(source, &candidate, request.direction);
             const score = forward + cross * 2;
-            if (forward > 1 and (score < forward_score or (score == forward_score and (forward_target == null or candidate.identity < world.windows()[forward_target.?].identity)))) {
+            if (forward > 1 and (score < forward_score or (score == forward_score and (forward_target == null or candidate.identity < desktop.windows()[forward_target.?].identity)))) {
                 forward_target = index;
                 forward_score = score;
             }
-            if (forward < wrap_distance or (forward == wrap_distance and (cross < wrap_cross or (cross == wrap_cross and candidate.identity < world.windows()[wrap_target].identity)))) {
+            if (forward < wrap_distance or (forward == wrap_distance and (cross < wrap_cross or (cross == wrap_cross and candidate.identity < desktop.windows()[wrap_target].identity)))) {
                 wrap_target = index;
                 wrap_distance = forward;
                 wrap_cross = cross;
@@ -254,7 +254,7 @@ pub fn toward(source_index: usize, request: commands.Focus) reply.Reply {
         }
         break :wrapped forward_target orelse wrap_target;
     } else neighbor(source_index, request.direction) orelse return reply.failure("NoWindowInDirection");
-    const identity = world.windows()[target].identity;
+    const identity = desktop.windows()[target].identity;
     return reply.json(.{ .ok = true, .accepted = true, .verified = verify(identity), .target = identity });
 }
 
@@ -267,13 +267,13 @@ pub fn settled(now: f64) bool {
 }
 
 pub fn dropMissing() void {
-    if (focused) |identity| if (world.windowIndex(identity) == null) {
+    if (focused) |identity| if (desktop.windowIndex(identity) == null) {
         focused = null;
     };
 }
 
 pub fn dropIfHidden() void {
-    if (focused) |identity| if (world.windowIndex(identity)) |index| if (!world.windows()[index].visible()) {
+    if (focused) |identity| if (desktop.windowIndex(identity)) |index| if (!desktop.windows()[index].visible()) {
         focused = null;
     };
 }

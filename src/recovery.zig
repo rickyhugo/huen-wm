@@ -2,11 +2,11 @@ const std = @import("std");
 const native = @import("native.zig");
 const parking = @import("parking.zig");
 const memory = @import("memory.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
-const Rect = world.Rect;
-const Window = world.Window;
+const Rect = desktop.Rect;
+const Window = desktop.Window;
 
 var parking_journal: parking.Writer = .{};
 var parking_journal_failed = false;
@@ -39,9 +39,9 @@ fn writeParkingJournal(records: []const parking.Record) void {
 
 // A corner that touches another display is never used, so a window there is not a parked one.
 fn parkingRecord(window: *const Window) ?parking.Record {
-    const display = world.displays()[world.displayIndex(window.display) orelse return null];
+    const display = desktop.displays()[desktop.displayIndex(window.display) orelse return null];
     var corners = parking.corners(window.parking_frame, display.frame);
-    const blocked = [2]bool{ world.overlapsOtherDisplays(corners[0], window.display), world.overlapsOtherDisplays(corners[1], window.display) };
+    const blocked = [2]bool{ desktop.overlapsOtherDisplays(corners[0], window.display), desktop.overlapsOtherDisplays(corners[1], window.display) };
     if (blocked[0] and blocked[1]) return null;
     if (blocked[0]) corners[0] = corners[1];
     if (blocked[1]) corners[1] = corners[0];
@@ -63,13 +63,13 @@ fn orphanOf(record: parking.Record, since: f64) Orphan {
 pub fn save(prior: []const Window) void {
     var records: [parking.max_records]parking.Record = undefined;
     var count: usize = 0;
-    for (world.windows()) |*window| if ((window.parked or window.vanished_parked) and count < records.len) if (parkingRecord(window)) |record| {
+    for (desktop.windows()) |*window| if ((window.parked or window.vanished_parked) and count < records.len) if (parkingRecord(window)) |record| {
         records[count] = record;
         count += 1;
     };
     for (prior) |*window| {
         if (!window.parked or count == records.len) continue;
-        if (world.windowIndex(window.identity)) |index| if (world.windows()[index].parked) continue;
+        if (desktop.windowIndex(window.identity)) |index| if (desktop.windows()[index].parked) continue;
         records[count] = parkingRecord(window) orelse continue;
         count += 1;
     }
@@ -90,17 +90,17 @@ pub fn settle() void {
 // The display layout may have changed since the crash, so the frame is bounded to the display it overlaps most.
 pub fn restingFrame(frame: Rect) Rect {
     var largest: f64 = 0;
-    var area = world.displays()[0].frame;
-    for (world.displays()) |display| {
+    var area = desktop.displays()[0].frame;
+    for (desktop.displays()) |display| {
         const bounds = display.full_bounds;
-        const width = world.overlap(frame, bounds, .horizontal);
-        const height = world.overlap(frame, bounds, .vertical);
+        const width = desktop.overlap(frame, bounds, .horizontal);
+        const height = desktop.overlap(frame, bounds, .vertical);
         if (width > 0 and height > 0 and width * height > largest) {
             largest = width * height;
             area = display.frame;
         }
     }
-    return world.boundedFloating(frame, area);
+    return desktop.boundedFloating(frame, area);
 }
 
 pub fn processExited(process: memory.Process) bool {
@@ -140,7 +140,7 @@ pub fn recover(observed: []native.WMWindow, recovered: *[1024]parking.Recovery) 
         }
         if (record_count == 0) break :recover recovered[0..0];
         var eligible: [1024]bool = undefined;
-        for (observed, eligible[0..observed.len]) |observation, *open| open.* = world.windowIndex(observation.identity) == null;
+        for (observed, eligible[0..observed.len]) |observation, *open| open.* = desktop.windowIndex(observation.identity) == null;
         var claimed: [parking.max_records]bool = @splat(false);
         const matches = parking.match(records[0..record_count], observed, eligible[0..observed.len], claimed[0..record_count], recovered);
         // An unmatched record stays for up to a minute while its application runs, because a scan can miss an application that does not answer.

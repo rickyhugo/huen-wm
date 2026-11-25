@@ -1,7 +1,7 @@
 const std = @import("std");
 const native = @import("native.zig");
 const journal = @import("journal.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const routing = @import("routing.zig");
 const scene = @import("scene.zig");
 const reload = @import("reload.zig");
@@ -17,8 +17,8 @@ const recovery = @import("recovery.zig");
 const recall = @import("recall.zig");
 const checkpoint = @import("checkpoint.zig");
 const text = native.text;
-const Rect = world.Rect;
-const Display = world.Display;
+const Rect = desktop.Rect;
+const Display = desktop.Display;
 
 const StatusPresentation = union(enum) {
     disabled,
@@ -48,17 +48,17 @@ pub fn present() void {
 
 pub fn publishStatus() void {
     if (!status_active) return;
-    const next: StatusPresentation = if (!world.config().status_bar.enabled) .disabled else status: {
+    const next: StatusPresentation = if (!desktop.config().status_bar.enabled) .disabled else status: {
         var presentation = std.mem.zeroes(native.WMStatusPresentation);
-        const display: ?Display = if (world.displays().len > 0) world.displays()[world.activeDisplay()] else null;
+        const display: ?Display = if (desktop.displays().len > 0) desktop.displays()[desktop.activeDisplay()] else null;
         // With global routing, a display that has no workspace placed on it shows a dash.
         const placed: ?usize = if (display) |current| routing.placedWorkspace(current) else null;
         const workspace_index = placed orelse 0;
-        const name = if (placed != null) text(&world.config().workspaces[workspace_index].name) else "No workspace";
+        const name = if (placed != null) text(&desktop.config().workspaces[workspace_index].name) else "No workspace";
         var index_buffer: [8]u8 = undefined;
         const index_text = std.fmt.bufPrint(&index_buffer, "{d}", .{workspace_index + 1}) catch unreachable;
         var label_buffer: [80]u8 = undefined;
-        const label = if (world.isSuspended()) "Paused" else if (display == null) "Huen WM" else if (placed == null) "—" else switch (world.config().status_bar.label) {
+        const label = if (desktop.isSuspended()) "Paused" else if (display == null) "Huen WM" else if (placed == null) "—" else switch (desktop.config().status_bar.label) {
             .name => name,
             .index => index_text,
             .index_and_name => if (std.mem.eql(u8, name, index_text)) name else std.fmt.bufPrint(&label_buffer, "{s}  {s}", .{ index_text, name }) catch unreachable,
@@ -66,12 +66,12 @@ pub fn publishStatus() void {
         // A dot marks a workspace that holds an urgent window, and the title while any workspace does.
         var urgent: [10]bool = @splat(false);
         var alert = false;
-        for (world.windows()) |window| if (window.urgent) {
+        for (desktop.windows()) |window| if (window.urgent) {
             urgent[window.workspace] = true;
             alert = true;
         };
-        const shown = if (hotkeys.activeMode() != 0 and !world.isSuspended()) text(&world.config().modes[hotkeys.activeMode()].name) else label;
-        switch (world.config().status_bar.style) {
+        const shown = if (hotkeys.activeMode() != 0 and !desktop.isSuspended()) text(&desktop.config().modes[hotkeys.activeMode()].name) else label;
+        switch (desktop.config().status_bar.style) {
             .text => statusText(&presentation.title, shown, 24),
             .badge => statusText(&presentation.badge, shown, 24),
         }
@@ -83,11 +83,11 @@ pub fn publishStatus() void {
         const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s} · Mode {s}{s}", .{
             if (display) |current| text(&current.name) else "No display",
             name,
-            text(&world.config().modes[hotkeys.activeMode()].name),
+            text(&desktop.config().modes[hotkeys.activeMode()].name),
             if (journal.lastError() != null) " · Workspace switch failed" else "",
         }) catch unreachable;
         statusText(&presentation.tooltip, tooltip, 255);
-        for (world.config().workspaces[0..world.config().workspace_count], 0..) |*workspace, index| {
+        for (desktop.config().workspaces[0..desktop.config().workspace_count], 0..) |*workspace, index| {
             const row = &presentation.rows[index];
             var row_buffer: [96]u8 = undefined;
             var number_buffer: [8]u8 = undefined;
@@ -98,17 +98,17 @@ pub fn publishStatus() void {
             statusText(&row.title, title, 79);
             _ = std.fmt.bufPrint(&row.command, "workspace {d}", .{index + 1}) catch unreachable;
             row.checked = placed == index;
-            row.enabled = display != null and !world.isSuspended() and !scene.pending();
+            row.enabled = display != null and !desktop.isSuspended() and !scene.pending();
         }
-        const reload_row = &presentation.rows[world.config().workspace_count];
+        const reload_row = &presentation.rows[desktop.config().workspace_count];
         statusText(&reload_row.title, "Reload configuration", 79);
         statusText(&reload_row.command, "reload", 127);
-        reload_row.enabled = !world.isSuspended() and !scene.pending() and !reload.inFlight();
-        const quit_row = &presentation.rows[world.config().workspace_count + 1];
+        reload_row.enabled = !desktop.isSuspended() and !scene.pending() and !reload.inFlight();
+        const quit_row = &presentation.rows[desktop.config().workspace_count + 1];
         statusText(&quit_row.title, "Quit", 79);
         statusText(&quit_row.command, "quit", 127);
         quit_row.enabled = true;
-        presentation.row_count = world.config().workspace_count + 2;
+        presentation.row_count = desktop.config().workspace_count + 2;
         break :status .{ .visible = .{ .display_identity = if (display) |current| current.identity else null, .content = presentation } };
     };
     if (std.meta.eql(next, published_status)) return;
@@ -134,13 +134,13 @@ pub fn reportStatus() reply.Reply {
     const placed = routing.placed(&placed_rows);
     return reply.json(.{
         .running = true,
-        .suspended = world.isSuspended(),
-        .active_mode = text(&world.config().modes[hotkeys.activeMode()].name),
+        .suspended = desktop.isSuspended(),
+        .active_mode = text(&desktop.config().modes[hotkeys.activeMode()].name),
         .close_state = edits.closeState(),
         .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) },
-        .window_count = world.windows().len,
-        .display_count = world.displays().len,
-        .selected_monitor = world.selected(),
+        .window_count = desktop.windows().len,
+        .display_count = desktop.displays().len,
+        .selected_monitor = desktop.selected(),
         .workspace_owner = routing.owner(),
         .placements = placed,
         .routing_blocked = routing.blocked(),
@@ -163,20 +163,20 @@ pub fn reportStatus() reply.Reply {
 pub fn listWindows() reply.Reply {
     const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 }, maximum: struct { width: ?f64, height: ?f64 } };
     var items: [1024]Item = undefined;
-    for (world.windows(), items[0..world.windows().len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focus.current() == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = window.managedFullscreen(), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and world.layouts().visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.bounds.minimumAt(.width), .height = window.bounds.minimumAt(.height) }, .maximum = .{ .width = if (window.bounds.ceilingAt(.width)) |ceiling| ceiling.accepted else null, .height = if (window.bounds.ceilingAt(.height)) |ceiling| ceiling.accepted else null } };
-    return reply.json(items[0..world.windows().len]);
+    for (desktop.windows(), items[0..desktop.windows().len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focus.current() == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = window.managedFullscreen(), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and desktop.layouts().visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.bounds.minimumAt(.width), .height = window.bounds.minimumAt(.height) }, .maximum = .{ .width = if (window.bounds.ceilingAt(.width)) |ceiling| ceiling.accepted else null, .height = if (window.bounds.ceilingAt(.height)) |ceiling| ceiling.accepted else null } };
+    return reply.json(items[0..desktop.windows().len]);
 }
 
 pub fn listMonitors() reply.Reply {
     const Item = struct { id: u32, uuid: ?[]const u8, name: []const u8, frame: Rect, full_bounds: Rect, built_in: bool, workspace: ?usize, selected: bool, blocked_by_fullscreen: bool };
     var items: [monitor.capacity]Item = undefined;
     var uuids: [monitor.capacity][64]u8 = undefined;
-    const count = world.displays().len;
-    for (world.displays(), uuids[0..count], items[0..count]) |*display, *uuid, *item| {
+    const count = desktop.displays().len;
+    for (desktop.displays(), uuids[0..count], items[0..count]) |*display, *uuid, *item| {
         uuid.* = @splat(0);
         const known = session.huen_session_display_uuid(display.identity, uuid, uuid.len);
         const placed = routing.placedWorkspace(display.*);
-        item.* = .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = world.selected() == display.identity, .blocked_by_fullscreen = world.displayBlocked(display.identity) };
+        item.* = .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = desktop.selected() == display.identity, .blocked_by_fullscreen = desktop.displayBlocked(display.identity) };
     }
     return reply.json(items[0..count]);
 }
@@ -185,10 +185,10 @@ pub fn listWorkspaces() reply.Reply {
     const Item = struct { display: u32, index: usize, name: []const u8, active: bool, urgent: bool, layout: commands.Layout };
     var items: [monitor.capacity * 10]Item = undefined;
     var count: usize = 0;
-    for (world.displays()) |display| for (world.config().workspaces[0..world.config().workspace_count], 0..) |*workspace, index| {
-        if (world.config().workspace_monitors != null and routing.host(index) != display.identity) continue;
-        const layout = if (world.layouts().lookup(display.identity, index)) |state| state.layout else workspace.layout;
-        const urgent = for (world.windows()) |window| {
+    for (desktop.displays()) |display| for (desktop.config().workspaces[0..desktop.config().workspace_count], 0..) |*workspace, index| {
+        if (desktop.config().workspace_monitors != null and routing.host(index) != display.identity) continue;
+        const layout = if (desktop.layouts().lookup(display.identity, index)) |state| state.layout else workspace.layout;
+        const urgent = for (desktop.windows()) |window| {
             if (window.urgent and window.display == display.identity and window.workspace == index) break true;
         } else false;
         items[count] = .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .urgent = urgent, .layout = layout };
@@ -204,9 +204,9 @@ pub fn markWrong(note: []const u8) reply.Reply {
     while (length < note.len and note[length] & 0xc0 == 0x80) length -= 1;
     const Shown = struct { display: u32, workspace: ?usize };
     var shown: [monitor.capacity]Shown = undefined;
-    for (world.displays(), shown[0..world.displays().len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (routing.placedWorkspace(display)) |workspace| workspace + 1 else null };
+    for (desktop.displays(), shown[0..desktop.displays().len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (routing.placedWorkspace(display)) |workspace| workspace + 1 else null };
     var parked: usize = 0;
-    for (world.windows()) |window| parked += @intFromBool(window.parked);
-    if (!journal.append("mark", .{ .note = note[0..length], .window_count = world.windows().len, .parked_count = parked, .workspaces = shown[0..world.displays().len], .transition_error = journal.lastError() })) return reply.failure("JournalAppendFailed");
+    for (desktop.windows()) |window| parked += @intFromBool(window.parked);
+    if (!journal.append("mark", .{ .note = note[0..length], .window_count = desktop.windows().len, .parked_count = parked, .workspaces = shown[0..desktop.displays().len], .transition_error = journal.lastError() })) return reply.failure("JournalAppendFailed");
     return reply.json(.{ .ok = true });
 }

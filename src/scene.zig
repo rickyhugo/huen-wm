@@ -3,7 +3,7 @@ const commands = @import("command.zig");
 const tiling = @import("layout.zig");
 const reply = @import("reply.zig");
 const journal = @import("journal.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const placer = @import("placer.zig");
 const routing = @import("routing.zig");
 const focus = @import("focus.zig");
@@ -22,8 +22,8 @@ pub fn cancel() void {
 }
 
 fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_target: ?u64) bool {
-    const displayIdentity = world.displays()[displaySlot].identity;
-    if (world.displayBlocked(displayIdentity)) {
+    const displayIdentity = desktop.displays()[displaySlot].identity;
+    if (desktop.displayBlocked(displayIdentity)) {
         journal.setError("Native fullscreen window blocks this display");
         return false;
     }
@@ -32,10 +32,10 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
         return false;
     };
     defer transaction.deinit();
-    world.displays()[displaySlot].workspace = workspace;
+    desktop.displays()[displaySlot].workspace = workspace;
     var members: [1024]tiling.Member = undefined;
-    const state = world.workspaceLayout(displayIdentity, workspace);
-    if (focus_target orelse world.layouts().focusCandidate(state, world.layoutMembers(&members))) |identity| world.layouts().reveal(state, identity) catch |err| {
+    const state = desktop.workspaceLayout(displayIdentity, workspace);
+    if (focus_target orelse desktop.layouts().focusCandidate(state, desktop.layoutMembers(&members))) |identity| desktop.layouts().reveal(state, identity) catch |err| {
         journal.setError(transaction.abort(err));
         return false;
     };
@@ -55,7 +55,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     defer journal.flushTransition();
     native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
-    if (world.displayIndex(request.display)) |displaySlot| {
+    if (desktop.displayIndex(request.display)) |displaySlot| {
         _ = commitWorkspace(displaySlot, request.workspace, request.from, request.focus_target);
     } else journal.setError("Display disconnected during workspace capture");
     transition = null;
@@ -63,20 +63,20 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
 }
 
 pub fn switchTo(display_slot: usize, workspace: usize, from: usize, focus_target: ?u64) reply.Reply {
-    const destination = world.displays()[display_slot];
+    const destination = desktop.displays()[display_slot];
     if (workspace == destination.workspace) {
         focus.focusWorkspace(destination.identity, focus_target);
         return reply.json(.{ .ok = true, .changed = false });
     }
     generation += 1;
-    if (world.config().duration == 0 or !native.huen_scene_capture_allowed()) {
+    if (desktop.config().duration == 0 or !native.huen_scene_capture_allowed()) {
         snapshot_presentation = .instant;
         if (!commitWorkspace(display_slot, workspace, from, focus_target)) return reply.failure(journal.lastError() orelse "WorkspacePlacementFailed");
         return reply.json(.{ .ok = true });
     }
     snapshot_presentation = .pending;
     transition = .{ .display = destination.identity, .workspace = workspace, .from = from, .generation = generation, .focus_target = focus_target };
-    native.huen_scene_begin(destination.identity, generation, world.config().duration, sceneReady, @ptrFromInt(generation));
+    native.huen_scene_begin(destination.identity, generation, desktop.config().duration, sceneReady, @ptrFromInt(generation));
     return reply.json(.{ .ok = true, .accepted = true, .generation = generation });
 }
 
@@ -85,9 +85,9 @@ pub fn switchTo(display_slot: usize, workspace: usize, from: usize, focus_target
 pub fn show(workspace: usize, from: usize, focus_target: ?u64) reply.Reply {
     const resolved = routing.resolve();
     const owner = resolved[workspace] orelse return reply.failure("NoWorkspaceOwner");
-    const destination_slot = world.displayIndex(owner).?;
+    const destination_slot = desktop.displayIndex(owner).?;
     var migration = routing.placementsChange(resolved);
-    for (world.windows()) |window| if (window.display != resolved[window.workspace].?) {
+    for (desktop.windows()) |window| if (window.display != resolved[window.workspace].?) {
         migration = true;
     };
     if (migration) {
@@ -96,29 +96,29 @@ pub fn show(workspace: usize, from: usize, focus_target: ?u64) reply.Reply {
         routing.recordPrevious(destination_slot, from, workspace);
         focus.focusWorkspace(owner, focus_target);
         native.platform_config_changed();
-        return reply.json(.{ .ok = true, .monitor = owner, .verified = world.selected() == owner, .target = focus_target });
+        return reply.json(.{ .ok = true, .monitor = owner, .verified = desktop.selected() == owner, .target = focus_target });
     }
     if (!routing.reroute()) return reply.failure(journal.lastError() orelse "MonitorRoutingFailed");
-    if (world.displays()[destination_slot].workspace != workspace) return switchTo(destination_slot, workspace, from, focus_target);
+    if (desktop.displays()[destination_slot].workspace != workspace) return switchTo(destination_slot, workspace, from, focus_target);
     focus.focusWorkspace(owner, focus_target);
-    const verified = world.selected() == owner and (focus_target == null or focus.current() == focus_target);
+    const verified = desktop.selected() == owner and (focus_target == null or focus.current() == focus_target);
     if (verified) routing.recordPrevious(destination_slot, from, workspace);
     return reply.json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
 
 pub fn jump(identity: u64, display_slot: usize) reply.Reply {
-    const window = world.windows()[world.windowIndex(identity).?];
-    if (world.config().workspace_monitors != null) return show(window.workspace, routing.currentWorkspace(display_slot), identity);
-    const slot = world.displayIndex(window.display).?;
-    if (window.workspace != world.displays()[slot].workspace) return switchTo(slot, window.workspace, world.displays()[slot].workspace, identity);
+    const window = desktop.windows()[desktop.windowIndex(identity).?];
+    if (desktop.config().workspace_monitors != null) return show(window.workspace, routing.currentWorkspace(display_slot), identity);
+    const slot = desktop.displayIndex(window.display).?;
+    if (window.workspace != desktop.displays()[slot].workspace) return switchTo(slot, window.workspace, desktop.displays()[slot].workspace, identity);
     focus.focusWorkspace(window.display, identity);
     return reply.json(.{ .ok = true, .verified = focus.current() == identity, .target = identity });
 }
 
 pub fn visit(selection: commands.WorkspaceSelector, slot: usize) reply.Reply {
-    const display = &world.displays()[slot];
+    const display = &desktop.displays()[slot];
     const workspace = routing.resolveWorkspace(selection, slot) catch |err| return reply.failure(@errorName(err));
-    if (world.config().workspace_monitors == null) return switchTo(slot, workspace, display.workspace, null);
+    if (desktop.config().workspace_monitors == null) return switchTo(slot, workspace, display.workspace, null);
     return show(workspace, routing.currentWorkspace(slot), null);
 }
 

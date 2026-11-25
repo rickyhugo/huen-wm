@@ -1,7 +1,7 @@
 const native = @import("native.zig");
 const configuration = @import("config.zig");
 const reply = @import("reply.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const scene = @import("scene.zig");
 
 pub const State = enum { idle, pending, ready, failed };
@@ -11,7 +11,7 @@ var generation: u64 = 0;
 var state: State = .idle;
 var last_error: ?[]const u8 = null;
 
-pub fn evaluate(path: [*:0]const u8) ?world.Config {
+pub fn evaluate(path: [*:0]const u8) ?desktop.Config {
     return configuration.evaluate(path, null, null) catch |err| {
         native.platform_error(@errorName(err));
         return null;
@@ -24,7 +24,7 @@ pub fn markReady() void {
 
 pub fn start() reply.Reply {
     if (scene.pending()) return reply.failure("WorkspaceTransitionPending");
-    if (world.isSuspended()) return reply.failure("RuntimeSuspendedRestartToResume");
+    if (desktop.isSuspended()) return reply.failure("RuntimeSuspendedRestartToResume");
     const request_id = generation + 1;
     request.start(native.platform_config_path(), request_id) catch |err| return reply.failure(@errorName(err));
     generation = request_id;
@@ -38,7 +38,7 @@ pub fn waiting() bool {
 }
 
 // The finished load of the current request, or null when none finished, a newer request superseded it, or it failed.
-pub fn take() ?world.Config {
+pub fn take() ?desktop.Config {
     const completion = request.take() orelse return null;
     if (completion.generation != generation or state != .pending) return null;
     const candidate = switch (completion.result) {
@@ -48,7 +48,7 @@ pub fn take() ?world.Config {
             return null;
         },
     };
-    if (world.isSuspended()) {
+    if (desktop.isSuspended()) {
         reject("RuntimeSuspendedRestartToResume");
         return null;
     }

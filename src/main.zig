@@ -5,7 +5,7 @@ const commands = @import("command.zig");
 const parking = @import("parking.zig");
 const reply = @import("reply.zig");
 const journal = @import("journal.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const reload = @import("reload.zig");
 const edits = @import("edits.zig");
 const recovery = @import("recovery.zig");
@@ -33,7 +33,7 @@ export fn wm_initialize(path: [*:0]const u8) bool {
     const candidate = reload.evaluate(path) orelse return false;
     routing.adoptConfig(&candidate);
     reload.markReady();
-    world.markInitialized();
+    desktop.markInitialized();
     checkpoint.configure();
     return true;
 }
@@ -56,7 +56,7 @@ export fn wm_config_poll() void {
     checkpoint.configure();
     hotkeys.resetMode();
     reload.settle();
-    if (world.displays().len > 0) _ = routing.reroute();
+    if (desktop.displays().len > 0) _ = routing.reroute();
     native.platform_config_changed();
     placer.reconcile();
     presenter.publishStatus();
@@ -64,19 +64,19 @@ export fn wm_config_poll() void {
 
 export fn wm_tick() void {
     edits.pollClose();
-    if (!world.isInitialized()) return;
+    if (!desktop.isInitialized()) return;
     defer presenter.present();
-    var displays: world.DisplayScan = undefined;
-    world.scanDisplays(&displays);
+    var displays: desktop.DisplayScan = undefined;
+    desktop.scanDisplays(&displays);
     routing.cacheShown();
-    world.stageDisplays(&displays);
+    desktop.stageDisplays(&displays);
     if (displays.changed) {
-        if (world.displays().len != 0) placer.noteTopologyChange();
+        if (desktop.displays().len != 0) placer.noteTopologyChange();
         scene.invalidate();
         hotkeys.dropShortcuts();
     }
-    world.commitDisplays(&displays);
-    if (world.displays().len == 0) return;
+    desktop.commitDisplays(&displays);
+    if (desktop.displays().len == 0) return;
     recall.load();
     var buffer: [1024]native.WMWindow = undefined;
     const observed = discovery.scan(&buffer);
@@ -85,14 +85,14 @@ export fn wm_tick() void {
     const observed_focus = discovery.adopt(observed, recoveries);
     discovery.retire(observed);
     checkpoint.restore();
-    if (!world.isSuspended() and !scene.pending()) _ = routing.reroute();
+    if (!desktop.isSuspended() and !scene.pending()) _ = routing.reroute();
     focus.observe(observed_focus, true);
     focus.dropMissing();
-    world.ensureSelection();
+    desktop.ensureSelection();
     routing.trackCurrentDisplay();
     placer.reconcile();
     if (checkpoint.takeFocusPending()) {
-        focus.focusWorkspace(world.displays()[world.activeDisplay()].identity, null);
+        focus.focusWorkspace(desktop.displays()[desktop.activeDisplay()].identity, null);
     }
 }
 
@@ -120,7 +120,7 @@ export fn wm_hotkey(commandText: [*:0]const u8) void {
 
 export fn wm_command(commandText: [*:0]const u8) reply.Reply {
     defer presenter.present();
-    const command = commands.parse(std.mem.span(commandText), world.config().workspace_count) catch |err| return reply.failure(@errorName(err));
+    const command = commands.parse(std.mem.span(commandText), desktop.config().workspace_count) catch |err| return reply.failure(@errorName(err));
     switch (command) {
         .status, .windows, .monitors, .workspaces, .wrong => {},
         .quit, .restore => hotkeys.dropShortcuts(),
@@ -140,11 +140,11 @@ export fn wm_command(commandText: [*:0]const u8) reply.Reply {
         .restore => return restore(),
         else => {},
     }
-    if (world.isSuspended()) return reply.failure("RuntimeSuspendedRestartToResume");
+    if (desktop.isSuspended()) return reply.failure("RuntimeSuspendedRestartToResume");
     if (scene.pending()) return reply.failure("WorkspaceTransitionPending");
-    if (world.displays().len == 0) return reply.failure("NoDisplays");
+    if (desktop.displays().len == 0) return reply.failure("NoDisplays");
     focus.observeCommandState();
-    const slot = world.activeDisplay();
+    const slot = desktop.activeDisplay();
     switch (command) {
         .workspace => |selection| return scene.visit(selection, slot),
         .focus_monitor => |selection| return focus.toMonitor(selection, slot),
@@ -173,7 +173,7 @@ fn restore() reply.Reply {
     reload.cancel();
     scene.cancel();
     checkpoint.freeze();
-    world.markSuspended();
+    desktop.markSuspended();
     const outstanding = restoreWindows();
     if (outstanding == 0) {
         checkpoint.save(true);
@@ -197,7 +197,7 @@ export fn wm_input_poll() void {
 
 export fn wm_shutdown() bool {
     checkpoint.freeze();
-    world.markSuspended();
+    desktop.markSuspended();
     edits.cancelClose(false);
     presenter.deactivate();
     reload.cancel();

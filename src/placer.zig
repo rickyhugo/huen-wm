@@ -4,7 +4,7 @@ const commands = @import("command.zig");
 const tiling = @import("layout.zig");
 const size_bounds = @import("bounds.zig");
 const parking = @import("parking.zig");
-const world = @import("world.zig");
+const desktop = @import("desktop.zig");
 const journal = @import("journal.zig");
 const recovery = @import("recovery.zig");
 const routing = @import("routing.zig");
@@ -12,9 +12,9 @@ const scene = @import("scene.zig");
 const focus = @import("focus.zig");
 const allocator = std.heap.c_allocator;
 const text = native.text;
-const Rect = world.Rect;
-const Window = world.Window;
-const Display = world.Display;
+const Rect = desktop.Rect;
+const Window = desktop.Window;
+const Display = desktop.Display;
 
 const snap_back_window: f64 = 1.0;
 const launch_grace: f64 = 1.0;
@@ -23,20 +23,20 @@ const launch_grace: f64 = 1.0;
 var topology_changed_at: f64 = -std.math.inf(f64);
 
 pub fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
-    const source = world.windows()[source_index];
-    const state = world.workspaceLayout(source.display, source.workspace);
-    if (state.layout == .dwindle) return world.layouts().resizePoints(source.identity, axis, delta, world.config().gap);
+    const source = desktop.windows()[source_index];
+    const state = desktop.workspaceLayout(source.display, source.workspace);
+    if (state.layout == .dwindle) return desktop.layouts().resizePoints(source.identity, axis, delta, desktop.config().gap);
     if (axis != .width) return error.MasterHeightResizeUnsupported;
     var indices: [1024]usize = undefined;
     var count: usize = 0;
-    for (world.windows(), 0..) |window, index| {
+    for (desktop.windows(), 0..) |window, index| {
         if (window.display != source.display or window.workspace != source.workspace or !window.visible() or window.floating) continue;
         indices[count] = index;
         count += 1;
     }
     if (count < 2) return 0;
-    const area = world.displayArea(source.display);
-    const available = area.width - tiling.innerGap(area.width, world.config().gap);
+    const area = desktop.displayArea(source.display);
+    const available = area.width - tiling.innerGap(area.width, desktop.config().gap);
     const limits = switch (tiling.leadingRange(available, available * state.ratio, masterSides(indices[0..count]))) {
         .fits => |span| span,
         .overlaps => return 0,
@@ -58,14 +58,14 @@ pub const Transaction = struct {
     pub fn begin(scope: Scope) !Transaction {
         const store = try allocator.create(tiling.Store);
         errdefer allocator.destroy(store);
-        store.* = world.layouts().*;
-        const intent = try allocator.dupe(Window, world.windows());
+        store.* = desktop.layouts().*;
+        const intent = try allocator.dupe(Window, desktop.windows());
         errdefer allocator.free(intent);
-        const screens = try allocator.dupe(Display, world.displays());
+        const screens = try allocator.dupe(Display, desktop.displays());
         errdefer allocator.free(screens);
-        const originals = try allocator.alloc(?Rect, world.windows().len);
+        const originals = try allocator.alloc(?Rect, desktop.windows().len);
         errdefer allocator.free(originals);
-        for (world.windows(), 0..) |window, index| {
+        for (desktop.windows(), 0..) |window, index| {
             originals[index] = null;
             const included = switch (scope) {
                 .all => true,
@@ -73,14 +73,14 @@ pub const Transaction = struct {
                 .pair => |identities| identities[0] == window.display or identities[1] == window.display,
             };
             if (!included) continue;
-            if (world.displayBlocked(window.display)) return error.NativeFullscreenBlocksPlacement;
+            if (desktop.displayBlocked(window.display)) return error.NativeFullscreenBlocksPlacement;
             if (window.observation.stale and (window.observation.onscreen or window.parked)) return error.StaleWindowBlocksPlacement;
             if (!window.eligible()) continue;
             var frame: Rect = undefined;
             if (!native.platform_read_frame(window.identity, &frame)) return error.PlacementSnapshotUnreadable;
             originals[index] = frame;
         }
-        return .{ .store = store, .intent = intent, .screens = screens, .originals = originals, .selected = world.selected() };
+        return .{ .store = store, .intent = intent, .screens = screens, .originals = originals, .selected = desktop.selected() };
     }
     pub fn deinit(self: Transaction) void {
         allocator.destroy(self.store);
@@ -88,13 +88,13 @@ pub const Transaction = struct {
         allocator.free(self.screens);
         allocator.free(self.originals);
     }
-    // `attempted` holds indices into `world.windows()` in the order their placement was attempted.
+    // `attempted` holds indices into `desktop.windows()` in the order their placement was attempted.
     fn rollback(self: Transaction, attempted: []const usize) void {
         recovery.save(self.intent);
         var remaining = attempted.len;
         while (remaining > 0) {
             remaining -= 1;
-            const identity = world.windows()[attempted[remaining]].identity;
+            const identity = desktop.windows()[attempted[remaining]].identity;
             const original_index = self.identityIndex(identity);
             const original = self.originals[original_index] orelse continue;
             var restored = original;
@@ -105,10 +105,10 @@ pub const Transaction = struct {
             intent.parked_at = null;
             intent.placement_error = "Placement rollback rejected; recovery ownership retained";
         }
-        world.layouts().* = self.store.*;
-        @memcpy(world.windows(), self.intent);
-        @memcpy(world.displays(), self.screens);
-        world.setSelected(self.selected);
+        desktop.layouts().* = self.store.*;
+        @memcpy(desktop.windows(), self.intent);
+        @memcpy(desktop.displays(), self.screens);
+        desktop.setSelected(self.selected);
     }
     pub fn abort(self: Transaction, err: anyerror) []const u8 {
         self.rollback(&.{});
@@ -126,18 +126,18 @@ pub const Transaction = struct {
         }
         var order: [1024]usize = undefined;
         var count: usize = 0;
-        for (world.windows(), 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and window.visible()) {
+        for (desktop.windows(), 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and window.visible()) {
             order[count] = index;
             count += 1;
         };
         const shown = count;
-        for (world.windows(), 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and !window.visible()) {
+        for (desktop.windows(), 0..) |window, index| if (self.originals[self.identityIndex(window.identity)] != null and !window.visible()) {
             order[count] = index;
             count += 1;
         };
         std.mem.sort(usize, order[shown..count], {}, backToFront);
         for (order[0..count], 0..) |index, position| {
-            const window = &world.windows()[index];
+            const window = &desktop.windows()[index];
             const outcome = if (window.visible()) placeVisible(window) else parkWindow(window);
             if (outcome == .applied) continue;
             // An application that rejects its tile size must not block every other window. Float it, as reconcile does,
@@ -155,72 +155,72 @@ pub const Transaction = struct {
     }
     // Unknown stack positions are `maxInt(u32)`, so they come first.
     fn backToFront(_: void, first: usize, second: usize) bool {
-        return world.windows()[first].observation.stack_order > world.windows()[second].observation.stack_order;
+        return desktop.windows()[first].observation.stack_order > desktop.windows()[second].observation.stack_order;
     }
 };
 
 fn floatRejectedTile(window: *Window) void {
     if (window.managedFullscreen()) {
-        world.workspaceLayout(window.display, window.workspace).fullscreen = null;
+        desktop.workspaceLayout(window.display, window.workspace).fullscreen = null;
         placementFailure(window, "Application rejected managed fullscreen; underlying layout retained");
         return;
     }
     if (window.floating) return;
     window.floating = true;
     window.placed = null;
-    window.floating_frame = world.boundedFloating(window.parking_frame, world.displayArea(window.display));
+    window.floating_frame = desktop.boundedFloating(window.parking_frame, desktop.displayArea(window.display));
     placementFailure(window, "Application rejected tile; retrying with floating recovery geometry");
 }
 
 pub fn deriveGoals() bool {
-    for (&world.layouts().roots) |*slot| if (slot.*) |*state| {
-        if (world.displayIndex(state.display) == null) {
-            world.layouts().discard(state);
+    for (&desktop.layouts().roots) |*slot| if (slot.*) |*state| {
+        if (desktop.displayIndex(state.display) == null) {
+            desktop.layouts().discard(state);
             slot.* = null;
         }
     };
-    for (world.displays()) |display| for (0..world.config().workspace_count) |workspace| {
-        _ = world.workspaceLayout(display.identity, workspace);
+    for (desktop.displays()) |display| for (0..desktop.config().workspace_count) |workspace| {
+        _ = desktop.workspaceLayout(display.identity, workspace);
     };
     var members: [1024]tiling.Member = undefined;
-    world.layouts().sync(world.layoutMembers(&members), focus.current(), world.config().gap) catch |err| {
+    desktop.layouts().sync(desktop.layoutMembers(&members), focus.current(), desktop.config().gap) catch |err| {
         journal.setError(@errorName(err));
         return false;
     };
-    for (&world.layouts().roots) |*slot| if (slot.*) |*state| {
-        const display = world.displays()[world.displayIndex(state.display) orelse continue];
-        world.layouts().arrange(state, display.area(), world.config().gap);
+    for (&desktop.layouts().roots) |*slot| if (slot.*) |*state| {
+        const display = desktop.displays()[desktop.displayIndex(state.display) orelse continue];
+        desktop.layouts().arrange(state, display.area(), desktop.config().gap);
     };
-    for (world.displays()) |display| {
-        if (world.displayBlocked(display.identity)) continue;
+    for (desktop.displays()) |display| {
+        if (desktop.displayBlocked(display.identity)) continue;
         var indices: [1024]usize = undefined;
         var count: usize = 0;
-        for (world.windows(), 0..) |window, index| if (window.display == display.identity and window.visible() and !window.floating) {
+        for (desktop.windows(), 0..) |window, index| if (window.display == display.identity and window.visible() and !window.floating) {
             indices[count] = index;
             count += 1;
         };
         if (count == 0) continue;
-        const workspace = world.workspaceLayout(display.identity, display.workspace);
+        const workspace = desktop.workspaceLayout(display.identity, display.workspace);
         const area = display.area();
         if (count == 1) {
-            const lone = &world.windows()[indices[0]];
+            const lone = &desktop.windows()[indices[0]];
             lone.goal = area;
-            if (world.config().single_window_max_width > 0) {
-                lone.goal.width = @min(area.width, @max(world.config().single_window_max_width, lone.bounds.minimumAt(.width)));
+            if (desktop.config().single_window_max_width > 0) {
+                lone.goal.width = @min(area.width, @max(desktop.config().single_window_max_width, lone.bounds.minimumAt(.width)));
                 lone.goal.left += (area.width - lone.goal.width) / 2;
             }
             continue;
         }
         if (workspace.layout == .master) {
-            const columns = tiling.split(area, .width, workspace.ratio, world.config().gap, masterSides(indices[0..count]));
-            world.windows()[indices[0]].goal = columns[0];
+            const columns = tiling.split(area, .width, workspace.ratio, desktop.config().gap, masterSides(indices[0..count]));
+            desktop.windows()[indices[0]].goal = columns[0];
             const rows: f64 = @floatFromInt(count - 1);
-            const spacing = @min(world.config().gap, columns[1].height / (2 * rows));
+            const spacing = @min(desktop.config().gap, columns[1].height / (2 * rows));
             const height = (columns[1].height - spacing * (rows - 1)) / rows;
             var bound_height: [1024]?f64 = @splat(null);
             var share = height;
             var required = spacing * (rows - 1);
-            for (indices[1..count]) |index| required += rowMinimum(world.windows()[index]);
+            for (indices[1..count]) |index| required += rowMinimum(desktop.windows()[index]);
             var extra: f64 = 0;
             if (required <= columns[1].height) {
                 var remaining = columns[1].height - spacing * (rows - 1);
@@ -229,8 +229,8 @@ pub fn deriveGoals() bool {
                 while (!settled) {
                     settled = true;
                     for (indices[1..count], bound_height[1..count]) |index, *fixed| if (fixed.* == null) {
-                        const minimum = rowMinimum(world.windows()[index]);
-                        const ceiling_height: ?f64 = if (world.windows()[index].bounds.ceilingAt(.height)) |ceiling| if (ceiling.binds(share)) @max(minimum, ceiling.accepted) else null else null;
+                        const minimum = rowMinimum(desktop.windows()[index]);
+                        const ceiling_height: ?f64 = if (desktop.windows()[index].bounds.ceilingAt(.height)) |ceiling| if (ceiling.binds(share)) @max(minimum, ceiling.accepted) else null else null;
                         if (minimum > share) {
                             fixed.* = minimum;
                         } else if (ceiling_height) |capped| {
@@ -250,10 +250,10 @@ pub fn deriveGoals() bool {
                 frame.top += @as(f64, @floatFromInt(row)) * (share + spacing) + shift;
                 frame.height = if (fixed) |resolved| resolved + extra else share;
                 shift += frame.height - share;
-                world.windows()[index].goal = frame;
+                desktop.windows()[index].goal = frame;
             }
         } else for (indices[0..count]) |index| {
-            if (world.layouts().goal(world.windows()[index].identity)) |frame| world.windows()[index].goal = frame;
+            if (desktop.layouts().goal(desktop.windows()[index].identity)) |frame| desktop.windows()[index].goal = frame;
         }
     }
     return true;
@@ -267,12 +267,12 @@ fn masterSides(indices: []const usize) [2]tiling.Side {
     var minimums: [2]f64 = @splat(tiling.minimum_tile_extent);
     for (indices, 0..) |index, ordinal| {
         const slot: usize = if (ordinal == 0) 0 else 1;
-        minimums[slot] = @max(minimums[slot], world.windows()[index].bounds.minimumAt(.width));
+        minimums[slot] = @max(minimums[slot], desktop.windows()[index].bounds.minimumAt(.width));
     }
-    var stack_ceiling = world.windows()[indices[1]].bounds.ceilingAt(.width);
-    for (indices[2..]) |index| stack_ceiling = tiling.combineAcross(stack_ceiling, world.windows()[index].bounds.ceilingAt(.width));
+    var stack_ceiling = desktop.windows()[indices[1]].bounds.ceilingAt(.width);
+    for (indices[2..]) |index| stack_ceiling = tiling.combineAcross(stack_ceiling, desktop.windows()[index].bounds.ceilingAt(.width));
     return .{
-        .{ .minimum = minimums[0], .compact = minimums[0], .ceiling = world.windows()[indices[0]].bounds.ceilingAt(.width) },
+        .{ .minimum = minimums[0], .compact = minimums[0], .ceiling = desktop.windows()[indices[0]].bounds.ceilingAt(.width) },
         .{ .minimum = minimums[1], .compact = minimums[1], .ceiling = stack_ceiling },
     };
 }
@@ -293,20 +293,20 @@ fn placementFailure(window: *Window, message: []const u8) void {
 }
 
 fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
-    const area = world.displays()[world.displayIndex(displayIdentity).?].frame;
+    const area = desktop.displays()[desktop.displayIndex(displayIdentity).?].frame;
     const bottom = area.top + area.height;
-    const horizontalContact = world.overlap(actual, area, .horizontal);
+    const horizontalContact = desktop.overlap(actual, area, .horizontal);
     return @abs(actual.width - target.width) <= 2 and @abs(actual.height - target.height) <= 2 and
         @abs(actual.left - target.left) <= 2 and @abs(actual.left + actual.width - target.left - target.width) <= 2 and
         horizontalContact > 0 and horizontalContact <= 3 and
         actual.top >= area.top and actual.top <= bottom and actual.top + actual.height >= bottom and
-        !world.overlapsOtherDisplays(actual, displayIdentity);
+        !desktop.overlapsOtherDisplays(actual, displayIdentity);
 }
 
 fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32, actual: *Rect) bool {
     _ = native.platform_frame(identity, target, 0, .verified_placement);
     if (!native.platform_read_frame(identity, actual)) return false;
-    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else world.framesNear(actual.*, target, 2);
+    return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else desktop.framesNear(actual.*, target, 2);
 }
 
 // A refusal carries the frame the application accepted instead.
@@ -374,7 +374,7 @@ fn placeVisible(window: *Window) PlacementOutcome {
 // lowers itself. A resize it blocks clears it, and placement learns it again if the application still refuses.
 pub fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
     var forgot = false;
-    for (world.windows()) |*window| {
+    for (desktop.windows()) |*window| {
         if (window.display != display or window.workspace != workspace or window.floating) continue;
         if (std.meta.eql(window.bounds, size_bounds.Bounds{})) continue;
         window.bounds = .{};
@@ -386,12 +386,12 @@ pub fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
 
 fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
-    const area = world.displays()[world.displayIndex(window.display) orelse return false].area();
+    const area = desktop.displays()[desktop.displayIndex(window.display) orelse return false].area();
     const previous = window.bounds;
     const next = previous.learn(.{ requested.width, requested.height }, .{ accepted.width, accepted.height }, .{ area.width, area.height });
     if (std.meta.eql(next, previous)) return false;
     window.bounds = next;
-    if (deriveGoals() and for (world.windows()) |other| {
+    if (deriveGoals() and for (desktop.windows()) |other| {
         if (other.display != window.display or !other.visible() or other.floating or other.managedFullscreen()) continue;
         if (other.goal.width < other.bounds.minimumAt(.width) - 2 or other.goal.height < other.bounds.minimumAt(.height) - 2) break false;
     } else true) return true;
@@ -405,7 +405,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
     const outcome: PlacementOutcome = outcome: {
         var actual: Rect = undefined;
         if (!native.platform_read_frame(window.identity, &actual)) break :outcome .unreadable;
-        const area = world.displays()[world.displayIndex(window.display) orelse break :outcome .no_corner].frame;
+        const area = desktop.displays()[desktop.displayIndex(window.display) orelse break :outcome .no_corner].frame;
         // A parked window keeps the size its application gave it, so a corner is never written with a size the application refuses.
         if (window.parked) {
             window.parking_frame.width = actual.width;
@@ -417,8 +417,8 @@ fn parkWindow(window: *Window) PlacementOutcome {
             return .applied;
         };
         // A frame that only touches the display is a parked strip that a Dock resize exposed.
-        const horizontal = world.overlap(actual, area, .horizontal);
-        const vertical = world.overlap(actual, area, .vertical);
+        const horizontal = desktop.overlap(actual, area, .horizontal);
+        const vertical = desktop.overlap(actual, area, .vertical);
         if (window.parked and window.parked_at != null and horizontal > 3 and vertical > 3) {
             const now = native.platform_monotonic();
             if (now - topology_changed_at > 2) {
@@ -437,7 +437,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
         }
         var attempted: PlacementOutcome = .no_corner;
         for (candidates) |candidate| {
-            if (world.overlapsOtherDisplays(candidate, window.display)) continue;
+            if (desktop.overlapsOtherDisplays(candidate, window.display)) continue;
             attempted = attemptVisibility(window, candidate, true);
             if (attempted != .rolled_back) break;
         }
@@ -448,12 +448,12 @@ fn parkWindow(window: *Window) PlacementOutcome {
 }
 
 pub fn reconcile() void {
-    if (world.isSuspended() or scene.pending() or world.displays().len == 0 or routing.blocked()) return;
+    if (desktop.isSuspended() or scene.pending() or desktop.displays().len == 0 or routing.blocked()) return;
     if (!deriveGoals()) return;
     var passes: usize = 0;
     while (true) : (passes += 1) {
         const relayout = place: {
-            for (world.windows()) |*window| {
+            for (desktop.windows()) |*window| {
                 if (window.visible() and !window.floating and !window.managedFullscreen() and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
                     window.floating = true;
                     window.placed = null;
@@ -463,8 +463,8 @@ pub fn reconcile() void {
                 }
             }
             const now = native.platform_monotonic();
-            for (world.windows()) |*window| {
-                if (!window.eligible() or world.displayBlocked(window.display)) continue;
+            for (desktop.windows()) |*window| {
+                if (!window.eligible() or desktop.displayBlocked(window.display)) continue;
                 if (!window.visible()) {
                     _ = parkWindow(window);
                     continue;
@@ -478,17 +478,17 @@ pub fn reconcile() void {
                 settle: {
                     if (window.floating or window.managedFullscreen()) break :settle;
                     const placed = if (window.placed) |*active| active else break :settle;
-                    if (!world.framesNear(target, placed.frame, size_bounds.tolerance) or now - placed.at > snap_back_window) {
+                    if (!desktop.framesNear(target, placed.frame, size_bounds.tolerance) or now - placed.at > snap_back_window) {
                         window.placed = null;
                         break :settle;
                     }
                     if (now < placed.at or window.observation.motion != .idle) break :settle;
                     const observed = window.observation.frame;
-                    if (world.sizesNear(observed, placed.frame, size_bounds.tolerance)) {
+                    if (desktop.sizesNear(observed, placed.frame, size_bounds.tolerance)) {
                         placed.snap_candidate = null;
                         break :settle;
                     }
-                    if (placed.snap_candidate) |previous| if (world.sizesNear(observed, previous, size_bounds.tolerance)) {
+                    if (placed.snap_candidate) |previous| if (desktop.sizesNear(observed, previous, size_bounds.tolerance)) {
                         const requested = placed.frame;
                         window.placed = null;
                         if (learnBounds(window, requested, observed)) break :place true;
@@ -498,10 +498,10 @@ pub fn reconcile() void {
                     native.platform_config_changed();
                     continue;
                 }
-                const duration = if (window.floating_restore and !window.managedFullscreen()) 0 else world.config().duration;
-                const needs_write = !world.framesNear(window.observation.frame, target, size_bounds.tolerance);
+                const duration = if (window.floating_restore and !window.managedFullscreen()) 0 else desktop.config().duration;
+                const needs_write = !desktop.framesNear(window.observation.frame, target, size_bounds.tolerance);
                 var accepted: Rect = window.observation.frame;
-                if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and world.framesNear(accepted, target, 2)))) {
+                if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and desktop.framesNear(accepted, target, 2)))) {
                     if (!window.floating and !window.managedFullscreen() and needs_write) window.placed = .{ .frame = target, .at = now + duration };
                     continue;
                 }
@@ -522,19 +522,19 @@ pub fn reconcile() void {
             }
             break :place false;
         };
-        if (!relayout or passes == world.windows().len) break;
+        if (!relayout or passes == desktop.windows().len) break;
         if (!deriveGoals()) return;
     }
     var borderIdentity: u64 = 0;
-    var borderWidth = world.config().border_width;
-    var borderColor = world.config().border_color;
-    if (focus.current()) |identity| if (world.windowIndex(identity)) |index| {
-        const window = world.windows()[index];
+    var borderWidth = desktop.config().border_width;
+    var borderColor = desktop.config().border_color;
+    if (focus.current()) |identity| if (desktop.windowIndex(identity)) |index| {
+        const window = desktop.windows()[index];
         // Border actions resolve against the current title, so a reload or a title change applies without rediscovery.
-        const decision = world.ruleDecision(&window.observation);
+        const decision = desktop.ruleDecision(&window.observation);
         borderWidth = decision.border_width orelse borderWidth;
         borderColor = decision.border_color orelse borderColor;
-        if (window.visible() and !window.parked and (decision.border orelse (world.config().border_single_window or for (world.windows()) |other| {
+        if (window.visible() and !window.parked and (decision.border orelse (desktop.config().border_single_window or for (desktop.windows()) |other| {
             if (other.identity != window.identity and other.display == window.display and other.workspace == window.workspace and other.visible()) break true;
         } else false))) borderIdentity = identity;
     };
