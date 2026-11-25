@@ -16,6 +16,9 @@ const parking = @import("parking.zig");
 const delivery = @import("delivery.zig");
 const swipe = @import("swipe.zig");
 const memory = @import("memory.zig");
+const reply = @import("reply.zig");
+const json = reply.json;
+const failure = reply.failure;
 const allocator = std.heap.c_allocator;
 const Rect = native.WMRect;
 const Layout = commands.Layout;
@@ -57,7 +60,6 @@ var global_previous: ?usize = null;
 // selected display resolves "current workspace" from this display.
 var current_display: ?u32 = null;
 var routing_blocked = false;
-var reply_buffer: ?[:0]u8 = null;
 var initialized = false;
 var suspended = false;
 const Transition = struct { display: u32, workspace: usize, from: usize, generation: u64, focus_target: ?u64 };
@@ -445,17 +447,6 @@ pub fn main(initial: std.process.Init.Minimal) u8 {
     return @intCast(native.platform_main(@intCast(arguments.len), @ptrCast(arguments.ptr)));
 }
 const text = native.text;
-fn json(value: anytype) [*:0]const u8 {
-    if (reply_buffer) |previous| allocator.free(previous);
-    reply_buffer = null;
-    const encoded = std.json.Stringify.valueAlloc(allocator, value, .{}) catch return "{\"error\":\"out of memory\"}\n";
-    defer allocator.free(encoded);
-    reply_buffer = std.fmt.allocPrintSentinel(allocator, "{s}\n", .{encoded}, 0) catch return "{\"error\":\"out of memory\"}\n";
-    return reply_buffer.?.ptr;
-}
-fn failure(message: []const u8) [*:0]const u8 {
-    return json(.{ .err_message = message, .@"error" = true });
-}
 export fn wm_initialize(path: [*:0]const u8) bool {
     const candidate = configuration.evaluate(path, null, null) catch |err| {
         native.platform_error(@errorName(err));
