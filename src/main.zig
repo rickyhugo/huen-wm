@@ -22,6 +22,8 @@ const world = @import("world.zig");
 const Window = world.Window;
 const Display = world.Display;
 const Config = world.Config;
+const reload = @import("reload.zig");
+const edits = @import("edits.zig");
 const json = reply.json;
 const failure = reply.failure;
 const allocator = std.heap.c_allocator;
@@ -34,9 +36,6 @@ const launch_grace: f64 = 1.0;
 var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var active_mode: usize = 0;
-const PendingClose = struct { identity: u64, pid: c_int, process_token: f64, deadline: f64 };
-var pending_close: ?PendingClose = null;
-var close_state: enum { idle, pending, closed, termination_requested, termination_rejected, expired, cancelled } = .idle;
 var last_observed_focus: ?u64 = null;
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
@@ -67,10 +66,6 @@ var hotkey_watch: delivery.Watch = .{};
 var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
 var swipe_recognizer: swipe.Recognizer = .{};
 var gestures_enabled = false;
-var config_request: configuration.Request = .{};
-var config_generation: u64 = 0;
-var config_state: enum { idle, pending, ready, failed } = .idle;
-var config_error: ?[]const u8 = null;
 const StatusPresentation = union(enum) {
     disabled,
     visible: struct { display_identity: ?u32, content: native.WMStatusPresentation },
@@ -407,14 +402,14 @@ fn publishStatus() void {
             row.checked = placed == index;
             row.enabled = display != null and !world.isSuspended() and transition == null;
         }
-        const reload = &presentation.rows[world.config().workspace_count];
-        statusText(&reload.title, "Reload configuration", 79);
-        statusText(&reload.command, "reload", 127);
-        reload.enabled = !world.isSuspended() and transition == null and !config_request.inFlight();
-        const quit = &presentation.rows[world.config().workspace_count + 1];
-        statusText(&quit.title, "Quit", 79);
-        statusText(&quit.command, "quit", 127);
-        quit.enabled = true;
+        const reload_row = &presentation.rows[world.config().workspace_count];
+        statusText(&reload_row.title, "Reload configuration", 79);
+        statusText(&reload_row.command, "reload", 127);
+        reload_row.enabled = !world.isSuspended() and transition == null and !reload.inFlight();
+        const quit_row = &presentation.rows[world.config().workspace_count + 1];
+        statusText(&quit_row.title, "Quit", 79);
+        statusText(&quit_row.command, "quit", 127);
+        quit_row.enabled = true;
         presentation.row_count = world.config().workspace_count + 2;
         break :status .{ .visible = .{ .display_identity = if (display) |current| current.identity else null, .content = presentation } };
     };
@@ -435,13 +430,10 @@ pub fn main(initial: std.process.Init.Minimal) u8 {
 }
 const text = native.text;
 export fn wm_initialize(path: [*:0]const u8) bool {
-    const candidate = configuration.evaluate(path, null, null) catch |err| {
-        native.platform_error(@errorName(err));
-        return false;
-    };
+    const candidate = reload.evaluate(path) orelse return false;
     applyLayoutDefaults(&candidate);
     world.setConfig(&candidate);
-    config_state = .ready;
+    reload.markReady();
     world.markInitialized();
     configureSession();
     return true;
@@ -460,40 +452,22 @@ fn configureInput() void {
     gestures_enabled = world.config().swipe.enabled;
     native.huen_observe_gestures(gestures_enabled);
 }
-fn rejectConfig(message: [:0]const u8) void {
-    config_state = .failed;
-    config_error = message;
-    native.platform_error(message.ptr);
-}
 export fn wm_config_poll() void {
     // Cancelled requests must still drain while shutdown waits for the worker.
-    if (transition != null and config_state == .pending) return;
-    const completion = config_request.take() orelse return;
-    if (completion.generation != config_generation or config_state != .pending) return;
-    const candidate = switch (completion.result) {
-        .ready => |candidate| candidate,
-        .failed => |err| return rejectConfig(@errorName(err)),
-    };
-    if (world.isSuspended()) return rejectConfig("RuntimeSuspendedRestartToResume");
-    if (!native.platform_bindings(&candidate.modes[0].bindings, candidate.modes[0].binding_count)) return rejectConfig("HotkeyCollision");
+    if (transition != null and reload.waiting()) return;
+    const candidate = reload.take() orelse return;
+    if (!native.platform_bindings(&candidate.modes[0].bindings, candidate.modes[0].binding_count)) return reload.reject("HotkeyCollision");
     hotkey_watch.forgetPresses();
     applyLayoutDefaults(&candidate);
     world.setConfig(&candidate);
     configureInput();
     configureSession();
     active_mode = 0;
-    config_state = .ready;
-    config_error = null;
+    reload.settle();
     if (world.displays().len > 0) routing_blocked = !routeMembership();
     native.platform_config_changed();
     reconcile();
     publishStatus();
-}
-fn cancelConfig() void {
-    if (config_state != .pending) return;
-    config_request.cancel();
-    config_state = .failed;
-    config_error = "ConfigLoadCancelled";
 }
 fn applyLayoutDefaults(candidate: *const Config) void {
     var remap: [10]?usize = @splat(null);
@@ -1431,12 +1405,7 @@ fn persistPlacements() void {
     writePlacements(persisted.entries[0..persisted.count]);
 }
 export fn wm_tick() void {
-    if (pending_close) |pending| close: {
-        const observed = if (native.platform_monotonic() < pending.deadline) native.platform_close_state(pending.identity, pending.pid, pending.process_token) else -1;
-        close_state = if (native.platform_monotonic() >= pending.deadline) .expired else if (observed == 2) (if (native.platform_terminate_if_empty(pending.identity, pending.pid, pending.process_token)) .termination_requested else .termination_rejected) else if (observed == 1) .closed else break :close;
-        pending_close = null;
-        native.platform_close_cancel();
-    }
+    edits.pollClose();
     if (!world.isInitialized()) return;
     defer publishState();
     var observedDisplays: [32]native.WMDisplay = undefined;
@@ -2062,7 +2031,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .running = true,
                 .suspended = world.isSuspended(),
                 .active_mode = text(&world.config().modes[active_mode].name),
-                .close_state = close_state,
+                .close_state = edits.closeState(),
                 .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) },
                 .window_count = world.windows().len,
                 .display_count = world.displays().len,
@@ -2085,7 +2054,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     placement_memory.prune(native.platform_monotonic());
                     break :unexpired placement_memory.count;
                 }, .claimed = placement_claims },
-                .config_reload = .{ .request_id = config_generation, .state = config_state, .err_message = config_error },
+                .config_reload = reload.status(),
             });
         },
         .mode => |name| {
@@ -2096,12 +2065,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             active_mode = index;
             return json(.{ .ok = true, .active_mode = text(&mode.name) });
         },
-        .launch => |request| {
-            if (world.isSuspended()) return failure("RuntimeSuspendedRestartToResume");
-            const request_id = native.platform_launch(request.bundle.text(), request.new_instance, request.hidden);
-            if (request_id == 0) return failure("ApplicationNotFound");
-            return json(.{ .ok = true, .accepted = true, .request_id = request_id });
-        },
+        .launch => |request| return edits.launch(request),
         .wrong => |note| {
             if (!journal.enabled()) return failure("JournalDisabledByFilter");
             var length = @min(note.len, 200);
@@ -2114,13 +2078,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             if (!journal.append("mark", .{ .note = note[0..length], .window_count = world.windows().len, .parked_count = parked, .workspaces = shown[0..world.displays().len], .transition_error = journal.lastError() })) return failure("JournalAppendFailed");
             return json(.{ .ok = true });
         },
-        .exec_and_forget => |shell| {
-            if (world.isSuspended()) return failure("RuntimeSuspendedRestartToResume");
-            var terminated: [512:0]u8 = @splat(0);
-            @memcpy(terminated[0..shell.len], shell);
-            if (!native.platform_exec(&terminated)) return failure("ProcessLaunchFailed");
-            return json(.{ .ok = true, .accepted = true });
-        },
+        .exec_and_forget => |shell| return edits.exec(shell),
         .windows => {
             const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 }, maximum: struct { width: ?f64, height: ?f64 } };
             var items: [1024]Item = undefined;
@@ -2157,19 +2115,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
         },
         .reload => {
             if (transition != null) return failure("WorkspaceTransitionPending");
-            if (world.isSuspended()) return failure("RuntimeSuspendedRestartToResume");
-            const request_id = config_generation + 1;
-            config_request.start(native.platform_config_path(), request_id) catch |err| return failure(@errorName(err));
-            config_generation = request_id;
-            config_state = .pending;
-            config_error = null;
-            return json(.{ .ok = true, .accepted = true, .request_id = request_id });
+            return reload.start();
         },
         .quit, .restore => {
-            if (command == .restore and pending_close != null) close_state = .cancelled;
-            pending_close = null;
-            native.platform_close_cancel();
-            cancelConfig();
+            edits.cancelClose(command == .restore);
+            reload.cancel();
             cancelTransition();
             if (command == .quit) {
                 native.platform_quit();
@@ -2403,16 +2353,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     if (!transaction.commit()) return failure(journal.lastError() orelse "FullscreenPlacementFailed");
                     return json(.{ .ok = true, .verified = focusVerified(source.identity) });
                 },
-                .close => |quit_if_last| {
-                    if (pending_close != null) return failure("ClosePending");
-                    var process_token: f64 = 0;
-                    if (!native.platform_close(source.identity, quit_if_last, &process_token)) return failure("CloseRejected");
-                    if (quit_if_last) {
-                        pending_close = .{ .identity = source.identity, .pid = source.observation.pid, .process_token = process_token, .deadline = native.platform_monotonic() + 5 };
-                        close_state = .pending;
-                    }
-                    return json(.{ .ok = true, .accepted = true });
-                },
+                .close => |quit_if_last| return edits.close(source, quit_if_last),
                 .toggle_floating => {
                     if (source.managedFullscreen()) return failure("ManagedFullscreenActive");
                     if (source.floating) {
@@ -2549,12 +2490,11 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
 export fn wm_shutdown() bool {
     freezeSession();
     world.markSuspended();
-    pending_close = null;
-    native.platform_close_cancel();
+    edits.cancelClose(false);
     status_active = false;
     native.platform_status_present(null);
-    cancelConfig();
-    if (config_request.inFlight()) return false;
+    reload.cancel();
+    if (reload.inFlight()) return false;
     if (!pointer_controls.stop(native.platform_monotonic())) return false;
     if (pointer_controls.forced_stop) native.platform_error("Input release drain exceeded 250 ms; tap teardown forced");
     cancelTransition();
