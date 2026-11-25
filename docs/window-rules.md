@@ -4,7 +4,7 @@ Rules run in array order when a window is discovered. Later matching rules
 replace only the actions they specify. A workspace-only rule does not undo an
 earlier floating action. Without a floating decision, a window starts tiled.
 The first observed title is used, even if it is empty. Later title changes do
-not reapply rules.
+not reapply rules, except for the `focus_on_activate` and border actions.
 
 ```lua
 rules = {
@@ -16,6 +16,8 @@ rules = {
     },
     { bundle = { regex = "^com\\.google\\." }, title = { regex = "(?i)devtools" }, floating = true },
     { bundle = "com.apple.systempreferences", centered = true },
+    { bundle = "com.mitchellh.ghostty", border = false },
+    { bundle = "com.apple.Safari", title = { regex = "(?i)private" }, border_color = "#ff6b6b", border_width = 4 },
 }
 ```
 
@@ -43,8 +45,8 @@ Native discovery copies at most 511 UTF-8 bytes and reports whether the entire
 title fits. Truncated, unencodable, or NUL-containing titles never satisfy a title predicate.
 Bundle-only rules still match.
 
-Actions are optional `floating`, `workspace`, `geometry`, `centered`, and
-`focus_on_activate`. Workspace numbers are one-based in Lua. Geometry requires all four finite point values.
+Actions are optional `floating`, `workspace`, `geometry`, `centered`,
+`focus_on_activate`, `border`, `border_width`, and `border_color`. Workspace numbers are one-based in Lua. Geometry requires all four finite point values.
 `left` and `top` range from -10000 to 10000. `width` and `height` range from
 80 to 10000. Geometry implies `floating = true`; combining it with explicit
 `floating = false` in the same rule is invalid.
@@ -69,6 +71,15 @@ size and `centered` replaces its position. Combining it with explicit
 takes focus for the window on a hidden workspace, not on discovery, and uses
 the title at that time. See
 [activation requests](commands.md#activation-requests).
+
+`border`, `border_width`, and `border_color` style the focused-window border
+for matching windows. `border = false` hides it, and `border = true` shows it
+even when `border_single_window = false` would hide it. `border_width` ranges
+from 0 to 12, and `border_color` is a `"#rrggbb"` string, as in the global
+settings. A rule without them keeps the global values. Like
+`focus_on_activate`, these actions use the window's current title each time
+the border is drawn, so a title change or a configuration reload applies at
+once.
 
 Each matching rule replaces only its supplied actions. Geometry also supplies
 `floating = true`. A later explicit `floating = false` overrides that decision

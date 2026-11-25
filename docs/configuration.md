@@ -44,7 +44,7 @@ The example binds:
 
 ## Borders and motion
 
-`border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count.
+`border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count. [Window rules](window-rules.md) can hide the border or change its width and color for matching windows.
 
 `motion_duration = 0` disables movement animation and workspace snapshot capture. Durations are capped at 0.5 seconds.
 

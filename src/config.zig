@@ -178,6 +178,9 @@ pub fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callcon
         candidate.rules[index].geometry = rule.geometry;
         candidate.rules[index].centered = rule.centered;
         candidate.rules[index].focus_on_activate = rule.focus_on_activate;
+        candidate.rules[index].border = rule.border;
+        candidate.rules[index].border_width = rule.border_width;
+        candidate.rules[index].border_color = rule.border_color;
         if (rule.title) |title| {
             candidate.rules[index].title = .{ .kind = title.kind };
             try copyText(&candidate.rules[index].title.?.pattern, title.pattern);
@@ -191,7 +194,7 @@ const WireWorkspace = struct { name: []const u8, layout: Layout, ratio: f64, mon
 const WireBinding = struct { key: u32, modifiers: u32, command: []const u8 };
 const WireMode = struct { name: []const u8, bindings: []const WireBinding };
 const WireTitle = struct { kind: Rules.PatternKind, pattern: []const u8 };
-const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry, centered: bool, focus_on_activate: ?bool };
+const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, title: ?WireTitle, floating: ?bool, workspace: ?usize, geometry: ?Rules.Geometry, centered: bool, focus_on_activate: ?bool, border: ?bool = null, border_width: ?f64 = null, border_color: ?u32 = null };
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
@@ -292,6 +295,8 @@ fn validate(candidate: *const ConfigCandidate) !void {
             if (title.kind == .regex and native.platform_regex_match(&title.pattern, "", 0) < 0) return error.InvalidRegex;
         }
         if (rule.workspace) |workspace| if (workspace >= candidate.workspace_count) return error.InvalidWorkspace;
+        if (rule.border_width) |width| try checkNumber(width, 0, 12);
+        if (rule.border_color) |color| if (color > 0xffffff) return error.InvalidColor;
         if (rule.geometry) |geometry| {
             try checkNumber(geometry.left, -10000, 10000);
             try checkNumber(geometry.top, -10000, 10000);
@@ -398,6 +403,12 @@ fn fieldString(state: *native.lua_State, key: [*:0]const u8) !?[]const u8 {
     if (kind == native.LUA_TNIL) return null;
     if (kind != native.LUA_TSTRING) return error.ExpectedString;
     return luaText(state);
+}
+
+fn fieldColor(state: *native.lua_State, key: [*:0]const u8) !?u32 {
+    const color = (try fieldString(state, key)) orelse return null;
+    if (color.len != 7 or color[0] != '#') return error.InvalidColor;
+    return std.fmt.parseInt(u32, color[1..], 16) catch error.InvalidColor;
 }
 
 fn fieldBool(state: *native.lua_State, key: [*:0]const u8, default: anytype) !@TypeOf(default) {
@@ -513,10 +524,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     result.gap = try fieldNumber(state, "gap", 12, 0, 100);
     result.border_width = try fieldNumber(state, "border_width", 2, 0, 12);
     result.duration = try fieldNumber(state, "motion_duration", 0.12, 0, 0.5);
-    if (try fieldString(state, "border_color")) |color| {
-        if (color.len != 7 or color[0] != '#') return error.InvalidColor;
-        result.border_color = try std.fmt.parseInt(u32, color[1..], 16);
-    }
+    if (try fieldColor(state, "border_color")) |color| result.border_color = color;
     const layout = if (try fieldString(state, "layout")) |name| std.meta.stringToEnum(Layout, name) orelse return error.InvalidLayout else .dwindle;
     const ratio = try fieldNumber(state, "master_ratio", 0.55, 0.1, 0.9);
     for (&result.workspaces) |*workspace| {
@@ -579,7 +587,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         result.rule_count = try arrayCount(state, 64);
         for (0..result.rule_count) |index| {
             _ = native.lua_rawgeti(state, -1, @intCast(index + 1));
-            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry", "centered", "focus_on_activate" });
+            try checkKeys(state, &.{ "bundle", "title", "floating", "workspace", "geometry", "centered", "focus_on_activate", "border", "border_width", "border_color" });
             const rule = &result.rules[index];
             if (rawField(state, "bundle") == native.LUA_TTABLE) {
                 const pattern = try patternField(state);
@@ -615,6 +623,11 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
                 rule.floating = true;
             }
             rule.focus_on_activate = try fieldBool(state, "focus_on_activate", @as(?bool, null));
+            rule.border = try fieldBool(state, "border", @as(?bool, null));
+            const has_border_width = rawField(state, "border_width") != native.LUA_TNIL;
+            pop(state);
+            if (has_border_width) rule.border_width = try fieldNumber(state, "border_width", null, 0, 12);
+            rule.border_color = try fieldColor(state, "border_color");
             const workspace = try fieldNumber(state, "workspace", 0, 0, @floatFromInt(result.workspace_count));
             if (@floor(workspace) != workspace) return error.InvalidWorkspace;
             if (workspace > 0) rule.workspace = @as(usize, @intFromFloat(workspace)) - 1;
@@ -650,6 +663,9 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         .geometry = rule.geometry,
         .centered = rule.centered,
         .focus_on_activate = rule.focus_on_activate,
+        .border = rule.border,
+        .border_width = rule.border_width,
+        .border_color = rule.border_color,
     };
     const buffer = try allocator.alloc(u8, max_response);
     defer allocator.free(buffer);

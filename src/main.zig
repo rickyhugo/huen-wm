@@ -1479,13 +1479,19 @@ fn reconcile() void {
         if (!deriveGoals()) return;
     }
     var borderIdentity: u64 = 0;
+    var borderWidth = config.border_width;
+    var borderColor = config.border_color;
     if (focused) |identity| if (windowIndex(identity)) |index| {
         const window = windows.items[index];
-        if (visible(window) and !window.parked and (config.border_single_window or for (windows.items) |other| {
+        // Border actions resolve against the current title, so a reload or a title change applies without rediscovery.
+        const decision = rules.resolve(config.rules[0..config.rule_count], .{ .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .title_complete = window.observation.title_complete });
+        borderWidth = decision.border_width orelse borderWidth;
+        borderColor = decision.border_color orelse borderColor;
+        if (visible(window) and !window.parked and (decision.border orelse (config.border_single_window or for (windows.items) |other| {
             if (other.identity != window.identity and other.display == window.display and other.workspace == window.workspace and visible(other)) break true;
-        } else false)) borderIdentity = identity;
+        } else false))) borderIdentity = identity;
     };
-    native.platform_border(borderIdentity, config.border_width, config.border_color);
+    native.platform_border(borderIdentity, borderWidth, borderColor);
     saveParkingJournal(&.{});
 }
 fn reportParkingJournal(message: []const u8, err: anyerror) void {
