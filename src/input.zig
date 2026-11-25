@@ -85,15 +85,6 @@ fn contains(rect: interaction.Rect, point: macos.CGPoint) bool {
         point.vertical >= rect.top and point.vertical < rect.top + rect.height;
 }
 
-fn sameRef(first: interaction.NodeRef, second: interaction.NodeRef) bool {
-    return first.slot == second.slot and first.generation == second.generation;
-}
-
-/// Reads the kind as the raw C value, since a snapshot from C may hold a value outside the Zig enum.
-fn rawKind(hit: *const HitRegion) c_uint {
-    return @as(*const c_uint, @ptrCast(&hit.kind)).*;
-}
-
 fn updateSample(event: macos.CGEventRef) void {
     const point = macos.CGEventGetLocation(event);
     input.drag.sample.point = .{ .left = point.horizontal, .top = point.vertical };
@@ -258,45 +249,35 @@ export fn huen_input_status() Availability {
     return input.availability;
 }
 
-fn hitValid(hit: *const HitRegion) bool {
-    const rect = hit.rect;
-    const kind = rawKind(hit);
-    if (!std.math.isFinite(rect.left) or !std.math.isFinite(rect.top) or !std.math.isFinite(rect.width) or !std.math.isFinite(rect.height) or
-        rect.width <= 0 or rect.height <= 0 or !std.math.isFinite(rect.left + rect.width) or !std.math.isFinite(rect.top + rect.height) or
-        kind < @backingInt(HitKind.tile) or kind > @backingInt(HitKind.floating)) return false;
-    return switch (hit.kind) {
-        .tile => hit.window_identity != 0 and hit.window_id != 0 and hit.node.generation != 0,
-        .floating => hit.window_identity != 0 and hit.window_id != 0,
-        .boundary => hit.boundary.generation != 0,
-        .header => hit.node.generation != 0 and hit.group.generation != 0,
-    };
-}
-
-fn sameHit(first: HitRegion, second: HitRegion) bool {
-    return first.kind == second.kind and
-        first.rect.left == second.rect.left and first.rect.top == second.rect.top and
-        first.rect.width == second.rect.width and first.rect.height == second.rect.height and
-        sameRef(first.node, second.node) and sameRef(first.group, second.group) and sameRef(first.boundary, second.boundary) and
-        first.window_identity == second.window_identity and first.window_id == second.window_id;
-}
-
 export fn huen_input_publish(published: ?*const interaction.Snapshot) bool {
     requireMainThread();
     const snapshot = published orelse return false;
     if (input.stopping or snapshot.generation == 0 or snapshot.hit_count > max_hits or (snapshot.hit_count != 0 and snapshot.hits == null)) return false;
     const hits = if (snapshot.hits) |stored| stored[0..snapshot.hit_count] else &[_]HitRegion{};
-    for (hits) |*hit| if (!hitValid(hit)) return false;
+    for (hits) |*hit| {
+        const rect = hit.rect;
+        // Reads the kind as the raw C value, since a snapshot from C may hold a value outside the Zig enum.
+        const kind = @as(*const c_uint, @ptrCast(&hit.kind)).*;
+        if (!std.math.isFinite(rect.left) or !std.math.isFinite(rect.top) or !std.math.isFinite(rect.width) or !std.math.isFinite(rect.height) or
+            rect.width <= 0 or rect.height <= 0 or !std.math.isFinite(rect.left + rect.width) or !std.math.isFinite(rect.top + rect.height) or
+            kind < @backingInt(HitKind.tile) or kind > @backingInt(HitKind.floating)) return false;
+        const linked = switch (hit.kind) {
+            .tile => hit.window_identity != 0 and hit.window_id != 0 and hit.node.generation != 0,
+            .floating => hit.window_identity != 0 and hit.window_id != 0,
+            .boundary => hit.boundary.generation != 0,
+            .header => hit.node.generation != 0 and hit.group.generation != 0,
+        };
+        if (!linked) return false;
+    }
     if (snapshot.generation < input.generation or
         (snapshot.generation == input.generation and snapshot.hit_count != input.hit_count)) return false;
     if (snapshot.generation == input.generation) for (hits, 0..) |hit, index| {
-        if (!sameHit(hit, input.hits.?[index])) return false;
+        if (!std.meta.eql(hit, input.hits.?[index])) return false;
     };
     var copied: ?[*]HitRegion = null;
     if (hits.len != 0) {
-        const memory = std.c.malloc(hits.len * @sizeOf(HitRegion)) orelse return false;
-        const destination: [*]HitRegion = @ptrCast(@alignCast(memory));
-        @memcpy(destination[0..hits.len], hits);
-        copied = destination;
+        copied = @ptrCast(@alignCast(std.c.malloc(hits.len * @sizeOf(HitRegion)) orelse return false));
+        @memcpy(copied.?[0..hits.len], hits);
     }
     if (snapshot.generation != input.generation or !snapshot.ready or snapshot.transitioning) {
         cancelDrag(.publication);
@@ -339,7 +320,6 @@ export fn huen_input_select_header(selected: ?*const interaction.HeaderItem) boo
     event.kind = .group_select;
     event.generation = item.generation;
     event.monotonic_ns = monotonicNs();
-    event.target = std.mem.zeroes(HitRegion);
     event.target.kind = .header;
     event.target.rect = item.rect;
     event.target.node = item.child;
