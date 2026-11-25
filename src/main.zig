@@ -168,21 +168,17 @@ fn freezeSession() void {
     if (session_freeze_attempted) return;
     session_freeze_attempted = true;
     if (!config.session.enabled) return;
-    const current = sessionWindows() catch |err| {
-        sessionError(@errorName(err));
-        session_status.save = .failed;
-        return;
-    };
+    const current = sessionWindows() catch |err| return saveFailed(err);
     defer allocator.free(current);
     var screens: [32]continuity.Screen = undefined;
     var homes: [10][128]u8 = undefined;
     for (&homes, placements) |*home, placement| home.* = placement.home;
-    session_frozen = continuity.freeze(&layouts, current, sessionScreens(&screens), &config, homes[0..config.workspace_count], sessionScope()) catch |err| {
-        sessionError(@errorName(err));
-        session_status.save = .failed;
-        return;
-    };
+    session_frozen = continuity.freeze(&layouts, current, sessionScreens(&screens), &config, homes[0..config.workspace_count], sessionScope()) catch |err| return saveFailed(err);
     session_status.save = .frozen;
+}
+fn saveFailed(err: anyerror) void {
+    sessionError(@errorName(err));
+    session_status.save = .failed;
 }
 fn saveSession(clean: bool) void {
     if (session_save_attempted or !config.session.enabled) return;
@@ -196,11 +192,7 @@ fn saveSession(clean: bool) void {
         session_status.save = .skipped;
         return;
     }
-    session.save(allocator, checkpoint.snapshot) catch |err| {
-        sessionError(@errorName(err));
-        session_status.save = .failed;
-        return;
-    };
+    session.save(allocator, checkpoint.snapshot) catch |err| return saveFailed(err);
     session_status.save = .saved;
 }
 fn pointerWindows(output: []pointer.Window) []pointer.Window {
@@ -346,8 +338,7 @@ export fn wm_input_poll() void {
             },
         };
         const target = result catch |err| {
-            transaction.rollback(&.{});
-            pointer_controls.error_message = @errorName(err);
+            pointer_controls.error_message = transaction.abort(err);
             continue;
         };
         if (!transaction.commit()) continue;
@@ -434,14 +425,7 @@ fn publishStatus() void {
         presentation.row_count = config.workspace_count + 2;
         break :status .{ .visible = .{ .display_identity = if (display) |current| current.identity else null, .content = presentation } };
     };
-    const unchanged = switch (next) {
-        .disabled => published_status == .disabled,
-        .visible => |visible_status| switch (published_status) {
-            .disabled => false,
-            .visible => |previous| std.meta.eql(visible_status, previous),
-        },
-    };
-    if (unchanged) return;
+    if (std.meta.eql(next, published_status)) return;
     published_status = next;
     switch (next) {
         .disabled => native.platform_status_present(null),
@@ -486,12 +470,12 @@ export fn wm_activate_config() bool {
     if (!native.platform_bindings(&config.modes[0].bindings, config.modes[0].binding_count)) return false;
     active_mode = 0;
     status_active = true;
-    pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
-    configureGestures();
+    configureInput();
     publishStatus();
     return true;
 }
-fn configureGestures() void {
+fn configureInput() void {
+    pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
     if (gestures_enabled == config.swipe.enabled) return;
     gestures_enabled = config.swipe.enabled;
     native.huen_observe_gestures(gestures_enabled);
@@ -515,8 +499,7 @@ export fn wm_config_poll() void {
     hotkey_watch.forgetPresses();
     applyLayoutDefaults(&candidate);
     config = candidate;
-    pointer_controls.configure(config.mouse.enabled, config.mouse.modifiers);
-    configureGestures();
+    configureInput();
     configureSession();
     active_mode = 0;
     config_state = .ready;
@@ -882,6 +865,10 @@ const PlacementTransaction = struct {
         @memcpy(windows.items, self.intent);
         @memcpy(displays.items, self.screens);
         selected_display = self.selected;
+    }
+    fn abort(self: PlacementTransaction, err: anyerror) []const u8 {
+        self.rollback(&.{});
+        return @errorName(err);
     }
     fn identityIndex(self: PlacementTransaction, identity: u64) usize {
         for (self.intent, 0..) |window, index| if (window.identity == identity) return index;
@@ -1399,7 +1386,7 @@ fn reconcile() void {
             }
             const now = native.platform_monotonic();
             for (windows.items) |*window| {
-                if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
+                if (!externallyEligible(window.*) or displayBlocked(window.display)) continue;
                 if (!visible(window.*)) {
                     _ = parkWindow(window);
                     continue;
@@ -2015,8 +2002,7 @@ fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
             };
             defer transaction.deinit();
             layouts.reveal(state, identity) catch |err| {
-                transaction.rollback(&.{});
-                transition_error = @errorName(err);
+                transition_error = transaction.abort(err);
                 return;
             };
             if (!transaction.commit()) return;
@@ -2040,8 +2026,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     var members: [1024]tiling.Member = undefined;
     const state = workspaceLayout(displayIdentity, workspace);
     if (focus_target orelse layouts.focusCandidate(state, layoutMembers(&members))) |identity| layouts.reveal(state, identity) catch |err| {
-        transaction.rollback(&.{});
-        transition_error = @errorName(err);
+        transition_error = transaction.abort(err);
         return false;
     };
     if (!transaction.commit()) return false;
@@ -2112,7 +2097,6 @@ fn showWorkspace(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u
     if (verified) recordPrevious(destination_slot, from, workspace);
     return json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
-// Shows the window's workspace if it is hidden, and focuses the window.
 fn jumpToWindow(identity: u64, display_slot: usize) [*:0]const u8 {
     const window = windows.items[windowIndex(identity).?];
     if (config.workspace_monitors != null) return showWorkspace(window.workspace, currentWorkspace(display_slot), identity);
@@ -2232,13 +2216,7 @@ fn placeShortcuts() void {
             view.back_and_forth = config.workspace_back_and_forth;
             remaining = remaining[1..];
         }
-        if (destination != null) {
-            if (config.workspace_monitors != null) {
-                _ = showWorkspace(view.current, from, null);
-            } else {
-                _ = switchWorkspace(slot, view.current, from, null);
-            }
-        }
+        if (destination != null) _ = if (config.workspace_monitors != null) showWorkspace(view.current, from, null) else switchWorkspace(slot, view.current, from, null);
     }
 }
 export fn wm_hotkey(commandText: [*:0]const u8) void {
@@ -2497,18 +2475,12 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const transaction = PlacementTransaction.begin(.{ .display = source.display }) catch |err| return failure(@errorName(err));
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
-                    var target: ?u64 = null;
-                    switch (command) {
-                        .tilemove => |direction| layouts.tilemove(state, source.identity, direction) catch |err| {
-                            transaction.rollback(&.{});
-                            return failure(@errorName(err));
-                        },
-                        .group => |action| target = layouts.editGroup(state, source.identity, action) catch |err| {
-                            transaction.rollback(&.{});
-                            return failure(@errorName(err));
-                        },
+                    const edited: anyerror!?u64 = switch (command) {
+                        .tilemove => |direction| if (layouts.tilemove(state, source.identity, direction)) null else |err| err,
+                        .group => |action| layouts.editGroup(state, source.identity, action),
                         else => unreachable,
-                    }
+                    };
+                    const target = edited catch |err| return failure(transaction.abort(err));
                     if (!transaction.commit()) return failure(transition_error orelse "GroupPlacementFailed");
                     const verified = if (target) |identity| focusVerified(identity) else true;
                     native.platform_config_changed();
@@ -2579,10 +2551,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                     const transaction = PlacementTransaction.begin(.{ .display = source.display }) catch |err| return failure(@errorName(err));
                     defer transaction.deinit();
                     const state = workspaceLayout(source.display, source.workspace);
-                    if (source.floating) source.floating_restore = true else layouts.reveal(state, source.identity) catch |err| {
-                        transaction.rollback(&.{});
-                        return failure(@errorName(err));
-                    };
+                    if (source.floating) source.floating_restore = true else layouts.reveal(state, source.identity) catch |err| return failure(transaction.abort(err));
                     state.fullscreen = if (state.fullscreen == source.identity) null else source.identity;
                     if (!transaction.commit()) return failure(transition_error orelse "FullscreenPlacementFailed");
                     return json(.{ .ok = true, .verified = focusVerified(source.identity) });
@@ -2745,8 +2714,7 @@ export fn wm_shutdown() bool {
     const outstanding = native.platform_restore();
     persistPlacements();
     saveSession(outstanding == 0);
-    if (outstanding == 0) settleParkingJournal();
-    if (outstanding != 0) {
+    if (outstanding == 0) settleParkingJournal() else {
         native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
         _ = journal("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
     }
