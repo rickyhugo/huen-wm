@@ -17,6 +17,8 @@ const modules = .{
     @import("cases/input.zig"),
     @import("cases/layout_check.zig"),
     @import("cases/overlap.zig"),
+    @import("cases/monitors.zig"),
+    @import("cases/commands.zig"),
 };
 
 comptime {
@@ -145,6 +147,28 @@ pub const Manager = struct {
         if (!wm_initialize("/tests/config.lua") or !wm_activate_config()) return error.StartFailed;
     }
 
+    /// The user plugs in the external display. The adapter reports it from the next tick.
+    pub fn connectExternal(self: *Manager) void {
+        self.world.displays.append(allocator, model.external_display) catch @panic("out of memory");
+    }
+
+    /// The user unplugs the external display. macOS moves each window that it showed by the distance between the
+    /// displays, then shrinks and shifts it to fit the first remaining display.
+    pub fn disconnectExternal(self: *Manager) void {
+        for (self.world.displays.items, 0..) |display, index| if (display.identity == model.external_display.identity) {
+            _ = self.world.displays.orderedRemove(index);
+            break;
+        };
+        const refuge = self.world.displays.items[0].frame;
+        for (self.world.windows.items) |*window| if (model.intersection(window.frame, model.external_display.full_bounds) != null) {
+            window.frame.width = @min(window.frame.width, refuge.width);
+            window.frame.height = @min(window.frame.height, refuge.height);
+            window.frame.left = @min(window.frame.left - model.external_display.frame.left + refuge.left, refuge.left + refuge.width - window.frame.width);
+            window.frame.top = @min(window.frame.top - model.external_display.frame.top + refuge.top, refuge.top + refuge.height - window.frame.height);
+        };
+        self.world.scan_needed = true;
+    }
+
     pub fn addApp(self: *Manager, bundle: []const u8) i32 {
         const pid = self.world.next_pid;
         self.world.next_pid += 1;
@@ -191,6 +215,11 @@ pub const Manager = struct {
     /// Moves the clock without a timer firing.
     pub fn advance(self: *Manager, seconds: f64) void {
         self.world.clock += seconds;
+    }
+
+    /// The adapter timer fires every `step` for `seconds`.
+    pub fn elapse(self: *Manager, seconds: f64) void {
+        self.tick(@intFromFloat(@round(seconds / self.world.step)));
     }
 
     /// One adapter timer firing that scans: the clock moves one step, the polls run, a full scan feeds wm_tick,

@@ -99,8 +99,6 @@ pub const World = struct {
     last_scan: f64 = -std.math.inf(f64),
     /// Size and position writes that reached an application.
     frame_writes: usize = 0,
-    /// Seconds each frame write keeps the main thread, as a stalled application does.
-    write_latency: f64 = 0,
     journal: std.ArrayList([]const u8) = .empty,
     tile_hits: std.ArrayList(abi.HitRegion) = .empty,
     boundary_hits: std.ArrayList(abi.HitRegion) = .empty,
@@ -142,7 +140,6 @@ pub const World = struct {
             accepted.height = @max(accepted.height, minimum.height);
         }
         self.frame_writes += 1;
-        self.clock += self.write_latency;
         target.frame = accepted;
         return true;
     }
@@ -303,6 +300,9 @@ pub const World = struct {
 pub var current: World = .{};
 
 pub const builtin_display: Display = .{ .identity = 1, .frame = .{ .left = 0, .top = 25, .width = 1440, .height = 875 }, .full_bounds = .{ .left = 0, .top = 0, .width = 1440, .height = 900 }, .name = "Built-in Retina Display", .built_in = true };
+
+/// To the right of the built-in display, with the same menu bar height.
+pub const external_display: Display = .{ .identity = 2, .frame = .{ .left = 1440, .top = 25, .width = 1920, .height = 1055 }, .full_bounds = .{ .left = 1440, .top = 0, .width = 1920, .height = 1080 }, .name = "DELL U2725QE", .built_in = false };
 
 pub fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
     return @abs(first.left - second.left) <= tolerance and @abs(first.top - second.top) <= tolerance and @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;

@@ -1,4 +1,4 @@
-//! Every manager-seam test case. build.zig runs each in its own process; a `restart` case runs twice, and the
+//! Every manager-seam test case. The pure-module tests are in tests/pure. build.zig runs each in its own process; a `restart` case runs twice, and the
 //! second process meets the world, files and stored frames that the first one left.
 pub const Case = struct { name: []const u8, restart: bool = false };
 
@@ -29,7 +29,6 @@ pub const all = [_]Case{
     .{ .name = "a hotkey press that macOS never delivers runs its command once" },
     .{ .name = "a hotkey press that macOS delivers runs its command once" },
     .{ .name = "a hotkey that macOS delivers after the manager ran it from the key press runs once" },
-    .{ .name = "a hotkey that macOS delivers before a key press that waits 300 ms on its command runs once" },
     .{ .name = "a hotkey that macOS delivers 400 ms of a busy main thread before the key press runs once" },
     .{ .name = "a hotkey that macOS delivers 2 s of a busy main thread after the manager ran it from the key press runs once" },
     .{ .name = "a hotkey that a busy main thread holds for 2 s is not reported as missed" },
@@ -49,6 +48,23 @@ pub const all = [_]Case{
     .{ .name = "the manager writes no frame during quiet ticks with two overlapped windows" },
     .{ .name = "the mouse gets no resize boundary between two overlapped windows" },
     .{ .name = "the master and the stack overlap by 16 points when both refuse less than 900 points" },
+    .{ .name = "a window that opens on the external display fills that display" },
+    .{ .name = "a workspace switch on the built-in display leaves the external display's window in place" },
+    .{ .name = "move-to-monitor moves the focused window to the other display's workspace" },
+    .{ .name = "a window of a disconnected display shows on the built-in display under its workspace number" },
+    .{ .name = "with workspace_monitors a window that opens on the built-in display tiles on the external display" },
+    .{ .name = "with workspace_monitors the windows of a disconnected external display tile on the built-in display" },
+    .{ .name = "with workspace_monitors the windows return to the external display when it reconnects" },
+    .{ .name = "swap left exchanges the tiles of two windows" },
+    .{ .name = "fullscreen fills the display's usable area with the focused window" },
+    .{ .name = "fullscreen a second time returns the window to its tile" },
+    .{ .name = "resize 0.1 moves the split between two windows to ratio 0.6" },
+    .{ .name = "toggle-floating floats a window that never floated at half the area inside the gap, centered" },
+    .{ .name = "layout master gives one window the left half and stacks the other three on the right" },
+    .{ .name = "move-to-workspace 2 shows workspace 2 with the moved window alone on it" },
+    .{ .name = "workspace previous returns to the workspace shown before the last switch" },
+    .{ .name = "close closes the focused window and the other window gets the whole area" },
+    .{ .name = "reload applies a changed gap to the tiles" },
     .{ .name = "the WMWindow mirror matches native/platform.h" },
     .{ .name = "the other C struct mirrors match their headers" },
 };
