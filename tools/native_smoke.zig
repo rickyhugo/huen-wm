@@ -65,21 +65,6 @@ fn reject(comptime format: []const u8, arguments: anytype) Usage {
     return error.Usage;
 }
 
-/// Resolves an option by exact name, else by unique prefix, as argparse does.
-fn lookup(name: []const u8) Usage!?Flag {
-    if (std.mem.eql(u8, name, "-h")) return .help;
-    for (flag_names) |entry| if (std.mem.eql(u8, entry[0], name)) return entry[1];
-    if (!std.mem.startsWith(u8, name, "--")) return null;
-    var found: ?Flag = null;
-    var matches: std.ArrayList([]const u8) = .empty;
-    for (flag_names) |entry| if (std.mem.startsWith(u8, entry[0], name)) {
-        found = entry[1];
-        matches.append(system.allocator, entry[0]) catch {};
-    };
-    if (matches.items.len > 1) return reject("ambiguous option: {s} could match {s}", .{ name, std.mem.join(system.allocator, ", ", matches.items) catch "" });
-    return found;
-}
-
 fn flagName(flag: Flag) []const u8 {
     for (flag_names) |entry| if (entry[1] == flag) return entry[0];
     unreachable;
@@ -91,9 +76,8 @@ fn looksLikeNegativeNumber(argument: []const u8) bool {
     return std.ascii.isDigit(argument[1]) or argument[1] == '.';
 }
 
-const Parsed = union(enum) { help, options: driver.Options };
-
-fn parse(arguments: []const []const u8) Usage!Parsed {
+/// Null means --help.
+fn parse(arguments: []const [:0]const u8) Usage!?driver.Options {
     const home = system.environment.get("HOME") orelse "";
     var options: driver.Options = .{
         .app = std.fs.path.join(system.allocator, &.{ home, "Applications/Huen WM.app" }) catch return reject("out of memory", .{}),
@@ -107,14 +91,25 @@ fn parse(arguments: []const []const u8) Usage!Parsed {
         const argument = arguments[index];
         const separator = std.mem.indexOfScalar(u8, argument, '=');
         const name = if (separator != null and std.mem.startsWith(u8, argument, "--")) argument[0..separator.?] else argument;
-        const flag = (if (argument.len > 1 and argument[0] == '-' and !looksLikeNegativeNumber(argument)) try lookup(name) else null) orelse {
+        // Resolves an option by exact name, else by unique prefix, as argparse does.
+        const flag: Flag = lookup: {
+            if (argument.len < 2 or argument[0] != '-' or looksLikeNegativeNumber(argument)) break :lookup null;
+            if (std.mem.eql(u8, name, "-h")) break :lookup .help;
+            for (flag_names) |entry| if (std.mem.eql(u8, entry[0], name)) break :lookup entry[1];
+            if (!std.mem.startsWith(u8, name, "--")) break :lookup null;
+            var found: ?Flag = null;
+            var matches: std.ArrayList([]const u8) = .empty;
+            for (flag_names) |entry| if (std.mem.startsWith(u8, entry[0], name)) {
+                found = entry[1];
+                matches.append(system.allocator, entry[0]) catch {};
+            };
+            if (matches.items.len > 1) return reject("ambiguous option: {s} could match {s}", .{ name, std.mem.join(system.allocator, ", ", matches.items) catch "" });
+            break :lookup found;
+        } orelse {
             unrecognized.append(system.allocator, argument) catch {};
             continue;
         };
-        const takes_value = switch (flag) {
-            .app, .fixture, .output, .timeout => true,
-            else => false,
-        };
+        const takes_value = std.mem.indexOfScalar(Flag, &.{ .app, .fixture, .output, .timeout }, flag) != null;
         var value: []const u8 = "";
         if (takes_value) {
             if (name.len < argument.len) {
@@ -125,7 +120,7 @@ fn parse(arguments: []const []const u8) Usage!Parsed {
             } else return reject("argument {s}: expected one argument", .{flagName(flag)});
         } else if (name.len < argument.len) return reject("argument {s}: ignored explicit argument '{s}'", .{ flagName(flag), argument[name.len + 1 ..] });
         switch (flag) {
-            .help => return .help,
+            .help => return null,
             .app => options.app = value,
             .fixture => options.fixture = value,
             .output => output = value,
@@ -146,43 +141,27 @@ fn parse(arguments: []const []const u8) Usage!Parsed {
         @intFromBool(options.global) + @intFromBool(options.monitor_moves) + @intFromBool(options.global_restart);
     if (chosen > 1) return reject(exclusive_names ++ " are exclusive", .{});
     if (options.scenes and chosen > 0) return reject(exclusive_names ++ " use instant switches and exclude --scenes", .{});
-    return .{ .options = options };
-}
-
-fn exercise(smoke: *driver.Smoke) system.Error!void {
-    const options = smoke.options;
-    if (options.workflow) return single.exerciseWorkflow(smoke);
-    if (options.owner) return modes.exerciseOwner(smoke);
-    if (options.monitors) return modes.exerciseMonitors(smoke);
-    if (options.global) return modes.exerciseGlobal(smoke);
-    if (options.monitor_moves) return modes.exerciseMonitorMoves(smoke);
-    if (options.global_restart) return modes.exerciseGlobalRestart(smoke);
-    return single.exercise(smoke);
+    return options;
 }
 
 pub fn main(initial: std.process.Init) u8 {
     system.io = initial.io;
     system.allocator = initial.arena.allocator();
     system.environment = initial.environ_map;
-    const vector = initial.minimal.args.toSlice(system.allocator) catch return 1;
-    const arguments = system.allocator.alloc([]const u8, vector.len) catch return 1;
-    for (vector, arguments) |argument, *copy| copy.* = argument;
-    const parsed = parse(arguments[@min(1, arguments.len)..]) catch {
+    const arguments = initial.minimal.args.toSlice(system.allocator) catch return 1;
+    const options = (parse(arguments[@min(1, arguments.len)..]) catch {
         system.printError("{s}{s}: error: {s}\n", .{ usage, program, usage_message });
         return 2;
-    };
-    const options = switch (parsed) {
-        .help => {
-            system.print("{s}{s}", .{ usage, help });
-            return 0;
-        },
-        .options => |options| options,
+    }) orelse {
+        system.print("{s}{s}", .{ usage, help });
+        return 0;
     };
     var smoke = driver.Smoke.init(options) catch |err| {
         system.printError("{s}: {s}\n", .{ program, system.describe(err) });
         return 1;
     };
-    if (exercise(&smoke)) |_| {} else |err| switch (err) {
+    const exercised: system.Error!void = if (options.workflow) single.exerciseWorkflow(&smoke) else if (options.owner) modes.exerciseOwner(&smoke) else if (options.monitors) modes.exerciseMonitors(&smoke) else if (options.global) modes.exerciseGlobal(&smoke) else if (options.monitor_moves) modes.exerciseMonitorMoves(&smoke) else if (options.global_restart) modes.exerciseGlobalRestart(&smoke) else single.exercise(&smoke);
+    exercised catch |err| switch (err) {
         error.Skipped => {
             smoke.record("skipped", values.string(system.describe(err))) catch {};
             system.print("SKIP {s}\n", .{system.describe(err)});
@@ -193,7 +172,7 @@ pub fn main(initial: std.process.Init) u8 {
             smoke.record("traceback", values.string(std.fmt.allocPrint(system.allocator, "error.{s}: {s}\n", .{ @errorName(err), reason }) catch reason)) catch {};
             system.printError("FAIL {s}\n", .{reason});
         },
-    }
+    };
     smoke.cleanup();
     const passed = values.truthy(values.field(smoke.result, "passed")) and smoke.cleanupErrors() == 0;
     smoke.record("passed", .{ .bool = passed }) catch {};
