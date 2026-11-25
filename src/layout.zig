@@ -393,7 +393,7 @@ pub const Store = struct {
         const node = self.nodes[handle];
         const branch = node.content.branch;
         const extent = if (branch.axis == .width) node.frame.width else node.frame.height;
-        const available = extent - @min(gap, @max(0, extent - 2));
+        const available = extent - innerGap(extent, gap);
         const limits = switch (leadingRange(available, available * branch.ratio, self.sides(branch))) {
             .fits => |range| range,
             .overlaps => return null,
@@ -1064,11 +1064,16 @@ pub fn leadingRange(available: f64, share: f64, sides: [2]Side) SplitFit {
 /// Each side keeps its least extent when the sides fit side by side, and the rest follows the ratio. Sides that do not fit
 /// overlap: the first keeps the leading edge and the second the trailing edge, and each gives up one `overlap_step` for
 /// every window the other can cascade, so no two windows share a frame. Sides too large to overlap follow the ratio.
+// The gap between the two sides of a split, narrowed so each side keeps at least one point.
+pub fn innerGap(extent: f64, gap: f64) f64 {
+    return @min(gap, @max(0, extent - 2));
+}
+
 pub fn split(frame: Rect, axis: Axis, ratio: f64, gap: f64, sides: [2]Side) [2]Rect {
     var first = frame;
     var second = frame;
     const extent = if (axis == .width) frame.width else frame.height;
-    const spacing = @min(gap, @max(0, extent - 2));
+    const spacing = innerGap(extent, gap);
     const available = extent - spacing;
     var leading = available * ratio;
     var offset = leading + spacing;

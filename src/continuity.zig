@@ -38,9 +38,7 @@ pub const Frozen = struct {
     }
 };
 
-fn text(buffer: anytype) []const u8 {
-    return std.mem.sliceTo(buffer, 0);
-}
+const text = native.text;
 fn screenFor(screens: []const Screen, identity: u32) ?Screen {
     for (screens) |screen| if (screen.identity == identity) return screen;
     return null;

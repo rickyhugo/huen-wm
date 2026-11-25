@@ -1,6 +1,8 @@
 const std = @import("std");
 const Rect = @import("native.zig").WMRect;
+const session = @import("session.zig");
 
+pub const stem = "placements";
 pub const capacity = 256;
 pub const max_bytes = 1024 * 1024;
 pub const Process = struct { pid: c_int, token: f64 };
@@ -76,13 +78,6 @@ pub const Memory = struct {
     }
 };
 
-pub fn scopeHash(filter: []const u8) [64:0]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("HuenWM-placements-v1\x00");
-    hasher.update(filter);
-    return std.fmt.bytesToHex(hasher.finalResult(), .lower) ++ [_:0]u8{};
-}
-
 pub fn encode(allocator: std.mem.Allocator, entries: []const Entry) ![]u8 {
     const persisted = try allocator.alloc(Persisted, entries.len);
     defer allocator.free(persisted);
@@ -97,16 +92,12 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8, expires: f64, mem
     var decoded: Memory = .{};
     for (parsed.value.entries) |item| {
         var entry: Entry = .{ .floating = item.floating, .floating_frame = item.floating_frame, .frame = item.frame, .expires = expires };
-        if (!textValid(item.bundle, entry.bundle.len) or !textValid(item.workspace, entry.workspace.len) or !frameValid(item.frame) or !frameValid(item.floating_frame)) return error.InvalidPlacementMemory;
+        if (!session.textValid(item.bundle, entry.bundle.len, false) or !session.textValid(item.workspace, entry.workspace.len, false) or !frameValid(item.frame) or !frameValid(item.floating_frame)) return error.InvalidPlacementMemory;
         @memcpy(entry.bundle[0..item.bundle.len], item.bundle);
         @memcpy(entry.workspace[0..item.workspace.len], item.workspace);
         decoded.remember(entry);
     }
     memory.* = decoded;
-}
-
-fn textValid(value: []const u8, size: usize) bool {
-    return value.len > 0 and value.len < size and std.mem.indexOfScalar(u8, value, 0) == null and std.unicode.utf8ValidateSlice(value);
 }
 
 fn frameValid(frame: Rect) bool {

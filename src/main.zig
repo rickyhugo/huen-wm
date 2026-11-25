@@ -134,9 +134,7 @@ fn configureSession() void {
         return;
     };
     defer allocator.free(encoded);
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(encoded, &digest, .{});
-    session_config_hash = std.fmt.bytesToHex(digest, .lower);
+    session_config_hash = session.hexDigest(&.{encoded})[0..64].*;
     if (!session.huen_session_boot_identity(&session_boot, session_boot.len)) sessionError("BootIdentityUnavailable");
     if (!session_loaded) session_status.load = .pending;
 }
@@ -446,9 +444,7 @@ pub fn main(initial: std.process.Init.Minimal) u8 {
     }
     return @intCast(native.platform_main(@intCast(arguments.len), @ptrCast(arguments.ptr)));
 }
-fn text(buffer: anytype) []const u8 {
-    return std.mem.sliceTo(buffer, 0);
-}
+const text = native.text;
 fn json(value: anytype) [*:0]const u8 {
     if (reply_buffer) |previous| allocator.free(previous);
     reply_buffer = null;
@@ -630,7 +626,7 @@ fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     }
     if (count < 2) return 0;
     const area = displayArea(source.display);
-    const available = area.width - @min(config.gap, @max(0, area.width - 2));
+    const available = area.width - tiling.innerGap(area.width, config.gap);
     const limits = switch (tiling.leadingRange(available, available * state.ratio, masterSides(indices[0..count]))) {
         .fits => |span| span,
         .overlaps => return 0,
@@ -1165,6 +1161,16 @@ fn masterSides(indices: []const usize) [2]tiling.Side {
 fn framesNear(first: Rect, second: Rect, tolerance: f64) bool {
     return @abs(first.left - second.left) <= tolerance and @abs(first.top - second.top) <= tolerance and @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;
 }
+fn sizesNear(first: Rect, second: Rect, tolerance: f64) bool {
+    return @abs(first.width - second.width) <= tolerance and @abs(first.height - second.height) <= tolerance;
+}
+// How far two frames overlap along one axis. Frames that are apart give a negative overlap.
+fn overlap(first: Rect, second: Rect, comptime axis: enum { horizontal, vertical }) f64 {
+    return switch (axis) {
+        .horizontal => @min(first.left + first.width, second.left + second.width) - @max(first.left, second.left),
+        .vertical => @min(first.top + first.height, second.top + second.height) - @max(first.top, second.top),
+    };
+}
 fn placementFailure(window: *Window, message: []const u8) void {
     const repeated = if (window.placement_error) |previous| std.mem.eql(u8, previous, message) else false;
     window.placement_error = message;
@@ -1228,7 +1234,7 @@ fn overlapsOtherDisplays(frame: Rect, displayIdentity: u32) bool {
 fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
     const area = displays.items[displayIndex(displayIdentity).?].frame;
     const bottom = area.top + area.height;
-    const horizontalContact = @min(actual.left + actual.width, area.left + area.width) - @max(actual.left, area.left);
+    const horizontalContact = overlap(actual, area, .horizontal);
     return @abs(actual.width - target.width) <= 2 and @abs(actual.height - target.height) <= 2 and
         @abs(actual.left - target.left) <= 2 and @abs(actual.left + actual.width - target.left - target.width) <= 2 and
         horizontalContact > 0 and horizontalContact <= 3 and
@@ -1342,8 +1348,8 @@ fn parkWindow(window: *Window) PlacementOutcome {
             return .applied;
         };
         // A frame that only touches the display is a parked strip that a Dock resize exposed.
-        const horizontal = @min(actual.left + actual.width, area.left + area.width) - @max(actual.left, area.left);
-        const vertical = @min(actual.top + actual.height, area.top + area.height) - @max(actual.top, area.top);
+        const horizontal = overlap(actual, area, .horizontal);
+        const vertical = overlap(actual, area, .vertical);
         if (window.parked and window.parked_at != null and horizontal > 3 and vertical > 3) {
             const now = native.platform_monotonic();
             if (now - topology_changed_at > 2) {
@@ -1408,11 +1414,11 @@ fn reconcile() void {
                     }
                     if (now < placed.at or window.observation.motion != .idle) break :settle;
                     const observed = window.observation.frame;
-                    if (@abs(observed.width - placed.frame.width) <= size_bounds.tolerance and @abs(observed.height - placed.frame.height) <= size_bounds.tolerance) {
+                    if (sizesNear(observed, placed.frame, size_bounds.tolerance)) {
                         placed.snap_candidate = null;
                         break :settle;
                     }
-                    if (placed.snap_candidate) |previous| if (@abs(observed.width - previous.width) <= size_bounds.tolerance and @abs(observed.height - previous.height) <= size_bounds.tolerance) {
+                    if (placed.snap_candidate) |previous| if (sizesNear(observed, previous, size_bounds.tolerance)) {
                         const requested = placed.frame;
                         window.placed = null;
                         if (learnBounds(window, requested, observed)) break :place true;
@@ -1529,8 +1535,8 @@ fn recoveryFrame(frame: Rect) Rect {
     var area = displays.items[0].frame;
     for (displays.items) |display| {
         const bounds = display.full_bounds;
-        const width = @min(frame.left + frame.width, bounds.left + bounds.width) - @max(frame.left, bounds.left);
-        const height = @min(frame.top + frame.height, bounds.top + bounds.height) - @max(frame.top, bounds.top);
+        const width = overlap(frame, bounds, .horizontal);
+        const height = overlap(frame, bounds, .vertical);
         if (width > 0 and height > 0 and width * height > largest) {
             largest = width * height;
             area = display.frame;
@@ -1554,10 +1560,10 @@ fn processExited(process: memory.Process) bool {
     return native.platform_process_token(process.pid) != process.token;
 }
 fn writePlacements(entries: []const memory.Entry) void {
-    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+    const hash = session.storageKey(memory.stem, std.mem.span(native.platform_filter()));
     const encoded = memory.encode(allocator, entries) catch return native.platform_error("Placement memory: out of memory");
     defer allocator.free(encoded);
-    if (!session.huen_session_write("placements", &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
+    if (!session.huen_session_write(memory.stem, &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
 }
 // After restoration each window is where a restarted manager will discover it.
 fn persistPlacements() void {
@@ -1605,14 +1611,14 @@ export fn wm_tick() void {
     displays.appendSliceAssumeCapacity(updated[0..displayCount]);
     if (displays.items.len == 0) return;
     if (!placement_memory_loaded and config.placement_memory) load: {
-        const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+        const hash = session.storageKey(memory.stem, std.mem.span(native.platform_filter()));
         const bytes = allocator.alloc(u8, memory.max_bytes) catch {
             native.platform_error("Placement memory: out of memory");
             break :load;
         };
         defer allocator.free(bytes);
         var used: usize = 0;
-        switch (session.huen_session_read("placements", &hash, bytes.ptr, bytes.len, &used)) {
+        switch (session.huen_session_read(memory.stem, &hash, bytes.ptr, bytes.len, &used)) {
             0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
             1 => break :load,
             else => {

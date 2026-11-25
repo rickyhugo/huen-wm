@@ -111,12 +111,14 @@ pub const Loaded = struct {
     parsed: ?std.json.Parsed(Snapshot) = null,
 };
 
+const stem = "session";
+
 pub fn load(allocator: std.mem.Allocator, scope: Scope) Loaded {
     const hash = scopeHash(scope) catch return .{ .diagnostic = .rejected, .rejection = .scope };
     const bytes = allocator.alloc(u8, max_bytes) catch return .{ .diagnostic = .rejected, .rejection = .storage };
     defer allocator.free(bytes);
     var used: usize = 0;
-    switch (huen_session_read("session", &hash, bytes.ptr, bytes.len, &used)) {
+    switch (huen_session_read(stem, &hash, bytes.ptr, bytes.len, &used)) {
         0 => {},
         1 => return .{ .diagnostic = .none },
         else => return .{ .diagnostic = .rejected, .rejection = .storage },
@@ -139,7 +141,7 @@ pub fn save(allocator: std.mem.Allocator, checkpoint: Snapshot) !void {
     const bytes = try std.json.Stringify.valueAlloc(allocator, checkpoint, .{});
     defer allocator.free(bytes);
     if (bytes.len > max_bytes) return error.TooLarge;
-    if (!huen_session_write("session", &hash, bytes.ptr, bytes.len, true)) return error.Storage;
+    if (!huen_session_write(stem, &hash, bytes.ptr, bytes.len, true)) return error.Storage;
 }
 
 fn terminated(bytes: []const u8) ![]const u8 {
@@ -147,7 +149,7 @@ fn terminated(bytes: []const u8) ![]const u8 {
     return bytes[0..end];
 }
 
-fn textValid(value: []const u8, capacity: usize, empty: bool) bool {
+pub fn textValid(value: []const u8, capacity: usize, empty: bool) bool {
     return value.len < capacity and (empty or value.len > 0) and
         std.mem.indexOfScalar(u8, value, 0) == null and std.unicode.utf8ValidateSlice(value);
 }
@@ -159,12 +161,22 @@ fn validateScope(scope: Scope) !void {
 
 pub fn scopeHash(scope: Scope) ![64:0]u8 {
     try validateScope(scope);
+    return hexDigest(&.{ prefix(stem), scope.config, "\x00", scope.filter });
+}
+
+pub fn hexDigest(parts: []const []const u8) [64:0]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("HuenWM-session-v1\x00");
-    hasher.update(scope.config);
-    hasher.update("\x00");
-    hasher.update(scope.filter);
+    for (parts) |part| hasher.update(part);
     return std.fmt.bytesToHex(hasher.finalResult(), .lower) ++ [_:0]u8{};
+}
+
+// The key of the file `stem` names for one filter. The hash prefix comes from the stem, so the two cannot drift apart.
+pub fn storageKey(comptime file_stem: []const u8, filter: []const u8) [64:0]u8 {
+    return hexDigest(&.{ prefix(file_stem), filter });
+}
+
+fn prefix(comptime file_stem: []const u8) []const u8 {
+    return "HuenWM-" ++ file_stem ++ "-v1\x00";
 }
 
 pub fn validateKey(key: StableKey) !void {

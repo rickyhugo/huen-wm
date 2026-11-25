@@ -54,19 +54,14 @@ pub fn match(records: []const Record, observed: []const native.WMWindow, eligibl
     return output[0..count];
 }
 
-fn journalHash(filter: []const u8) [64:0]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("HuenWM-parked-v1\x00");
-    hasher.update(filter);
-    return std.fmt.bytesToHex(hasher.finalResult(), .lower) ++ [_:0]u8{};
-}
+const stem = "parked";
 
 pub fn load(allocator: std.mem.Allocator, filter: []const u8) !?std.json.Parsed(Journal) {
-    const hash = journalHash(filter);
+    const hash = session.storageKey(stem, filter);
     const bytes = try allocator.alloc(u8, max_bytes);
     defer allocator.free(bytes);
     var used: usize = 0;
-    switch (session.huen_session_read("parked", &hash, bytes.ptr, bytes.len, &used)) {
+    switch (session.huen_session_read(stem, &hash, bytes.ptr, bytes.len, &used)) {
         0 => {},
         1 => return null,
         else => return error.Storage,
@@ -93,8 +88,8 @@ pub const Writer = struct {
             allocator.free(bytes);
             return;
         };
-        const hash = journalHash(filter);
-        if (!session.huen_session_write("parked", &hash, bytes.ptr, bytes.len, false)) return error.Storage;
+        const hash = session.storageKey(stem, filter);
+        if (!session.huen_session_write(stem, &hash, bytes.ptr, bytes.len, false)) return error.Storage;
         if (self.written) |previous| allocator.free(previous);
         self.written = bytes;
     }

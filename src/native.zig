@@ -1,3 +1,8 @@
+const std = @import("std");
+// The text of a NUL-terminated buffer.
+pub fn text(buffer: anytype) []const u8 {
+    return std.mem.sliceTo(buffer, 0);
+}
 pub const WMRect = extern struct { left: f64, top: f64, width: f64, height: f64 };
 pub const WMFrameIntent = enum(c_uint) { visible_goal = 0, verified_placement = 1 };
 pub const WMMotionState = enum(c_uint) { idle, animating, rejected };

@@ -304,9 +304,7 @@ pub fn workerMain(path: [*:0]const u8) u8 {
     return 0;
 }
 
-fn text(buffer: anytype) []const u8 {
-    return std.mem.sliceTo(buffer, 0);
-}
+const text = native.text;
 
 fn copyText(destination: []u8, source: []const u8) !void {
     if (source.len >= destination.len) return error.TextTooLong;
