@@ -37,11 +37,9 @@ pub fn resolve(selection: commands.MonitorSelector, screens: []const Screen, cur
             const sorted = order[0..screens.len];
             @memcpy(sorted, screens);
             std.mem.sort(Screen, sorted, {}, readingLess);
-            var position: ?usize = null;
-            if (current) |identity| for (sorted, 0..) |screen, index| if (screen.identity == identity) {
-                position = index;
-            };
-            const found = position orelse return if (step == .next) sorted[0].identity else sorted[sorted.len - 1].identity;
+            const found = for (sorted, 0..) |screen, index| {
+                if (screen.identity == current) break index;
+            } else return if (step == .next) sorted[0].identity else sorted[sorted.len - 1].identity;
             return switch (step) {
                 .next => sorted[(found + 1) % sorted.len].identity,
                 .previous => sorted[(found + sorted.len - 1) % sorted.len].identity,
@@ -57,20 +55,14 @@ pub const Wanted = struct { home: ?u32, monitors: []const commands.MonitorSelect
 pub fn place(screens: []const Screen, wanted: Wanted) ?u32 {
     if (screens.len == 0) return null;
     if (wanted.home) |identity| if (find(screens, identity) != null) return identity;
-    if (preferred(screens, wanted.monitors, wanted.current)) |identity| return identity;
-    if (preferred(screens, wanted.fallback, wanted.current)) |identity| return identity;
+    for ([_][]const commands.MonitorSelector{ wanted.monitors, wanted.fallback }) |selectors| for (selectors) |selection| {
+        if (wanted.current) |identity| if (find(screens, identity)) |screen| if (matches(screen, selection)) return identity;
+        if (lowestMatching(screens, selection)) |identity| return identity;
+    };
     if (wanted.current) |identity| if (find(screens, identity) != null) return identity;
     var lowest = screens[0].identity;
     for (screens) |screen| lowest = @min(lowest, screen.identity);
     return lowest;
-}
-
-fn preferred(screens: []const Screen, selectors: []const commands.MonitorSelector, current: ?u32) ?u32 {
-    for (selectors) |selection| {
-        if (current) |identity| if (find(screens, identity)) |screen| if (matches(screen, selection)) return identity;
-        if (lowestMatching(screens, selection)) |identity| return identity;
-    }
-    return null;
 }
 
 fn matches(screen: Screen, selection: commands.MonitorSelector) bool {
