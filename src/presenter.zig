@@ -7,7 +7,17 @@ const scene = @import("scene.zig");
 const reload = @import("reload.zig");
 const hotkeys = @import("hotkeys.zig");
 const gestures = @import("gestures.zig");
+const commands = @import("command.zig");
+const session = @import("session.zig");
+const monitor = @import("monitor.zig");
+const reply = @import("reply.zig");
+const focus = @import("focus.zig");
+const edits = @import("edits.zig");
+const recovery = @import("recovery.zig");
+const recall = @import("recall.zig");
+const checkpoint = @import("checkpoint.zig");
 const text = native.text;
+const Rect = world.Rect;
 const Display = world.Display;
 
 const StatusPresentation = union(enum) {
@@ -112,4 +122,87 @@ pub fn activate() void {
 pub fn deactivate() void {
     status_active = false;
     native.platform_status_present(null);
+}
+
+pub fn reportStatus() reply.Reply {
+    const launch = native.platform_launch_status();
+    var placed_rows: [10]routing.Placed = undefined;
+    const placed = routing.placed(&placed_rows);
+    return reply.json(.{
+        .running = true,
+        .suspended = world.isSuspended(),
+        .active_mode = text(&world.config().modes[hotkeys.activeMode()].name),
+        .close_state = edits.closeState(),
+        .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) },
+        .window_count = world.windows().len,
+        .display_count = world.displays().len,
+        .selected_monitor = world.selected(),
+        .workspace_owner = routing.owner(),
+        .placements = placed,
+        .routing_blocked = routing.blocked(),
+        .workspace_backend = "corner-parking",
+        .filter = std.mem.span(native.platform_filter()),
+        .scene_capture_allowed = native.huen_scene_capture_allowed(),
+        .snapshot_presentation = scene.presentation(),
+        .snapshot_generation = scene.generationCount(),
+        .transition_pending = scene.pending(),
+        .transition_error = journal.lastError(),
+        .hotkeys = hotkeys.status(),
+        .mouse = gestures.status(),
+        .session = checkpoint.status(),
+        .parking_recovery = recovery.status(),
+        .placement_memory = recall.status(),
+        .config_reload = reload.status(),
+    });
+}
+
+pub fn listWindows() reply.Reply {
+    const Item = struct { id: u64, pid: c_int, bundle: []const u8, title: []const u8, display: u32, workspace: usize, focused: bool, urgent: bool, floating: bool, parked: bool, minimized: bool, fullscreen: bool, managed_fullscreen: bool, stale: bool, frame: Rect, placement_error: ?[]const u8, group_hidden: bool, parking_exempt: bool, minimum: struct { width: f64, height: f64 }, maximum: struct { width: ?f64, height: ?f64 } };
+    var items: [1024]Item = undefined;
+    for (world.windows(), items[0..world.windows().len]) |*window, *item| item.* = .{ .id = window.identity, .pid = window.observation.pid, .bundle = text(&window.observation.bundle), .title = text(&window.observation.title), .display = window.display, .workspace = window.workspace + 1, .focused = focus.current() == window.identity, .urgent = window.urgent, .floating = window.floating, .parked = window.parked, .minimized = window.observation.minimized, .fullscreen = window.observation.fullscreen, .managed_fullscreen = window.managedFullscreen(), .stale = window.observation.stale, .frame = window.observation.frame, .placement_error = window.placement_error, .group_hidden = !window.floating and world.layouts().visibility(window.identity) == .hidden_by_group, .parking_exempt = window.escape == .exempt, .minimum = .{ .width = window.bounds.minimumAt(.width), .height = window.bounds.minimumAt(.height) }, .maximum = .{ .width = if (window.bounds.ceilingAt(.width)) |ceiling| ceiling.accepted else null, .height = if (window.bounds.ceilingAt(.height)) |ceiling| ceiling.accepted else null } };
+    return reply.json(items[0..world.windows().len]);
+}
+
+pub fn listMonitors() reply.Reply {
+    const Item = struct { id: u32, uuid: ?[]const u8, name: []const u8, frame: Rect, full_bounds: Rect, built_in: bool, workspace: ?usize, selected: bool, blocked_by_fullscreen: bool };
+    var items: [monitor.capacity]Item = undefined;
+    var uuids: [monitor.capacity][64]u8 = undefined;
+    const count = world.displays().len;
+    for (world.displays(), uuids[0..count], items[0..count]) |*display, *uuid, *item| {
+        uuid.* = @splat(0);
+        const known = session.huen_session_display_uuid(display.identity, uuid, uuid.len);
+        const placed = routing.placedWorkspace(display.*);
+        item.* = .{ .id = display.identity, .uuid = if (known) text(uuid) else null, .name = text(&display.name), .frame = display.frame, .full_bounds = display.full_bounds, .built_in = display.built_in, .workspace = if (placed) |workspace| workspace + 1 else null, .selected = world.selected() == display.identity, .blocked_by_fullscreen = world.displayBlocked(display.identity) };
+    }
+    return reply.json(items[0..count]);
+}
+
+pub fn listWorkspaces() reply.Reply {
+    const Item = struct { display: u32, index: usize, name: []const u8, active: bool, urgent: bool, layout: commands.Layout };
+    var items: [monitor.capacity * 10]Item = undefined;
+    var count: usize = 0;
+    for (world.displays()) |display| for (world.config().workspaces[0..world.config().workspace_count], 0..) |*workspace, index| {
+        if (world.config().workspace_monitors != null and routing.host(index) != display.identity) continue;
+        const layout = if (world.layouts().lookup(display.identity, index)) |state| state.layout else workspace.layout;
+        const urgent = for (world.windows()) |window| {
+            if (window.urgent and window.display == display.identity and window.workspace == index) break true;
+        } else false;
+        items[count] = .{ .display = display.identity, .index = index + 1, .name = text(&workspace.name), .active = display.workspace == index, .urgent = urgent, .layout = layout };
+        count += 1;
+    };
+    return reply.json(items[0..count]);
+}
+
+// Journals a note with a snapshot of the manager's state, for a user to mark when something looks wrong.
+pub fn markWrong(note: []const u8) reply.Reply {
+    if (!journal.enabled()) return reply.failure("JournalDisabledByFilter");
+    var length = @min(note.len, 200);
+    while (length < note.len and note[length] & 0xc0 == 0x80) length -= 1;
+    const Shown = struct { display: u32, workspace: ?usize };
+    var shown: [monitor.capacity]Shown = undefined;
+    for (world.displays(), shown[0..world.displays().len]) |display, *item| item.* = .{ .display = display.identity, .workspace = if (routing.placedWorkspace(display)) |workspace| workspace + 1 else null };
+    var parked: usize = 0;
+    for (world.windows()) |window| parked += @intFromBool(window.parked);
+    if (!journal.append("mark", .{ .note = note[0..length], .window_count = world.windows().len, .parked_count = parked, .workspaces = shown[0..world.displays().len], .transition_error = journal.lastError() })) return reply.failure("JournalAppendFailed");
+    return reply.json(.{ .ok = true });
 }
