@@ -32,6 +32,7 @@ const routing = @import("routing.zig");
 const scene = @import("scene.zig");
 const focus = @import("focus.zig");
 const discovery = @import("discovery.zig");
+const hotkeys = @import("hotkeys.zig");
 const json = reply.json;
 const failure = reply.failure;
 const allocator = std.heap.c_allocator;
@@ -39,11 +40,6 @@ const Rect = native.WMRect;
 const Layout = commands.Layout;
 const Direction = commands.Direction;
 const parseCommand = commands.parse;
-var active_mode: usize = 0;
-var shortcut_buffer: [64]commands.WorkspaceSelector = undefined;
-var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer(&shortcut_buffer);
-var hotkey_watch: delivery.Watch = .{};
-var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
 var swipe_recognizer: swipe.Recognizer = .{};
 var gestures_enabled = false;
 const StatusPresentation = union(enum) {
@@ -222,7 +218,7 @@ fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
     }
     @memcpy(destination[0..length], source[0..length]);
 }
-fn publishState() void {
+pub fn publishState() void {
     journal.flushTransition();
     publishPointer();
     publishStatus();
@@ -251,7 +247,7 @@ pub fn publishStatus() void {
             urgent[window.workspace] = true;
             alert = true;
         };
-        const shown = if (active_mode != 0 and !world.isSuspended()) text(&world.config().modes[active_mode].name) else label;
+        const shown = if (hotkeys.activeMode() != 0 and !world.isSuspended()) text(&world.config().modes[hotkeys.activeMode()].name) else label;
         switch (world.config().status_bar.style) {
             .text => statusText(&presentation.title, shown, 24),
             .badge => statusText(&presentation.badge, shown, 24),
@@ -264,7 +260,7 @@ pub fn publishStatus() void {
         const tooltip = std.fmt.bufPrint(&tooltip_buffer, "Huen WM · {s} · {s} · Mode {s}{s}", .{
             if (display) |current| text(&current.name) else "No display",
             name,
-            text(&world.config().modes[active_mode].name),
+            text(&world.config().modes[hotkeys.activeMode()].name),
             if (journal.lastError() != null) " · Workspace switch failed" else "",
         }) catch unreachable;
         statusText(&presentation.tooltip, tooltip, 255);
@@ -317,8 +313,7 @@ export fn wm_initialize(path: [*:0]const u8) bool {
     return true;
 }
 export fn wm_activate_config() bool {
-    if (!native.platform_bindings(&world.config().modes[0].bindings, world.config().modes[0].binding_count)) return false;
-    active_mode = 0;
+    if (!hotkeys.activate()) return false;
     status_active = true;
     configureInput();
     publishStatus();
@@ -334,12 +329,11 @@ export fn wm_config_poll() void {
     // Cancelled requests must still drain while shutdown waits for the worker.
     if (scene.pending() and reload.waiting()) return;
     const candidate = reload.take() orelse return;
-    if (!native.platform_bindings(&candidate.modes[0].bindings, candidate.modes[0].binding_count)) return reload.reject("HotkeyCollision");
-    hotkey_watch.forgetPresses();
+    if (!hotkeys.bind(&candidate, 0)) return reload.reject("HotkeyCollision");
     routing.adoptConfig(&candidate);
     configureInput();
     checkpoint.configure();
-    active_mode = 0;
+    hotkeys.resetMode();
     reload.settle();
     if (world.displays().len > 0) _ = routing.reroute();
     native.platform_config_changed();
@@ -357,7 +351,7 @@ export fn wm_tick() void {
     if (displays.changed) {
         if (world.displays().len != 0) placer.noteTopologyChange();
         scene.invalidate();
-        workspace_shortcuts.clearRetainingCapacity();
+        hotkeys.dropShortcuts();
     }
     world.commitDisplays(&displays);
     if (world.displays().len == 0) return;
@@ -396,30 +390,14 @@ fn swapWindows(source_index: usize, target_index: usize) [*:0]const u8 {
 }
 export fn wm_hotkey_poll() void {
     const now = native.platform_monotonic();
-    // macOS can stop delivering registered hotkeys without an error.
-    if (hotkey_watch.overdue(now)) |command| {
-        hotkey_recovery.missed += 1;
-        var buffer: [256:0]u8 = @splat(0);
-        _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(&command)}) catch {};
-        native.platform_error(&buffer);
-        _ = journal.append("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
-        if (now - hotkey_recovery.rebound >= 5) {
-            hotkey_recovery.rebound = now;
-            hotkey_recovery.rebinds += 1;
-            if (!native.platform_rebind()) {
-                native.platform_error("Hotkey re-registration failed");
-                _ = journal.append("error", .{ .message = "Hotkey re-registration failed" });
-            }
-        }
-        wm_hotkey(&command);
-    }
-    if (focus.settled(now)) placeShortcuts();
+    if (hotkeys.overdue(now)) |command| wm_hotkey(&command);
+    if (focus.settled(now)) hotkeys.flush();
 }
 export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
-    hotkey_watch.pressed(slot, std.mem.span(command), native.platform_monotonic());
+    hotkeys.pressed(slot, std.mem.span(command));
 }
 export fn wm_hotkey_delivered(slot: u32, command: [*:0]const u8) void {
-    if (hotkey_watch.delivered(slot, native.platform_monotonic())) wm_hotkey(command);
+    if (hotkeys.delivered(slot)) wm_hotkey(command);
 }
 export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {
     if (!world.isInitialized() or !world.config().swipe.enabled) return;
@@ -435,51 +413,16 @@ export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {
     };
     wm_hotkey(if (step == .next) "workspace occupied+1" else "workspace occupied-1");
 }
-fn placeShortcuts() void {
-    if (workspace_shortcuts.items.len == 0) return;
-    defer workspace_shortcuts.clearRetainingCapacity();
-    if (world.isSuspended() or world.displays().len == 0 or scene.pending()) return;
-    defer publishState();
-    var remaining = workspace_shortcuts.items;
-    while (remaining.len != 0) {
-        focus.observeCommandState();
-        const slot = world.activeDisplay();
-        var view = routing.view(slot);
-        const from = view.current;
-        const owners = routing.resolve();
-        var destination: ?u32 = null;
-        while (remaining.len != 0) {
-            const target = selector.resolve(remaining[0], view) catch {
-                remaining = remaining[1..];
-                continue;
-            };
-            const owner = owners[target] orelse world.displays()[slot].identity;
-            if (destination != null and destination != owner) break;
-            destination = owner;
-            if (target != view.current) view.previous = view.current;
-            view.current = target;
-            view.back_and_forth = world.config().workspace_back_and_forth;
-            remaining = remaining[1..];
-        }
-        if (destination != null) _ = if (world.config().workspace_monitors != null) scene.show(view.current, from, null) else scene.switchTo(slot, view.current, from, null);
-    }
-}
 export fn wm_hotkey(commandText: [*:0]const u8) void {
-    const command = parseCommand(std.mem.span(commandText), world.config().workspace_count) catch return;
-    if (command != .workspace or world.isSuspended() or scene.pending() or world.displays().len == 0 or (world.config().duration != 0 and native.huen_scene_capture_allowed())) {
-        _ = wm_command(commandText);
-        return;
-    }
-    if (workspace_shortcuts.items.len == workspace_shortcuts.capacity) placeShortcuts();
-    workspace_shortcuts.appendAssumeCapacity(command.workspace);
+    if (hotkeys.route(commandText) == .run) _ = wm_command(commandText);
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     defer publishState();
     const command = parseCommand(std.mem.span(commandText), world.config().workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
         .status, .windows, .monitors, .workspaces, .wrong => {},
-        .quit, .restore => workspace_shortcuts.clearRetainingCapacity(),
-        else => placeShortcuts(),
+        .quit, .restore => hotkeys.dropShortcuts(),
+        else => hotkeys.flush(),
     }
     switch (command) {
         .status => {
@@ -489,7 +432,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             return json(.{
                 .running = true,
                 .suspended = world.isSuspended(),
-                .active_mode = text(&world.config().modes[active_mode].name),
+                .active_mode = text(&world.config().modes[hotkeys.activeMode()].name),
                 .close_state = edits.closeState(),
                 .launch = .{ .request_id = launch.request_id, .state = launch.state, .message = text(&launch.message) },
                 .window_count = world.windows().len,
@@ -505,7 +448,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .snapshot_generation = scene.generationCount(),
                 .transition_pending = scene.pending(),
                 .transition_error = journal.lastError(),
-                .hotkeys = .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds },
+                .hotkeys = hotkeys.status(),
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
                 .session = checkpoint.status(),
                 .parking_recovery = recovery.status(),
@@ -513,14 +456,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .config_reload = reload.status(),
             });
         },
-        .mode => |name| {
-            const index = world.config().modeIndex(name.text()) orelse return failure("UnknownMode");
-            const mode = &world.config().modes[index];
-            if (!native.platform_bindings(&mode.bindings, mode.binding_count)) return failure("HotkeyCollision");
-            hotkey_watch.forgetPresses();
-            active_mode = index;
-            return json(.{ .ok = true, .active_mode = text(&mode.name) });
-        },
+        .mode => |name| return hotkeys.selectMode(name.text()),
         .launch => |request| return edits.launch(request),
         .wrong => |note| {
             if (!journal.enabled()) return failure("JournalDisabledByFilter");
