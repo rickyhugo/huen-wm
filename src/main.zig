@@ -196,15 +196,18 @@ fn saveSession(clean: bool) void {
     session_status.save = .saved;
 }
 fn pointerWindows(output: []pointer.Window) []pointer.Window {
-    for (windows.items, 0..) |window, index| output[index] = .{
-        .identity = window.identity,
-        .public_id = window.observation.public_window_id,
-        .goal = window.goal,
-        .eligible = visible(window) and !window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle and framesNear(window.observation.frame, targetFrame(window), 2),
-        .title = text(&windows.items[index].observation.title),
-        .floating = if (visible(window) and window.floating and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle) window.observation.frame else null,
-        .focused = focused == window.identity,
-    };
+    for (windows.items, 0..) |window, index| {
+        const hit = visible(window) and !window.parked and !managedFullscreen(window) and !displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle;
+        output[index] = .{
+            .identity = window.identity,
+            .public_id = window.observation.public_window_id,
+            .goal = window.goal,
+            .eligible = hit and !window.floating and framesNear(window.observation.frame, targetFrame(window), 2),
+            .title = text(&windows.items[index].observation.title),
+            .floating = if (hit and window.floating) window.observation.frame else null,
+            .focused = focused == window.identity,
+        };
+    }
     return output[0..windows.items.len];
 }
 fn publishPointer() void {
@@ -607,9 +610,7 @@ fn managedFullscreen(window: Window) bool {
     return state.fullscreen == window.identity;
 }
 fn targetFrame(window: Window) Rect {
-    if (managedFullscreen(window)) {
-        if (displayIndex(window.display)) |index| return displays.items[index].frame;
-    }
+    if (managedFullscreen(window)) if (displayIndex(window.display)) |index| return displays.items[index].frame;
     return if (window.floating) window.floating_frame else window.bounds.fit(window.goal);
 }
 fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
@@ -1289,9 +1290,7 @@ fn placeVisible(window: *Window) PlacementOutcome {
             outcome = attemptVisibility(window, targetFrame(window.*), false);
         }
     };
-    if (outcome == .applied and !window.floating and !managedFullscreen(window.*)) {
-        window.placed = .{ .frame = targetFrame(window.*), .at = native.platform_monotonic() };
-    }
+    if (outcome == .applied and !window.floating and !managedFullscreen(window.*)) window.placed = .{ .frame = targetFrame(window.*), .at = native.platform_monotonic() };
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
@@ -2105,42 +2104,6 @@ fn jumpToWindow(identity: u64, display_slot: usize) [*:0]const u8 {
     focusWorkspace(window.display, identity);
     return json(.{ .ok = true, .verified = focused == identity, .target = identity });
 }
-// Global mode: sets each moved workspace's runtime home to its destination display and shows it
-// there. A display in `vacated` that loses its shown workspace shows the global previous workspace
-// if it is placed there, else its lowest placed workspace, else nothing. Selects `follow`.
-fn rehomeWorkspaces(moves: []const Activation, vacated: ?u32, follow: u32) [*:0]const u8 {
-    var homes: [10][128]u8 = undefined;
-    for (&homes, placements) |*home, placement| home.* = placement.home;
-    for (moves) |move| {
-        const moved = &placements[move.workspace].home;
-        moved.* = @splat(0);
-        if (session.huen_session_display_uuid(move.display, moved, moved.len)) continue;
-        for (&placements, homes) |*placement, home| placement.home = home;
-        return failure("MonitorUuidUnavailable");
-    }
-    const resolved = resolvePlacements();
-    var forced: [3]Activation = undefined;
-    @memcpy(forced[0..moves.len], moves);
-    var count = moves.len;
-    if (vacated) |identity| {
-        const fallback: ?usize = if (global_previous != null and resolved[global_previous.?] == identity) global_previous else for (0..config.workspace_count) |workspace| {
-            if (resolved[workspace] == identity) break workspace;
-        } else null;
-        if (fallback) |workspace| {
-            forced[count] = .{ .display = identity, .workspace = workspace };
-            count += 1;
-        }
-    }
-    generation += 1;
-    snapshot_presentation = .instant;
-    if (!route(resolved, forced[0..count], null)) {
-        for (&placements, homes) |*placement, home| placement.home = home;
-        return failure(transition_error orelse "MonitorRoutingFailed");
-    }
-    focusWorkspace(follow, null);
-    native.platform_config_changed();
-    return json(.{ .ok = true, .monitor = follow, .verified = selected_display == follow, .focused = focused });
-}
 fn observeCommandState() void {
     refreshObservations();
     const observed_focus = native.platform_focused_window();
@@ -2403,10 +2366,45 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
             const workspace = display.workspace;
             if (placements[workspace].display != display.identity) return failure("NoWorkspaceOnMonitor");
             if (target == display.identity) return json(.{ .ok = true, .changed = false, .monitor = target });
-            if (command == .move_workspace_to_monitor) return rehomeWorkspaces(&.{.{ .display = target, .workspace = workspace }}, display.identity, target);
-            const target_workspace = displays.items[displayIndex(target).?].workspace;
-            if (placements[target_workspace].display != target) return failure("NoWorkspaceOnMonitor");
-            return rehomeWorkspaces(&.{ .{ .display = target, .workspace = workspace }, .{ .display = display.identity, .workspace = target_workspace } }, null, target);
+            // Each moved workspace's runtime home becomes its destination display, which shows it.
+            var forced: [2]Activation = .{ .{ .display = target, .workspace = workspace }, undefined };
+            var count: usize = 1;
+            if (command == .swap_monitor_workspaces) {
+                const target_workspace = displays.items[displayIndex(target).?].workspace;
+                if (placements[target_workspace].display != target) return failure("NoWorkspaceOnMonitor");
+                forced[1] = .{ .display = display.identity, .workspace = target_workspace };
+                count = 2;
+            }
+            var homes: [10][128]u8 = undefined;
+            for (&homes, placements) |*home, placement| home.* = placement.home;
+            for (forced[0..count]) |move| {
+                const moved = &placements[move.workspace].home;
+                moved.* = @splat(0);
+                if (session.huen_session_display_uuid(move.display, moved, moved.len)) continue;
+                for (&placements, homes) |*placement, home| placement.home = home;
+                return failure("MonitorUuidUnavailable");
+            }
+            const resolved = resolvePlacements();
+            // The vacated display shows the global previous workspace if it is placed there, else its lowest placed one, else nothing.
+            if (command == .move_workspace_to_monitor) {
+                const vacated = display.identity;
+                const fallback: ?usize = if (global_previous != null and resolved[global_previous.?] == vacated) global_previous else for (0..config.workspace_count) |candidate| {
+                    if (resolved[candidate] == vacated) break candidate;
+                } else null;
+                if (fallback) |shown| {
+                    forced[1] = .{ .display = vacated, .workspace = shown };
+                    count = 2;
+                }
+            }
+            generation += 1;
+            snapshot_presentation = .instant;
+            if (!route(resolved, forced[0..count], null)) {
+                for (&placements, homes) |*placement, home| placement.home = home;
+                return failure(transition_error orelse "MonitorRoutingFailed");
+            }
+            focusWorkspace(target, null);
+            native.platform_config_changed();
+            return json(.{ .ok = true, .monitor = target, .verified = selected_display == target, .focused = focused });
         },
         .cycle => |request| {
             var identities: [1024]u64 = undefined;
