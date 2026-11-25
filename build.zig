@@ -8,22 +8,22 @@ pub fn build(builder: *std.Build) void {
     const optimize = builder.standardOptimizeOption(.{});
     const module = builder.createModule(.{ .root_source_file = builder.path("src/main.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const sdk = std.mem.trim(u8, builder.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n");
-    module.addSystemFrameworkPath(.{ .cwd_relative = builder.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-    module.addSystemIncludePath(.{ .cwd_relative = builder.fmt("{s}/usr/include", .{sdk}) });
-    module.addLibraryPath(.{ .cwd_relative = builder.fmt("{s}/usr/lib", .{sdk}) });
+    const native_smoke_module = builder.createModule(.{ .root_source_file = builder.path("tools/native_smoke.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for ([_]*std.Build.Module{ module, native_smoke_module }) |sdk_user| {
+        sdk_user.addSystemFrameworkPath(.{ .cwd_relative = builder.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        sdk_user.addSystemIncludePath(.{ .cwd_relative = builder.fmt("{s}/usr/include", .{sdk}) });
+        sdk_user.addLibraryPath(.{ .cwd_relative = builder.fmt("{s}/usr/lib", .{sdk}) });
+    }
     module.addIncludePath(builder.path("native"));
     module.addIncludePath(builder.path("native/vendor/lua-5.5.1"));
     module.addCSourceFile(.{ .file = builder.path("native/config_worker.c"), .flags = &.{ "-Wall", "-Wextra" } });
     module.addCSourceFiles(.{ .root = builder.path("native/vendor/lua-5.5.1"), .files = &.{ "lapi.c", "lauxlib.c", "lbaselib.c", "lcode.c", "lcorolib.c", "lctype.c", "ldblib.c", "ldebug.c", "ldo.c", "ldump.c", "lfunc.c", "lgc.c", "linit.c", "liolib.c", "llex.c", "lmathlib.c", "lmem.c", "loadlib.c", "lobject.c", "lopcodes.c", "loslib.c", "lparser.c", "lstate.c", "lstring.c", "lstrlib.c", "ltable.c", "ltablib.c", "ltm.c", "lundump.c", "lutf8lib.c", "lvm.c", "lzio.c" }, .flags = &.{"-DLUA_USE_MACOSX"} });
-    const native = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
-    native.addArg(builder.fmt("-DHUEN_ZIG_VERSION=\"{s}\"", .{@import("builtin").zig_version_string}));
-    native.addArg("-I");
-    native.addDirectoryArg(builder.path("native/vendor/lua-5.5.1"));
-    native.addFileArg(builder.path("native/platform.m"));
-    native.addArg("-o");
-    module.addObjectFile(native.addOutputFileArg("platform.o"));
-    for ([_][]const u8{ "scene", "groups" }) |unit| {
+    for ([_][]const u8{ "platform", "scene", "groups" }) |unit| {
         const compilation = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
+        if (std.mem.eql(u8, unit, "platform")) {
+            compilation.addArgs(&.{ builder.fmt("-DHUEN_ZIG_VERSION=\"{s}\"", .{@import("builtin").zig_version_string}), "-I" });
+            compilation.addDirectoryArg(builder.path("native/vendor/lua-5.5.1"));
+        }
         compilation.addFileArg(builder.path(builder.fmt("native/{s}.m", .{unit})));
         compilation.addArg("-o");
         module.addObjectFile(compilation.addOutputFileArg(builder.fmt("{s}.o", .{unit})));
@@ -43,10 +43,6 @@ pub fn build(builder: *std.Build) void {
     smoke_run.addArtifactArg(executable);
     smoke_run.has_side_effects = true;
     builder.step("smoke", "Run headless checks of the CLI, configuration and socket").dependOn(&smoke_run.step);
-    const native_smoke_module = builder.createModule(.{ .root_source_file = builder.path("tools/native_smoke.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    native_smoke_module.addSystemFrameworkPath(.{ .cwd_relative = builder.fmt("{s}/System/Library/Frameworks", .{sdk}) });
-    native_smoke_module.addSystemIncludePath(.{ .cwd_relative = builder.fmt("{s}/usr/include", .{sdk}) });
-    native_smoke_module.addLibraryPath(.{ .cwd_relative = builder.fmt("{s}/usr/lib", .{sdk}) });
     for ([_][]const u8{ "CoreGraphics", "CoreFoundation", "ApplicationServices" }) |framework| native_smoke_module.linkFramework(framework, .{});
     const native_smoke = builder.addExecutable(.{ .name = "native-smoke", .root_module = native_smoke_module });
     builder.installArtifact(native_smoke);
