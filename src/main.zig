@@ -333,7 +333,18 @@ export fn wm_input_poll() void {
                 layouts.commitDrop(state, preview) catch |err| break :drop err;
                 break :drop representative;
             },
-            .resize => |preview| if (commitPointerResize(state, preview, if (preview.boundary.axis == .width) sample.point.left - sample.origin.left else sample.point.top - sample.origin.top)) null else |err| err,
+            // Clearing bounds during the drag would move the published boundaries and cancel the gesture, so the release retries the rest.
+            .resize => |preview| resize: {
+                const requested = if (preview.boundary.axis == .width) sample.point.left - sample.origin.left else sample.point.top - sample.origin.top;
+                layouts.commitResize(preview, config.gap) catch |err| break :resize err;
+                if (@abs(requested - preview.applied_delta) <= size_bounds.tolerance or !forgetWorkspaceBounds(state.display, state.workspace)) break :resize null;
+                if (!deriveGoals()) break :resize error.LayoutProjectionFailed;
+                var boundary = preview.boundary;
+                boundary.revision = layouts.revision;
+                const retry = layouts.previewResize(boundary, requested - preview.applied_delta, config.gap) catch |err| break :resize err;
+                layouts.commitResize(retry, config.gap) catch |err| break :resize err;
+                break :resize null;
+            },
         };
         const target = result catch |err| {
             transaction.rollback(&.{});
@@ -1319,15 +1330,6 @@ fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
     }
     return forgot;
 }
-// Clearing bounds during the drag would move the published boundaries and cancel the gesture, so the release retries the rest.
-fn commitPointerResize(state: *tiling.WorkspaceLayout, preview: tiling.ResizePreview, requested: f64) !void {
-    try layouts.commitResize(preview, config.gap);
-    if (@abs(requested - preview.applied_delta) <= size_bounds.tolerance or !forgetWorkspaceBounds(state.display, state.workspace)) return;
-    if (!deriveGoals()) return error.LayoutProjectionFailed;
-    var boundary = preview.boundary;
-    boundary.revision = layouts.revision;
-    try layouts.commitResize(try layouts.previewResize(boundary, requested - preview.applied_delta, config.gap), config.gap);
-}
 fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
     const area = inset(displays.items[displayIndex(window.display) orelse return false].frame, config.gap);
@@ -1335,17 +1337,13 @@ fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     const next = previous.learn(.{ requested.width, requested.height }, .{ accepted.width, accepted.height }, .{ area.width, area.height });
     if (std.meta.eql(next, previous)) return false;
     window.bounds = next;
-    if (deriveGoals() and minimumsHonored(window.display)) return true;
+    if (deriveGoals() and for (windows.items) |other| {
+        if (other.display != window.display or !visible(other) or other.floating or managedFullscreen(other)) continue;
+        if (other.goal.width < other.bounds.minimumAt(.width) - 2 or other.goal.height < other.bounds.minimumAt(.height) - 2) break false;
+    } else true) return true;
     window.bounds = previous;
     _ = deriveGoals();
     return false;
-}
-fn minimumsHonored(display: u32) bool {
-    for (windows.items) |window| {
-        if (window.display != display or !visible(window) or window.floating or managedFullscreen(window)) continue;
-        if (window.goal.width < window.bounds.minimumAt(.width) - 2 or window.goal.height < window.bounds.minimumAt(.height) - 2) return false;
-    }
-    return true;
 }
 fn parkWindow(window: *Window) PlacementOutcome {
     if (window.escape == .exempt) return .applied;
@@ -1393,89 +1391,82 @@ fn parkWindow(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
-fn settleTileWrite(window: *Window, target: Rect, now: f64) enum { proceed, wait, relayout } {
-    if (window.floating or managedFullscreen(window.*)) return .proceed;
-    const placed = if (window.placed) |*active| active else return .proceed;
-    if (!framesNear(target, placed.frame, size_bounds.tolerance) or now - placed.at > snap_back_window) {
-        window.placed = null;
-        return .proceed;
-    }
-    if (now < placed.at or window.observation.motion != .idle) return .proceed;
-    const observed = window.observation.frame;
-    if (@abs(observed.width - placed.frame.width) <= size_bounds.tolerance and @abs(observed.height - placed.frame.height) <= size_bounds.tolerance) {
-        placed.snap_candidate = null;
-        return .proceed;
-    }
-    if (placed.snap_candidate) |previous| {
-        if (@abs(observed.width - previous.width) <= size_bounds.tolerance and @abs(observed.height - previous.height) <= size_bounds.tolerance) {
-            const requested = placed.frame;
-            window.placed = null;
-            return if (learnBounds(window, requested, observed)) .relayout else .proceed;
-        }
-    }
-    placed.snap_candidate = observed;
-    native.platform_config_changed();
-    return .wait;
-}
-fn placeWindows() enum { settled, relayout } {
-    for (windows.items) |*window| {
-        if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
-            window.floating = true;
-            window.placed = null;
-            window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
-            window.goal = window.floating_frame;
-            placementFailure(window, "Tile too crowded; window left floating");
-        }
-    }
-    const now = native.platform_monotonic();
-    for (windows.items) |*window| {
-        if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
-        if (!visible(window.*)) {
-            _ = parkWindow(window);
-            continue;
-        }
-        const target = targetFrame(window.*);
-        if (window.parked) {
-            const outcome = placeVisible(window);
-            if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
-            continue;
-        }
-        switch (settleTileWrite(window, target, now)) {
-            .proceed => {},
-            .wait => continue,
-            .relayout => return .relayout,
-        }
-        const duration = if (window.floating_restore and !managedFullscreen(window.*)) 0 else config.duration;
-        const needs_write = !framesNear(window.observation.frame, target, size_bounds.tolerance);
-        var accepted: Rect = window.observation.frame;
-        if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and framesNear(accepted, target, 2)))) {
-            if (!window.floating and !managedFullscreen(window.*) and needs_write) {
-                window.placed = .{ .frame = target, .at = now + duration };
-            }
-            continue;
-        }
-        if (managedFullscreen(window.*)) {
-            floatRejectedTile(window);
-            continue;
-        }
-        if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
-        if (!window.floating and learnBounds(window, target, accepted)) return .relayout;
-        if (now - window.discovered < launch_grace) continue;
-        const tiled = !window.floating;
-        window.floating = true;
-        window.placed = null;
-        window.floating_restore = false;
-        window.floating_frame = accepted;
-        placementFailure(window, "Application rejected layout geometry; window left floating");
-        if (tiled) return .relayout;
-    }
-    return .settled;
-}
 fn reconcile() void {
     if (suspended or transition != null or displays.items.len == 0 or routing_blocked) return;
     if (!deriveGoals()) return;
     var passes: usize = 0;
-    while (placeWindows() == .relayout and passes < windows.items.len) : (passes += 1) {
+    while (true) : (passes += 1) {
+        const relayout = place: {
+            for (windows.items) |*window| {
+                if (visible(window.*) and !window.floating and !managedFullscreen(window.*) and (window.goal.width < tiling.minimum_tile_extent or window.goal.height < tiling.minimum_tile_extent)) {
+                    window.floating = true;
+                    window.placed = null;
+                    window.floating_frame = if (window.parked) window.parking_frame else window.observation.frame;
+                    window.goal = window.floating_frame;
+                    placementFailure(window, "Tile too crowded; window left floating");
+                }
+            }
+            const now = native.platform_monotonic();
+            for (windows.items) |*window| {
+                if (window.observation.minimized or window.observation.fullscreen or window.observation.stale or displayBlocked(window.display) or (!window.observation.onscreen and !window.parked)) continue;
+                if (!visible(window.*)) {
+                    _ = parkWindow(window);
+                    continue;
+                }
+                const target = targetFrame(window.*);
+                if (window.parked) {
+                    const outcome = placeVisible(window);
+                    if (outcome == .rolled_back or outcome == .recovery_required) floatRejectedTile(window);
+                    continue;
+                }
+                settle: {
+                    if (window.floating or managedFullscreen(window.*)) break :settle;
+                    const placed = if (window.placed) |*active| active else break :settle;
+                    if (!framesNear(target, placed.frame, size_bounds.tolerance) or now - placed.at > snap_back_window) {
+                        window.placed = null;
+                        break :settle;
+                    }
+                    if (now < placed.at or window.observation.motion != .idle) break :settle;
+                    const observed = window.observation.frame;
+                    if (@abs(observed.width - placed.frame.width) <= size_bounds.tolerance and @abs(observed.height - placed.frame.height) <= size_bounds.tolerance) {
+                        placed.snap_candidate = null;
+                        break :settle;
+                    }
+                    if (placed.snap_candidate) |previous| if (@abs(observed.width - previous.width) <= size_bounds.tolerance and @abs(observed.height - previous.height) <= size_bounds.tolerance) {
+                        const requested = placed.frame;
+                        window.placed = null;
+                        if (learnBounds(window, requested, observed)) break :place true;
+                        break :settle;
+                    };
+                    placed.snap_candidate = observed;
+                    native.platform_config_changed();
+                    continue;
+                }
+                const duration = if (window.floating_restore and !managedFullscreen(window.*)) 0 else config.duration;
+                const needs_write = !framesNear(window.observation.frame, target, size_bounds.tolerance);
+                var accepted: Rect = window.observation.frame;
+                if (native.platform_frame(window.identity, target, duration, .visible_goal) and (duration != 0 or (native.platform_read_frame(window.identity, &accepted) and framesNear(accepted, target, 2)))) {
+                    if (!window.floating and !managedFullscreen(window.*) and needs_write) window.placed = .{ .frame = target, .at = now + duration };
+                    continue;
+                }
+                if (managedFullscreen(window.*)) {
+                    floatRejectedTile(window);
+                    continue;
+                }
+                if (!native.platform_read_frame(window.identity, &accepted)) accepted = window.observation.frame;
+                if (!window.floating and learnBounds(window, target, accepted)) break :place true;
+                if (now - window.discovered < launch_grace) continue;
+                const tiled = !window.floating;
+                window.floating = true;
+                window.placed = null;
+                window.floating_restore = false;
+                window.floating_frame = accepted;
+                placementFailure(window, "Application rejected layout geometry; window left floating");
+                if (tiled) break :place true;
+            }
+            break :place false;
+        };
+        if (!relayout or passes == windows.items.len) break;
         if (!deriveGoals()) return;
     }
     var borderIdentity: u64 = 0;
@@ -1568,98 +1559,10 @@ fn recoveryFrame(frame: Rect) Rect {
     }
     return boundedFloating(frame, area);
 }
-// Patches the observations with the readback so discovery assigns each window to the display it is on now.
-// The first call matches the journal of the previous process. Later calls match the orphans against windows not seen before.
-fn recoverParked(observed: []native.WMWindow, output: []parking.Recovery) []parking.Recovery {
-    var outcome: ParkingRecovery = parking_recovery orelse .{};
-    defer parking_recovery = outcome;
-    var records: [parking.max_records]parking.Record = undefined;
-    var since: [parking.max_records]f64 = undefined;
-    const now = native.platform_monotonic();
-    var count: usize = 0;
-    var loaded: ?std.json.Parsed(parking.Journal) = null;
-    defer if (loaded) |*parsed| parsed.deinit();
-    if (parking_recovery == null) {
-        loaded = parking.load(allocator, std.mem.span(native.platform_filter())) catch |err| {
-            reportParkingJournal("Parking journal rejected", err);
-            return output[0..0];
-        };
-        if (loaded) |parsed| {
-            count = parsed.value.records.len;
-            @memcpy(records[0..count], parsed.value.records);
-            @memset(since[0..count], now);
-            outcome.records = count;
-        }
-    } else for (orphans.items) |*lost| {
-        records[count] = orphanRecord(lost);
-        since[count] = lost.since;
-        count += 1;
-    }
-    if (count == 0) return output[0..0];
-    var eligible: [1024]bool = undefined;
-    for (observed, eligible[0..observed.len]) |observation, *open| open.* = windowIndex(observation.identity) == null;
-    var claimed: [parking.max_records]bool = @splat(false);
-    const recoveries = parking.match(records[0..count], observed, eligible[0..observed.len], claimed[0..count], output);
-    // An unmatched record stays for up to a minute while its application runs, because a scan can miss an application that does not answer.
-    var kept: [256]Orphan = undefined;
-    var kept_count: usize = 0;
-    for (records[0..count], claimed[0..count], since[0..count]) |record, used, lost_at| {
-        if (used or kept_count == kept.len or now - lost_at > orphan_lifetime or processExited(.{ .pid = record.pid, .token = record.token })) continue;
-        kept[kept_count] = orphanOf(record, lost_at);
-        kept_count += 1;
-    }
-    orphans.clearRetainingCapacity();
-    orphans.appendSliceAssumeCapacity(kept[0..kept_count]);
-    for (recoveries) |*recovery| {
-        const window = &observed[recovery.index];
-        recovery.original = recoveryFrame(recovery.original);
-        var actual = window.frame;
-        if (native.platform_adopt_original(window.identity, recovery.original, &actual)) outcome.recovered += 1 else outcome.failed += 1;
-        window.frame = actual;
-    }
-    if (recoveries.len > 0) native.platform_config_changed();
-    return recoveries;
-}
 const replacement_grace = 0.5;
 fn replaces(ghost: Window, successor: Window) bool {
     const vanished = ghost.vanished orelse return false;
     return successor.vanished == null and successor.observation.pid == ghost.observation.pid and @abs(successor.discovered - vanished) <= replacement_grace and framesNear(successor.discovered_frame, ghost.observation.frame, 4);
-}
-fn successorIndex(ghost_index: usize) ?usize {
-    var found: ?usize = null;
-    for (windows.items, 0..) |candidate, index| if (replaces(windows.items[ghost_index], candidate)) {
-        if (found != null) return null;
-        found = index;
-    };
-    const successor = windows.items[found orelse return null];
-    for (windows.items, 0..) |other, index| if (index != ghost_index and replaces(other, successor)) return null;
-    return found;
-}
-// The successor takes the ghost's slot because the master layout orders its stack by slot.
-fn replaceWindow(ghost_index: usize, successor_index: usize) void {
-    const ghost = windows.items[ghost_index];
-    var successor = windows.items[successor_index];
-    successor.workspace = ghost.workspace;
-    successor.display = ghost.display;
-    successor.floating = ghost.floating;
-    successor.floating_frame = ghost.floating_frame;
-    successor.floating_restore = ghost.floating;
-    successor.last_floating_frame = ghost.last_floating_frame;
-    successor.bounds = ghost.bounds;
-    successor.placed = null;
-    // The successor appeared at the corner, so that frame must not become the geometry that restore writes back.
-    if (ghost.vanished_parked) {
-        successor.parking_frame = recoveryFrame(ghost.parking_frame);
-        successor.parked = true;
-        var actual = successor.observation.frame;
-        _ = native.platform_adopt_original(successor.identity, successor.parking_frame, &actual);
-        successor.observation.frame = actual;
-    }
-    layouts.replaceIdentity(ghost.identity, successor.identity);
-    focus_history.rename(ghost.identity, successor.identity);
-    if (last_observed_focus == ghost.identity) last_observed_focus = successor.identity;
-    windows.items[ghost_index] = successor;
-    _ = windows.orderedRemove(successor_index);
 }
 fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
     if (window.observation.bundle[0] == 0) return null;
@@ -1668,47 +1571,8 @@ fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
     @memcpy(entry.workspace[0..name.len], name);
     return entry;
 }
-// An application can take seconds to exit after its windows close, so the entry waits for `settle` to see the exit.
-fn rememberPlacement(window: Window, now: f64) void {
-    if (!config.placement_memory or window.observation.process_token == 0) return;
-    var entry = placementEntry(window, window.observation.frame, now + 30) orelse return;
-    entry.owner = .{ .process = .{ .pid = window.observation.pid, .token = window.observation.process_token }, .since = now };
-    placement_memory.remember(entry);
-}
-// The token is a launch date in seconds since 2001.
-fn processAge(token: f64) f64 {
-    if (token == 0) return 0;
-    var clock: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &clock);
-    return @as(f64, @floatFromInt(clock.sec)) - 978307200 - token;
-}
 fn processExited(process: memory.Process) bool {
     return native.platform_process_token(process.pid) != process.token;
-}
-fn claimPlacement(window: *Window, decision: rules.Decision, display: u32) void {
-    if (!config.placement_memory or decision.workspace != null) return;
-    const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered) orelse return;
-    const workspace = config.workspaceIndex(text(&entry.workspace)) orelse return;
-    placement_claims += 1;
-    window.workspace = workspace;
-    if (decision.floating == null) window.floating = entry.floating;
-    if (!window.floating or decision.geometry != null or decision.centered) return;
-    const destination = resolvePlacements()[workspace] orelse display;
-    window.floating_frame = boundedFloating(entry.floating_frame, inset(displays.items[displayIndex(destination).?].frame, config.gap));
-    window.floating_restore = true;
-}
-fn loadPlacements() void {
-    if (!config.placement_memory) return;
-    const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
-    const bytes = allocator.alloc(u8, memory.max_bytes) catch return native.platform_error("Placement memory: out of memory");
-    defer allocator.free(bytes);
-    var used: usize = 0;
-    switch (session.huen_session_read("placements", &hash, bytes.ptr, bytes.len, &used)) {
-        0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
-        1 => return,
-        else => return native.platform_error("Placement memory: file unreadable"),
-    }
-    writePlacements(&.{});
 }
 fn writePlacements(entries: []const memory.Entry) void {
     const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
@@ -1763,16 +1627,82 @@ export fn wm_tick() void {
     displays.clearRetainingCapacity();
     displays.appendSliceAssumeCapacity(updated[0..displayCount]);
     if (displays.items.len == 0) return;
-    if (!placement_memory_loaded) {
-        placement_memory_loaded = true;
-        loadPlacements();
+    if (!placement_memory_loaded and config.placement_memory) load: {
+        const hash = memory.scopeHash(std.mem.span(native.platform_filter()));
+        const bytes = allocator.alloc(u8, memory.max_bytes) catch {
+            native.platform_error("Placement memory: out of memory");
+            break :load;
+        };
+        defer allocator.free(bytes);
+        var used: usize = 0;
+        switch (session.huen_session_read("placements", &hash, bytes.ptr, bytes.len, &used)) {
+            0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
+            1 => break :load,
+            else => {
+                native.platform_error("Placement memory: file unreadable");
+                break :load;
+            },
+        }
+        writePlacements(&.{});
     }
+    placement_memory_loaded = true;
     if (placement_memory.count > 0) placement_memory.settle(native.platform_monotonic(), processExited);
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
     var recovered: [1024]parking.Recovery = undefined;
     const first_scan = parking_recovery == null;
-    const recoveries = if (first_scan or orphans.items.len > 0) recoverParked(observed[0..count], &recovered) else recovered[0..0];
+    // Patches the observations with the readback so discovery assigns each window to the display it is on now.
+    // The first scan matches the journal of the previous process. Later scans match the orphans against windows not seen before.
+    const recoveries = if (!first_scan and orphans.items.len == 0) recovered[0..0] else recover: {
+        var outcome: ParkingRecovery = parking_recovery orelse .{};
+        defer parking_recovery = outcome;
+        var records: [parking.max_records]parking.Record = undefined;
+        var since: [parking.max_records]f64 = undefined;
+        const now = native.platform_monotonic();
+        var record_count: usize = 0;
+        var loaded: ?std.json.Parsed(parking.Journal) = null;
+        defer if (loaded) |*parsed| parsed.deinit();
+        if (first_scan) {
+            loaded = parking.load(allocator, std.mem.span(native.platform_filter())) catch |err| {
+                reportParkingJournal("Parking journal rejected", err);
+                break :recover recovered[0..0];
+            };
+            if (loaded) |parsed| {
+                record_count = parsed.value.records.len;
+                @memcpy(records[0..record_count], parsed.value.records);
+                @memset(since[0..record_count], now);
+                outcome.records = record_count;
+            }
+        } else for (orphans.items) |*lost| {
+            records[record_count] = orphanRecord(lost);
+            since[record_count] = lost.since;
+            record_count += 1;
+        }
+        if (record_count == 0) break :recover recovered[0..0];
+        var eligible: [1024]bool = undefined;
+        for (observed[0..count], eligible[0..count]) |observation, *open| open.* = windowIndex(observation.identity) == null;
+        var claimed: [parking.max_records]bool = @splat(false);
+        const matches = parking.match(records[0..record_count], observed[0..count], eligible[0..count], claimed[0..record_count], &recovered);
+        // An unmatched record stays for up to a minute while its application runs, because a scan can miss an application that does not answer.
+        var kept: [256]Orphan = undefined;
+        var kept_count: usize = 0;
+        for (records[0..record_count], claimed[0..record_count], since[0..record_count]) |record, used, lost_at| {
+            if (used or kept_count == kept.len or now - lost_at > orphan_lifetime or processExited(.{ .pid = record.pid, .token = record.token })) continue;
+            kept[kept_count] = orphanOf(record, lost_at);
+            kept_count += 1;
+        }
+        orphans.clearRetainingCapacity();
+        orphans.appendSliceAssumeCapacity(kept[0..kept_count]);
+        for (matches) |*recovery| {
+            const window = &observed[recovery.index];
+            recovery.original = recoveryFrame(recovery.original);
+            var actual = window.frame;
+            if (native.platform_adopt_original(window.identity, recovery.original, &actual)) outcome.recovered += 1 else outcome.failed += 1;
+            window.frame = actual;
+        }
+        if (matches.len > 0) native.platform_config_changed();
+        break :recover matches;
+    };
     var observed_focus: ?u64 = null;
     for (observed[0..count]) |observation| {
         if (observation.focused) observed_focus = observation.identity;
@@ -1830,8 +1760,24 @@ export fn wm_tick() void {
         };
         window.discovered = native.platform_monotonic();
         // A window the first scan finds predates the manager, but its application may have launched only moments before.
-        window.established = first_scan and processAge(observation.process_token) > 5;
-        claimPlacement(&window, decision, display);
+        window.established = first_scan and age: {
+            if (observation.process_token == 0) break :age false;
+            // The token is a launch date in seconds since 2001.
+            var clock: std.c.timespec = undefined;
+            _ = std.c.clock_gettime(.REALTIME, &clock);
+            break :age @as(f64, @floatFromInt(clock.sec)) - 978307200 - observation.process_token > 5;
+        };
+        if (config.placement_memory and decision.workspace == null) claim: {
+            const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered) orelse break :claim;
+            const workspace = config.workspaceIndex(text(&entry.workspace)) orelse break :claim;
+            placement_claims += 1;
+            window.workspace = workspace;
+            if (decision.floating == null) window.floating = entry.floating;
+            if (!window.floating or decision.geometry != null or decision.centered) break :claim;
+            const destination = resolvePlacements()[workspace] orelse display;
+            window.floating_frame = boundedFloating(entry.floating_frame, inset(displays.items[displayIndex(destination).?].frame, config.gap));
+            window.floating_restore = true;
+        }
         windows.appendAssumeCapacity(window);
     }
     var now: ?f64 = null;
@@ -1857,8 +1803,41 @@ export fn wm_tick() void {
             index += 1;
             continue;
         };
-        if (successorIndex(index)) |successor| {
-            replaceWindow(index, successor);
+        const successor_index = search: {
+            var found: ?usize = null;
+            for (windows.items, 0..) |candidate, candidate_index| if (replaces(windows.items[index], candidate)) {
+                if (found != null) break :search null;
+                found = candidate_index;
+            };
+            const successor = windows.items[found orelse break :search null];
+            for (windows.items, 0..) |other, other_index| if (other_index != index and replaces(other, successor)) break :search null;
+            break :search found;
+        };
+        // The successor takes the ghost's slot because the master layout orders its stack by slot.
+        if (successor_index) |successor_slot| {
+            const ghost = windows.items[index];
+            var successor = windows.items[successor_slot];
+            successor.workspace = ghost.workspace;
+            successor.display = ghost.display;
+            successor.floating = ghost.floating;
+            successor.floating_frame = ghost.floating_frame;
+            successor.floating_restore = ghost.floating;
+            successor.last_floating_frame = ghost.last_floating_frame;
+            successor.bounds = ghost.bounds;
+            successor.placed = null;
+            // The successor appeared at the corner, so that frame must not become the geometry that restore writes back.
+            if (ghost.vanished_parked) {
+                successor.parking_frame = recoveryFrame(ghost.parking_frame);
+                successor.parked = true;
+                var actual = successor.observation.frame;
+                _ = native.platform_adopt_original(successor.identity, successor.parking_frame, &actual);
+                successor.observation.frame = actual;
+            }
+            layouts.replaceIdentity(ghost.identity, successor.identity);
+            focus_history.rename(ghost.identity, successor.identity);
+            if (last_observed_focus == ghost.identity) last_observed_focus = successor.identity;
+            windows.items[index] = successor;
+            _ = windows.orderedRemove(successor_slot);
             continue;
         }
         if (now == null) now = native.platform_monotonic();
@@ -1868,7 +1847,13 @@ export fn wm_tick() void {
                 if (orphans.items.len == orphans.capacity) _ = orphans.orderedRemove(0);
                 orphans.appendAssumeCapacity(orphanOf(record, now.?));
             };
-            rememberPlacement(windows.items[index], now.?);
+            // An application can take seconds to exit after its windows close, so the entry waits for `settle` to see the exit.
+            const gone = windows.items[index];
+            if (config.placement_memory and gone.observation.process_token != 0) if (placementEntry(gone, gone.observation.frame, now.? + 30)) |entry| {
+                var owned = entry;
+                owned.owner = .{ .process = .{ .pid = gone.observation.pid, .token = gone.observation.process_token }, .since = now.? };
+                placement_memory.remember(owned);
+            };
             layouts.forgetIdentity(windows.items[index].identity);
             focus_history.forget(windows.items[index].identity);
             _ = windows.orderedRemove(index);
@@ -2192,7 +2177,23 @@ fn observeCommandState() void {
 }
 export fn wm_hotkey_poll() void {
     const now = native.platform_monotonic();
-    if (hotkey_watch.overdue(now)) |command| recoverHotkey(&command, now);
+    // macOS can stop delivering registered hotkeys without an error.
+    if (hotkey_watch.overdue(now)) |command| {
+        hotkey_recovery.missed += 1;
+        var buffer: [256:0]u8 = @splat(0);
+        _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(&command)}) catch {};
+        native.platform_error(&buffer);
+        _ = journal("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
+        if (now - hotkey_recovery.rebound >= 5) {
+            hotkey_recovery.rebound = now;
+            hotkey_recovery.rebinds += 1;
+            if (!native.platform_rebind()) {
+                native.platform_error("Hotkey re-registration failed");
+                _ = journal("error", .{ .message = "Hotkey re-registration failed" });
+            }
+        }
+        wm_hotkey(&command);
+    }
     if (now - activated >= activation_settle) placeShortcuts();
 }
 export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
@@ -2214,23 +2215,6 @@ export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {
         break;
     };
     wm_hotkey(if (step == .next) "workspace occupied+1" else "workspace occupied-1");
-}
-// macOS can stop delivering registered hotkeys without an error.
-fn recoverHotkey(command: *const delivery.Command, now: f64) void {
-    hotkey_recovery.missed += 1;
-    var buffer: [256:0]u8 = @splat(0);
-    _ = std.fmt.bufPrint(&buffer, "macOS did not deliver hotkey \"{s}\"; ran it from the key press", .{text(command)}) catch {};
-    native.platform_error(&buffer);
-    _ = journal("error", .{ .message = "Hotkey not delivered; ran it from the key press" });
-    if (now - hotkey_recovery.rebound >= 5) {
-        hotkey_recovery.rebound = now;
-        hotkey_recovery.rebinds += 1;
-        if (!native.platform_rebind()) {
-            native.platform_error("Hotkey re-registration failed");
-            _ = journal("error", .{ .message = "Hotkey re-registration failed" });
-        }
-    }
-    wm_hotkey(command);
 }
 fn placeShortcuts() void {
     if (workspace_shortcuts.items.len == 0) return;
