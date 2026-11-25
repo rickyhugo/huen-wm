@@ -9,7 +9,7 @@ designated => identifier "dev.huen-wm"
 
 Different builds can satisfy the same requirement even when their executable bytes change.
 The bundle identifier remains `dev.huen-wm`.
-The script still builds with the repository's exact Zig 0.17.1 toolchain through `mise`.
+The script still builds with the repository's pinned Zig 0.17.1 toolchain through `mise`.
 Without arguments, it creates `zig-out/Huen WM.app` without installation or launch.
 With `--install`, it copies the bundle to `~/Applications/Huen WM.app` without launch.
 

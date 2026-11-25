@@ -3,7 +3,7 @@
 ## Goal
 
 Build a macOS tiling window manager with Hyprland-inspired interaction and Lua configuration.
-Keep SIP enabled. Use Zig 0.17.1, mise, and hk.
+Keep SIP enabled. Use Zig 0.17.x (mise pins 0.17.1), mise, and hk.
 
 The first build targets keyboard-driven tiling, virtual workspaces, multiple monitors, Lua reload, and visual feedback.
 It is not a replacement for the macOS compositor.

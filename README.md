@@ -8,7 +8,7 @@ A tiling window manager for macOS that keeps SIP on and its hands off private AP
 - **Nice extras:** a focused-window border, a menu-bar item, mouse tiling, trackpad swipes, and placement memory.
 - **Safe exits:** quitting puts every window back where it was.
 
-You need macOS 14 or later and Zig **exactly 0.17.1**. mise installs it.
+You need macOS 14 or later and Zig 0.17.x. mise installs 0.17.1.
 
 ## Get it running
 

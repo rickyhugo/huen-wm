@@ -275,7 +275,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
     const doctor = (try smoke.parse((try smoke.invoke(&.{"doctor"}, true)).stdout)).object;
-    try expect(std.mem.eql(u8, doctor.get("zig").?.string, "0.17.1"));
+    try expect(std.mem.startsWith(u8, doctor.get("zig").?.string, "0.17."));
     try expect(!doctor.get("permission_prompted").?.bool);
     try expect(!doctor.get("screen_capture_required_for_tiling").?.bool);
     try expect((try smoke.parse((try smoke.invoke(&.{ "validate", "--config", "config/example.lua" }, true)).stdout)).object.get("ok").?.bool);

@@ -1,7 +1,8 @@
 const std = @import("std");
 
 pub fn build(builder: *std.Build) void {
-    if (!std.mem.eql(u8, @import("builtin").zig_version_string, "0.17.1")) @panic("huen-wm requires Zig exactly 0.17.1");
+    const zig_version = @import("builtin").zig_version;
+    if (zig_version.major != 0 or zig_version.minor != 17) @panic("huen-wm requires Zig 0.17.x");
     const target = builder.standardTargetOptions(.{ .default_target = .{ .os_tag = .macos, .os_version_min = .{ .semver = .{ .major = 14, .minor = 0, .patch = 0 } } } });
     if (target.result.os.tag != .macos or target.result.cpu.arch != @import("builtin").cpu.arch) @panic("huen-wm builds for the host macOS architecture only");
     const optimize = builder.standardOptimizeOption(.{});
@@ -15,6 +16,7 @@ pub fn build(builder: *std.Build) void {
     module.addCSourceFile(.{ .file = builder.path("native/config_worker.c"), .flags = &.{ "-Wall", "-Wextra" } });
     module.addCSourceFiles(.{ .root = builder.path("native/vendor/lua-5.5.1"), .files = &.{ "lapi.c", "lauxlib.c", "lbaselib.c", "lcode.c", "lcorolib.c", "lctype.c", "ldblib.c", "ldebug.c", "ldo.c", "ldump.c", "lfunc.c", "lgc.c", "linit.c", "liolib.c", "llex.c", "lmathlib.c", "lmem.c", "loadlib.c", "lobject.c", "lopcodes.c", "loslib.c", "lparser.c", "lstate.c", "lstring.c", "lstrlib.c", "ltable.c", "ltablib.c", "ltm.c", "lundump.c", "lutf8lib.c", "lvm.c", "lzio.c" }, .flags = &.{"-DLUA_USE_MACOSX"} });
     const native = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
+    native.addArg(builder.fmt("-DHUEN_ZIG_VERSION=\"{s}\"", .{@import("builtin").zig_version_string}));
     native.addArg("-I");
     native.addDirectoryArg(builder.path("native/vendor/lua-5.5.1"));
     native.addFileArg(builder.path("native/platform.m"));
