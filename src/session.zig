@@ -1,4 +1,5 @@
 const std = @import("std");
+const commands = @import("command.zig");
 
 pub const max_bytes = 4 * 1024 * 1024;
 pub const max_windows = 1024;
@@ -7,9 +8,6 @@ pub const max_roots = 320;
 pub const max_edges = 2046;
 pub const max_homes = 10;
 pub const LogicalIndex = u16;
-pub const Layout = enum { dwindle, master };
-pub const Axis = enum { width, height };
-pub const GroupMode = enum { tabbed, stacked };
 pub const Scope = struct { config: []const u8, filter: []const u8, boot: []const u8 };
 pub const KeyKind = enum { identifier, document };
 pub const StableKey = struct {
@@ -63,13 +61,13 @@ pub const Window = struct {
     floating_frame: ?Rect = null,
 };
 pub const Split = struct {
-    axis: Axis,
+    axis: commands.Axis,
     ratio: f64,
     children: [2]LogicalIndex,
     selected: u1 = 0,
 };
 pub const Group = struct {
-    mode: GroupMode,
+    mode: commands.GroupMode,
     children: []const LogicalIndex,
     selected: LogicalIndex,
 };
@@ -79,10 +77,10 @@ pub const Root = struct {
     occurrence: LogicalIndex = 0,
     display_hint: []const u8 = "",
     active: bool = false,
-    default_layout: Layout,
+    default_layout: commands.Layout,
     default_ratio: f64,
     defaults_fingerprint: []const u8,
-    layout: Layout,
+    layout: commands.Layout,
     ratio: f64,
     node: ?LogicalIndex = null,
     selection: ?LogicalIndex = null,
@@ -187,20 +185,16 @@ pub fn validate(checkpoint: Snapshot) !void {
         checkpoint.roots.len > max_roots or checkpoint.homes.len > max_homes) return error.Capacity;
     for (checkpoint.homes, 0..) |home, home_index| {
         if (!textValid(home.workspace, 64, false) or !textValid(home.display_hint, 128, false)) return error.InvalidHome;
-        for (checkpoint.homes[0..home_index]) |previous| {
-            if (previous.occurrence == home.occurrence and std.mem.eql(u8, previous.workspace, home.workspace)) return error.DuplicateHome;
-        }
+        for (checkpoint.homes[0..home_index]) |previous| if (previous.occurrence == home.occurrence and std.mem.eql(u8, previous.workspace, home.workspace)) return error.DuplicateHome;
     }
     for (checkpoint.windows) |window| {
         try validateKey(window.key);
         if (window.root >= checkpoint.roots.len or !textValid(window.display_hint, 128, true)) return error.InvalidWindow;
-        if (window.floating_frame) |frame| {
-            if (!window.floating or !std.math.isFinite(frame.left) or !std.math.isFinite(frame.top) or
-                !std.math.isFinite(frame.width) or !std.math.isFinite(frame.height) or
-                @abs(frame.left) > 1_000_000 or @abs(frame.top) > 1_000_000 or
-                frame.width <= 0 or frame.height <= 0 or frame.width > 1_000_000 or frame.height > 1_000_000)
-                return error.InvalidFrame;
-        }
+        if (window.floating_frame) |frame| if (!window.floating or !std.math.isFinite(frame.left) or !std.math.isFinite(frame.top) or
+            !std.math.isFinite(frame.width) or !std.math.isFinite(frame.height) or
+            @abs(frame.left) > 1_000_000 or @abs(frame.top) > 1_000_000 or
+            frame.width <= 0 or frame.height <= 0 or frame.width > 1_000_000 or frame.height > 1_000_000)
+            return error.InvalidFrame;
     }
     var parents: [max_nodes]bool = @splat(false);
     var owners: [max_nodes]?LogicalIndex = @splat(null);
@@ -231,12 +225,9 @@ pub fn validate(checkpoint: Snapshot) !void {
                 (previous.occurrence == root.occurrence and std.mem.eql(u8, previous.workspace, root.workspace))))
                 return error.DuplicateRoot;
         }
-        for ([_]?LogicalIndex{ root.focused, root.fullscreen }) |reference| {
-            if (reference) |window| {
-                if (window >= checkpoint.windows.len or checkpoint.windows[window].root != root_index)
-                    return error.InvalidFocus;
-            }
-        }
+        for ([_]?LogicalIndex{ root.focused, root.fullscreen }) |reference| if (reference) |window| {
+            if (window >= checkpoint.windows.len or checkpoint.windows[window].root != root_index) return error.InvalidFocus;
+        };
         var pending: usize = 0;
         if (root.node) |node| {
             if (node >= checkpoint.nodes.len or parents[node]) return error.InvalidRoot;
@@ -265,9 +256,7 @@ pub fn validate(checkpoint: Snapshot) !void {
                 pending += 1;
             }
         }
-        if (root.selection) |selection| {
-            if (selection >= checkpoint.nodes.len or owners[selection] != @as(LogicalIndex, @intCast(root_index))) return error.InvalidSelection;
-        }
+        if (root.selection) |selection| if (selection >= checkpoint.nodes.len or owners[selection] != @as(LogicalIndex, @intCast(root_index))) return error.InvalidSelection;
     }
     for (owners[0..checkpoint.nodes.len]) |owner| if (owner == null) return error.OrphanNode;
 }

@@ -51,9 +51,7 @@ fn indexOfWindow(windows: []const LiveWindow, identity: ?u64) ?u16 {
 }
 fn occurrence(config: *const config_module.ConfigCandidate, workspace: usize) u16 {
     var count: u16 = 0;
-    for (config.workspaces[0..workspace]) |previous| if (std.mem.eql(u8, text(&previous.name), text(&config.workspaces[workspace].name))) {
-        count += 1;
-    };
+    for (config.workspaces[0..workspace]) |previous| count += @intFromBool(std.mem.eql(u8, text(&previous.name), text(&config.workspaces[workspace].name)));
     return count;
 }
 fn workspaceIndex(config: *const config_module.ConfigCandidate, name: []const u8, ordinal: u16) ?usize {
@@ -75,8 +73,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
     const temporary = try memory.create(layout.Store);
     temporary.* = store.*;
     for (store.nodes) |node| if (node.content == .leaf) {
-        const window = indexOfWindow(windows, node.content.leaf);
-        if (window == null or windows[window.?].floating) temporary.removeIdentity(node.content.leaf);
+        if (if (indexOfWindow(windows, node.content.leaf)) |window| windows[window].floating else true) temporary.removeIdentity(node.content.leaf);
     };
     for (windows) |window| _ = temporary.ensureWorkspace(window.display, window.workspace, config.workspaces[window.workspace].layout, config.workspaces[window.workspace].ratio);
     const nodes = try memory.alloc(session.NodeShape, 2047);
@@ -100,10 +97,10 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
             .occurrence = occurrence(config, state.workspace),
             .display_hint = try memory.dupe(u8, text(&screen.hint)),
             .active = screen.workspace == state.workspace,
-            .default_layout = @fromBackingInt(@intCast(@backingInt(defaults.layout))),
+            .default_layout = defaults.layout,
             .default_ratio = defaults.ratio,
             .defaults_fingerprint = "config-scope-v1",
-            .layout = @fromBackingInt(@intCast(@backingInt(state.layout))),
+            .layout = state.layout,
             .ratio = state.ratio,
             .node = if (state.root) |root| node_map[root] else null,
             .selection = if (state.selection) |selection| if (temporary.resolve(selection)) |handle| node_map[handle] else |_| null else null,
@@ -133,7 +130,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
         nodes[destination] = switch (node.content) {
             .free => unreachable,
             .leaf => |identity| .{ .leaf = indexOfWindow(windows, identity).? },
-            .branch => |branch| .{ .split = .{ .axis = @fromBackingInt(@intCast(@backingInt(branch.axis))), .ratio = branch.ratio, .children = .{ node_map[branch.children[0]].?, node_map[branch.children[1]].? }, .selected = if (node.last_child == branch.children[1]) 1 else 0 } },
+            .branch => |branch| .{ .split = .{ .axis = branch.axis, .ratio = branch.ratio, .children = .{ node_map[branch.children[0]].?, node_map[branch.children[1]].? }, .selected = if (node.last_child == branch.children[1]) 1 else 0 } },
             .group => |group| group: {
                 const children = try memory.alloc(u16, group.count);
                 var child = group.first;
@@ -143,7 +140,7 @@ pub fn freeze(store: *const layout.Store, windows: []const LiveWindow, screens: 
                     if (child == group.selected) selected = @intCast(ordinal);
                     if (temporary.nodes[child].next) |next| child = next;
                 }
-                break :group .{ .group = .{ .mode = @fromBackingInt(@intCast(@backingInt(group.mode))), .children = children, .selected = selected } };
+                break :group .{ .group = .{ .mode = group.mode, .children = children, .selected = selected } };
             },
         };
     }
@@ -179,9 +176,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         var saved_count: usize = 0;
         var current_count: usize = 0;
         var current_index: usize = 0;
-        for (snapshot.windows) |candidate| if (equalKey(saved.key, candidate.key)) {
-            saved_count += 1;
-        };
+        for (snapshot.windows) |candidate| saved_count += @intFromBool(equalKey(saved.key, candidate.key));
         for (current_keys[0..windows.len], 0..) |candidate, index| if (equalKey(saved.key, candidate)) {
             current_count += 1;
             current_index = index;
@@ -197,12 +192,12 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         switch (shape) {
             .leaf => |window_index| store.nodes[index].content = .{ .leaf = if (mapping[window_index]) |current| windows[current].identity else @as(u64, std.math.maxInt(u64)) - window_index },
             .split => |split| {
-                store.nodes[index].content = .{ .branch = .{ .axis = @fromBackingInt(@intCast(@backingInt(split.axis))), .ratio = split.ratio, .children = split.children } };
+                store.nodes[index].content = .{ .branch = .{ .axis = split.axis, .ratio = split.ratio, .children = split.children } };
                 store.nodes[index].last_child = split.children[split.selected];
                 for (split.children) |child| store.nodes[child].parent = @intCast(index);
             },
             .group => |group| {
-                store.nodes[index].content = .{ .group = .{ .mode = @fromBackingInt(@intCast(@backingInt(group.mode))), .first = group.children[0], .last = group.children[group.children.len - 1], .selected = group.children[group.selected], .count = @intCast(group.children.len) } };
+                store.nodes[index].content = .{ .group = .{ .mode = group.mode, .first = group.children[0], .last = group.children[group.children.len - 1], .selected = group.children[group.selected], .count = @intCast(group.children.len) } };
                 store.nodes[index].last_child = group.children[group.selected];
                 for (group.children, 0..) |child, ordinal| {
                     store.nodes[child].parent = @intCast(index);
@@ -213,7 +208,7 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         }
     }
     for (snapshot.roots, 0..) |root, index| {
-        store.roots[index] = .{ .display = @intCast(index + 1), .workspace = 0, .layout = @fromBackingInt(@intCast(@backingInt(root.layout))), .ratio = root.ratio, .root = root.node, .selection = if (root.selection) |selection| store.reference(selection) else null, .last_focused = mappedIdentity(windows, &mapping, root.focused), .fullscreen = mappedIdentity(windows, &mapping, root.fullscreen) };
+        store.roots[index] = .{ .display = @intCast(index + 1), .workspace = 0, .layout = root.layout, .ratio = root.ratio, .root = root.node, .selection = if (root.selection) |selection| store.reference(selection) else null, .last_focused = mappedIdentity(windows, &mapping, root.focused), .fullscreen = mappedIdentity(windows, &mapping, root.fullscreen) };
     }
     store.revision +%= 1;
     for (snapshot.windows, 0..) |_, index| if (mapping[index] == null) store.removeIdentity(std.math.maxInt(u64) - index);
@@ -222,18 +217,13 @@ pub fn restore(snapshot: *const session.Snapshot, windows: []const LiveWindow, s
         const state = if (slot.*) |*state| state else continue;
         const root = snapshot.roots[index];
         const workspace = workspaceIndex(config, root.workspace, root.occurrence);
-        var display = if (workspace) |workspace_index| placed[workspace_index] else null;
-        if (display == null) for (screens) |screen| {
-            if (std.mem.eql(u8, text(&screen.hint), root.display_hint) and root.display_hint.len != 0) {
-                display = screen.identity;
-                break;
-            }
-        };
-        if (display == null and screens.len > 0) display = screens[0].identity;
+        const display = (if (workspace) |workspace_index| placed[workspace_index] else null) orelse for (screens) |screen| {
+            if (std.mem.eql(u8, text(&screen.hint), root.display_hint) and root.display_hint.len != 0) break screen.identity;
+        } else if (screens.len > 0) screens[0].identity else null;
         var valid = workspace != null and display != null;
         if (workspace) |workspace_index| {
             const defaults = config.workspaces[workspace_index];
-            if (@backingInt(defaults.layout) != @backingInt(root.default_layout) or defaults.ratio != root.default_ratio) valid = false;
+            if (defaults.layout != root.default_layout or defaults.ratio != root.default_ratio) valid = false;
             for (destinations[0..index], 0..) |destination, previous_index| if (destination) |previous| {
                 if (previous.display != display or previous.workspace != workspace_index) continue;
                 if (!rootHasIntent(snapshot, &mapping, previous_index) and rootHasIntent(snapshot, &mapping, index)) {
@@ -287,8 +277,6 @@ fn mappedIdentity(windows: []const LiveWindow, mapping: []const ?usize, index: ?
 fn rootHasIntent(snapshot: *const session.Snapshot, mapping: []const ?usize, index: usize) bool {
     const root = snapshot.roots[index];
     if (root.layout != root.default_layout or root.ratio != root.default_ratio) return true;
-    for (snapshot.windows, 0..) |window, window_index| {
-        if (window.root == index and mapping[window_index] != null) return true;
-    }
+    for (snapshot.windows, 0..) |window, window_index| if (window.root == index and mapping[window_index] != null) return true;
     return false;
 }
