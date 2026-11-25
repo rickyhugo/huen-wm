@@ -24,6 +24,9 @@ const Display = world.Display;
 const Config = world.Config;
 const reload = @import("reload.zig");
 const edits = @import("edits.zig");
+const recovery = @import("recovery.zig");
+const recall = @import("recall.zig");
+const checkpoint = @import("checkpoint.zig");
 const json = reply.json;
 const failure = reply.failure;
 const allocator = std.heap.c_allocator;
@@ -45,7 +48,7 @@ var topology_changed_at: f64 = -std.math.inf(f64);
 // workspace on a display that just vanished keeps that fact until routing moves it. `shown_when_lost`
 // keeps it while the workspace waits on a fallback display, so a reconnect shows it again.
 const Placement = struct { display: ?u32 = null, home: [128]u8 = @splat(0), shown: bool = false, shown_when_lost: bool = false };
-var placements: [10]Placement = @splat(.{});
+pub var placements: [10]Placement = @splat(.{});
 var global_previous: ?usize = null;
 // The most recently selected display that had a placed workspace. With global routing, an empty
 // selected display resolves "current workspace" from this display.
@@ -76,107 +79,6 @@ var pointer_controls: pointer.Controls = .{};
 // A modified drag that moves or resizes a floating window. A resize moves the edges nearest the press, as in Hyprland.
 const FloatingDrag = struct { gesture_id: u64, identity: u64, origin: interaction.Point, frame: Rect, from_left: bool, from_top: bool };
 var floating_drag: ?FloatingDrag = null;
-var session_config_hash: [64]u8 = @splat(0);
-var session_boot: [128]u8 = @splat(0);
-var session_loaded = false;
-var session_focus_pending = false;
-var session_frozen: ?continuity.Frozen = null;
-var session_freeze_attempted = false;
-var session_save_attempted = false;
-var parking_journal: parking.Writer = .{};
-var parking_journal_failed = false;
-// A parked window the manager lost track of while its application still runs. Its record stays in the journal and is
-// matched against new windows for up to a minute, because most orphans are windows their application closed while parked.
-const orphan_lifetime = 60.0;
-const Orphan = struct { bundle: [256]u8, pid: c_int, token: f64, original: Rect, corners: [2]Rect, since: f64 };
-var orphan_buffer: [256]Orphan = undefined;
-var orphans: std.ArrayList(Orphan) = .initBuffer(&orphan_buffer);
-const ParkingRecovery = struct { records: usize = 0, recovered: usize = 0, failed: usize = 0 };
-// Null until the first tick that has displays has matched the journal of the previous process.
-var parking_recovery: ?ParkingRecovery = null;
-var placement_memory: memory.Memory = .{};
-var placement_memory_loaded = false;
-var placement_claims: usize = 0;
-var session_status: struct {
-    load: enum { disabled, pending, none, restored, rejected, failed } = .disabled,
-    save: enum { idle, frozen, saved, skipped, failed } = .idle,
-    matched: usize = 0,
-    unmatched: usize = 0,
-    ambiguous: usize = 0,
-    unavailable: usize = 0,
-    errors: usize = 0,
-    err_message: ?[]const u8 = null,
-} = .{};
-fn sessionError(message: []const u8) void {
-    session_status.err_message = message;
-    session_status.errors += 1;
-}
-fn configureSession() void {
-    if (!world.config().session.enabled) return;
-    const encoded = std.json.Stringify.valueAlloc(allocator, world.config().*, .{}) catch |err| {
-        sessionError(@errorName(err));
-        return;
-    };
-    defer allocator.free(encoded);
-    session_config_hash = session.hexDigest(&.{encoded})[0..64].*;
-    if (!session.huen_session_boot_identity(&session_boot, session_boot.len)) sessionError("BootIdentityUnavailable");
-    if (!session_loaded) session_status.load = .pending;
-}
-fn sessionScope() session.Scope {
-    return .{ .config = &session_config_hash, .filter = std.mem.span(native.platform_filter()), .boot = text(&session_boot) };
-}
-fn sessionWindows() ![]continuity.LiveWindow {
-    var result: std.ArrayList(continuity.LiveWindow) = .empty;
-    errdefer result.deinit(allocator);
-    session_status.unavailable = 0;
-    for (world.windows()) |window| {
-        var attributes: session.NativeAttributes = undefined;
-        if (window.eligible() and world.displayIndex(window.display) != null and native.platform_session_attributes(window.identity, &attributes)) if (attributes.key()) |_| {
-            try result.append(allocator, .{ .identity = window.identity, .display = window.display, .workspace = window.workspace, .floating = window.floating, .frame = window.floating_frame, .attributes = attributes });
-            continue;
-        } else |_| {};
-        session_status.unavailable += 1;
-    }
-    return result.toOwnedSlice(allocator);
-}
-fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
-    for (world.displays(), 0..) |display, index| {
-        output[index] = .{ .identity = display.identity, .workspace = display.workspace, .full_bounds = display.full_bounds, .hint = @splat(0) };
-        _ = session.huen_session_display_uuid(display.identity, &output[index].hint, output[index].hint.len);
-    }
-    return output[0..world.displays().len];
-}
-fn freezeSession() void {
-    if (session_freeze_attempted) return;
-    session_freeze_attempted = true;
-    if (!world.config().session.enabled) return;
-    const current = sessionWindows() catch |err| return saveFailed(err);
-    defer allocator.free(current);
-    var screens: [32]continuity.Screen = undefined;
-    var homes: [10][128]u8 = undefined;
-    for (&homes, placements) |*home, placement| home.* = placement.home;
-    session_frozen = continuity.freeze(world.layouts(), current, sessionScreens(&screens), world.config(), homes[0..world.config().workspace_count], sessionScope()) catch |err| return saveFailed(err);
-    session_status.save = .frozen;
-}
-fn saveFailed(err: anyerror) void {
-    sessionError(@errorName(err));
-    session_status.save = .failed;
-}
-fn saveSession(clean: bool) void {
-    if (session_save_attempted or !world.config().session.enabled) return;
-    session_save_attempted = true;
-    const checkpoint = if (session_frozen) |*frozen| frozen else return;
-    defer {
-        checkpoint.deinit();
-        session_frozen = null;
-    }
-    if (!clean or checkpoint.snapshot.windows.len == 0) {
-        session_status.save = .skipped;
-        return;
-    }
-    session.save(allocator, checkpoint.snapshot) catch |err| return saveFailed(err);
-    session_status.save = .saved;
-}
 fn pointerWindows(output: []pointer.Window) []pointer.Window {
     for (world.windows(), 0..) |window, index| {
         const hit = window.visible() and !window.parked and !window.managedFullscreen() and !world.displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle;
@@ -435,7 +337,7 @@ export fn wm_initialize(path: [*:0]const u8) bool {
     world.setConfig(&candidate);
     reload.markReady();
     world.markInitialized();
-    configureSession();
+    checkpoint.configure();
     return true;
 }
 export fn wm_activate_config() bool {
@@ -461,7 +363,7 @@ export fn wm_config_poll() void {
     applyLayoutDefaults(&candidate);
     world.setConfig(&candidate);
     configureInput();
-    configureSession();
+    checkpoint.configure();
     active_mode = 0;
     reload.settle();
     if (world.displays().len > 0) routing_blocked = !routeMembership();
@@ -604,7 +506,7 @@ fn shownWorkspace(workspace: usize) bool {
     if (world.displayIndex(identity)) |index| return world.displays()[index].workspace == workspace;
     return placements[workspace].shown;
 }
-fn resolvePlacements() [10]?u32 {
+pub fn resolvePlacements() [10]?u32 {
     var resolved: [10]?u32 = @splat(null);
     const preferences = world.config().workspace_monitors orelse return resolved;
     var fallback: [2]commands.MonitorSelector = undefined;
@@ -770,7 +672,7 @@ const PlacementTransaction = struct {
     }
     // `attempted` holds indices into `world.windows()` in the order their placement was attempted.
     fn rollback(self: PlacementTransaction, attempted: []const usize) void {
-        saveParkingJournal(self.intent);
+        recovery.save(self.intent);
         var remaining = attempted.len;
         while (remaining > 0) {
             remaining -= 1;
@@ -1079,7 +981,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     if (!previouslyParked) window.parking_frame = original;
     // A failed AX write can still move the window. Own it before the first write.
     window.parked = true;
-    if (parked and !previouslyParked) saveParkingJournal(&.{});
+    if (parked and !previouslyParked) recovery.save(&.{});
     var accepted = target;
     if (verifiedFrame(window.identity, target, if (parked) window.display else null, &accepted)) {
         window.parked = parked;
@@ -1293,116 +1195,12 @@ fn reconcile() void {
         } else false))) borderIdentity = identity;
     };
     native.platform_border(borderIdentity, borderWidth, borderColor);
-    saveParkingJournal(&.{});
-}
-fn reportParkingJournal(message: []const u8, err: anyerror) void {
-    var buffer: [256:0]u8 = @splat(0);
-    _ = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ message, @errorName(err) }) catch return;
-    native.platform_error(&buffer);
-}
-fn writeParkingJournal(records: []const parking.Record) void {
-    parking_journal.save(allocator, std.mem.span(native.platform_filter()), records) catch |err| {
-        if (!parking_journal_failed) reportParkingJournal("Parking journal save failed", err);
-        parking_journal_failed = true;
-        return;
-    };
-    parking_journal_failed = false;
-}
-// A corner that touches another display is never used, so a window there is not a parked one.
-fn parkingRecord(window: *const Window) ?parking.Record {
-    const display = world.displays()[world.displayIndex(window.display) orelse return null];
-    var corners = parking.corners(window.parking_frame, display.frame);
-    const blocked = [2]bool{ world.overlapsOtherDisplays(corners[0], window.display), world.overlapsOtherDisplays(corners[1], window.display) };
-    if (blocked[0] and blocked[1]) return null;
-    if (blocked[0]) corners[0] = corners[1];
-    if (blocked[1]) corners[1] = corners[0];
-    const record: parking.Record = .{ .bundle = text(&window.observation.bundle), .pid = window.observation.pid, .token = window.observation.process_token, .original = window.parking_frame, .corners = corners };
-    return if (parking.valid(record)) record else null;
-}
-fn orphanRecord(lost: *const Orphan) parking.Record {
-    return .{ .bundle = text(&lost.bundle), .pid = lost.pid, .token = lost.token, .original = lost.original, .corners = lost.corners };
-}
-fn orphanOf(record: parking.Record, since: f64) Orphan {
-    var result: Orphan = .{ .bundle = @splat(0), .pid = record.pid, .token = record.token, .original = record.original, .corners = record.corners, .since = since };
-    @memcpy(result.bundle[0..record.bundle.len], record.bundle);
-    return result;
-}
-// `prior` is the window state a rollback is about to return to. A window that the transaction showed goes back to its corner.
-fn saveParkingJournal(prior: []const Window) void {
-    var records: [parking.max_records]parking.Record = undefined;
-    var count: usize = 0;
-    for (world.windows()) |*window| if ((window.parked or window.vanished_parked) and count < records.len) if (parkingRecord(window)) |record| {
-        records[count] = record;
-        count += 1;
-    };
-    for (prior) |*window| {
-        if (!window.parked or count == records.len) continue;
-        if (world.windowIndex(window.identity)) |index| if (world.windows()[index].parked) continue;
-        records[count] = parkingRecord(window) orelse continue;
-        count += 1;
-    }
-    for (orphans.items) |*lost| if (count < records.len) {
-        records[count] = orphanRecord(lost);
-        count += 1;
-    };
-    writeParkingJournal(records[0..count]);
-}
-// After a verified restore only the orphans can still sit at a corner.
-fn settleParkingJournal() void {
-    var records: [256]parking.Record = undefined;
-    for (orphans.items, records[0..orphans.items.len]) |*lost, *record| record.* = orphanRecord(lost);
-    writeParkingJournal(records[0..orphans.items.len]);
-}
-// The display layout may have changed since the crash, so the frame is bounded to the display it overlaps most.
-fn recoveryFrame(frame: Rect) Rect {
-    var largest: f64 = 0;
-    var area = world.displays()[0].frame;
-    for (world.displays()) |display| {
-        const bounds = display.full_bounds;
-        const width = world.overlap(frame, bounds, .horizontal);
-        const height = world.overlap(frame, bounds, .vertical);
-        if (width > 0 and height > 0 and width * height > largest) {
-            largest = width * height;
-            area = display.frame;
-        }
-    }
-    return world.boundedFloating(frame, area);
+    recovery.save(&.{});
 }
 const replacement_grace = 0.5;
 fn replaces(ghost: Window, successor: Window) bool {
     const vanished = ghost.vanished orelse return false;
     return successor.vanished == null and successor.observation.pid == ghost.observation.pid and @abs(successor.discovered - vanished) <= replacement_grace and world.framesNear(successor.discovered_frame, ghost.observation.frame, 4);
-}
-fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
-    if (window.observation.bundle[0] == 0) return null;
-    var entry: memory.Entry = .{ .bundle = window.observation.bundle, .floating = window.floating, .floating_frame = window.floating_frame, .frame = frame, .expires = expires };
-    const name = text(&world.config().workspaces[window.workspace].name);
-    @memcpy(entry.workspace[0..name.len], name);
-    return entry;
-}
-fn processExited(process: memory.Process) bool {
-    return native.platform_process_token(process.pid) != process.token;
-}
-fn writePlacements(entries: []const memory.Entry) void {
-    const hash = session.storageKey(memory.stem, std.mem.span(native.platform_filter()));
-    const encoded = memory.encode(allocator, entries) catch return native.platform_error("Placement memory: out of memory");
-    defer allocator.free(encoded);
-    if (!session.huen_session_write(memory.stem, &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
-}
-// After restoration each window is where a restarted manager will discover it.
-fn persistPlacements() void {
-    if (!world.config().placement_memory) return;
-    const now = native.platform_monotonic();
-    var persisted = placement_memory;
-    persisted.prune(now);
-    // An entry whose application still runs is for a closed window, so the next manager must not hand it out.
-    persisted.settle(now, processExited);
-    persisted.dropPending();
-    for (world.windows()) |window| {
-        var frame: Rect = undefined;
-        if (window.vanished == null and native.platform_read_frame(window.identity, &frame)) persisted.remember(placementEntry(window, frame, now) orelse continue);
-    }
-    writePlacements(persisted.entries[0..persisted.count]);
 }
 export fn wm_tick() void {
     edits.pollClose();
@@ -1428,82 +1226,11 @@ export fn wm_tick() void {
     }
     world.replaceDisplays(updated[0..displayCount]);
     if (world.displays().len == 0) return;
-    if (!placement_memory_loaded and world.config().placement_memory) load: {
-        const hash = session.storageKey(memory.stem, std.mem.span(native.platform_filter()));
-        const bytes = allocator.alloc(u8, memory.max_bytes) catch {
-            native.platform_error("Placement memory: out of memory");
-            break :load;
-        };
-        defer allocator.free(bytes);
-        var used: usize = 0;
-        switch (session.huen_session_read(memory.stem, &hash, bytes.ptr, bytes.len, &used)) {
-            0 => memory.decode(allocator, bytes[0..used], native.platform_monotonic() + 60, &placement_memory) catch native.platform_error("Placement memory: file rejected"),
-            1 => break :load,
-            else => {
-                native.platform_error("Placement memory: file unreadable");
-                break :load;
-            },
-        }
-        writePlacements(&.{});
-    }
-    placement_memory_loaded = true;
-    if (placement_memory.count > 0) placement_memory.settle(native.platform_monotonic(), processExited);
+    recall.load();
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_windows(&observed, observed.len);
     var recovered: [1024]parking.Recovery = undefined;
-    const first_scan = parking_recovery == null;
-    // Patches the observations with the readback so discovery assigns each window to the display it is on now.
-    // The first scan matches the journal of the previous process. Later scans match the orphans against windows not seen before.
-    const recoveries = if (!first_scan and orphans.items.len == 0) recovered[0..0] else recover: {
-        var outcome: ParkingRecovery = parking_recovery orelse .{};
-        defer parking_recovery = outcome;
-        var records: [parking.max_records]parking.Record = undefined;
-        var since: [parking.max_records]f64 = undefined;
-        const now = native.platform_monotonic();
-        var record_count: usize = 0;
-        var loaded: ?std.json.Parsed(parking.Journal) = null;
-        defer if (loaded) |*parsed| parsed.deinit();
-        if (first_scan) {
-            loaded = parking.load(allocator, std.mem.span(native.platform_filter())) catch |err| {
-                reportParkingJournal("Parking journal rejected", err);
-                break :recover recovered[0..0];
-            };
-            if (loaded) |parsed| {
-                record_count = parsed.value.records.len;
-                @memcpy(records[0..record_count], parsed.value.records);
-                @memset(since[0..record_count], now);
-                outcome.records = record_count;
-            }
-        } else for (orphans.items) |*lost| {
-            records[record_count] = orphanRecord(lost);
-            since[record_count] = lost.since;
-            record_count += 1;
-        }
-        if (record_count == 0) break :recover recovered[0..0];
-        var eligible: [1024]bool = undefined;
-        for (observed[0..count], eligible[0..count]) |observation, *open| open.* = world.windowIndex(observation.identity) == null;
-        var claimed: [parking.max_records]bool = @splat(false);
-        const matches = parking.match(records[0..record_count], observed[0..count], eligible[0..count], claimed[0..record_count], &recovered);
-        // An unmatched record stays for up to a minute while its application runs, because a scan can miss an application that does not answer.
-        var kept: [256]Orphan = undefined;
-        var kept_count: usize = 0;
-        for (records[0..record_count], claimed[0..record_count], since[0..record_count]) |record, used, lost_at| {
-            if (used or kept_count == kept.len or now - lost_at > orphan_lifetime or processExited(.{ .pid = record.pid, .token = record.token })) continue;
-            kept[kept_count] = orphanOf(record, lost_at);
-            kept_count += 1;
-        }
-        orphans.clearRetainingCapacity();
-        orphans.appendSliceAssumeCapacity(kept[0..kept_count]);
-        for (matches) |*recovery| {
-            const window = &observed[recovery.index];
-            recovery.original = recoveryFrame(recovery.original);
-            var actual = window.frame;
-            if (native.platform_adopt_original(window.identity, recovery.original, &actual)) outcome.recovered += 1 else outcome.failed += 1;
-            window.frame = actual;
-        }
-        if (matches.len > 0) native.platform_config_changed();
-        break :recover matches;
-    };
+    const recoveries = recovery.recover(observed[0..count], &recovered);
     var observed_focus: ?u64 = null;
     for (observed[0..count]) |observation| {
         if (observation.focused) observed_focus = observation.identity;
@@ -1555,28 +1282,18 @@ export fn wm_tick() void {
             window.floating_restore = true;
         }
         // A recovered window stays owned even when it did not reach its frame or shares it with another window of its application.
-        for (recoveries) |recovery| if (observed[recovery.index].identity == observation.identity) {
+        for (recoveries.matches) |match| if (observed[match.index].identity == observation.identity) {
             window.parked = true;
-            window.parking_frame = recovery.original;
+            window.parking_frame = match.original;
         };
         window.discovered = native.platform_monotonic();
         // A window the first scan finds predates the manager, but its application may have launched only moments before.
-        window.established = first_scan and age: {
+        window.established = recoveries.first_scan and age: {
             if (observation.process_token == 0) break :age false;
             // The token is a launch date in seconds since 2001.
             break :age @as(f64, @floatFromInt(journal.wallSeconds())) - 978307200 - observation.process_token > 5;
         };
-        if (world.config().placement_memory and decision.workspace == null) claim: {
-            const entry = placement_memory.claim(text(&window.observation.bundle), window.observation.frame, window.discovered) orelse break :claim;
-            const workspace = world.config().workspaceIndex(text(&entry.workspace)) orelse break :claim;
-            placement_claims += 1;
-            window.workspace = workspace;
-            if (decision.floating == null) window.floating = entry.floating;
-            if (!window.floating or decision.geometry != null or decision.centered) break :claim;
-            const destination = resolvePlacements()[workspace] orelse display;
-            window.floating_frame = world.boundedFloating(entry.floating_frame, world.displayArea(destination));
-            window.floating_restore = true;
-        }
+        recall.claim(&window, decision, display);
         world.addWindow(window);
     }
     var now: ?f64 = null;
@@ -1626,7 +1343,7 @@ export fn wm_tick() void {
             successor.placed = null;
             // The successor appeared at the corner, so that frame must not become the geometry that restore writes back.
             if (ghost.vanished_parked) {
-                successor.parking_frame = recoveryFrame(ghost.parking_frame);
+                successor.parking_frame = recovery.restingFrame(ghost.parking_frame);
                 successor.parked = true;
                 var actual = successor.observation.frame;
                 _ = native.platform_adopt_original(successor.identity, successor.parking_frame, &actual);
@@ -1641,73 +1358,16 @@ export fn wm_tick() void {
         if (now == null) now = native.platform_monotonic();
         if (now.? - vanished > replacement_grace) {
             // The window can still sit at its corner, as when its application stops being a regular application.
-            if (world.windows()[index].vanished_parked) if (parkingRecord(&world.windows()[index])) |record| {
-                if (orphans.items.len == orphans.capacity) _ = orphans.orderedRemove(0);
-                orphans.appendAssumeCapacity(orphanOf(record, now.?));
-            };
+            if (world.windows()[index].vanished_parked) recovery.orphan(&world.windows()[index], now.?);
             // An application can take seconds to exit after its windows close, so the entry waits for `settle` to see the exit.
             const gone = world.windows()[index];
-            if (world.config().placement_memory and gone.observation.process_token != 0) if (placementEntry(gone, gone.observation.frame, now.? + 30)) |entry| {
-                var owned = entry;
-                owned.owner = .{ .process = .{ .pid = gone.observation.pid, .token = gone.observation.process_token }, .since = now.? };
-                placement_memory.remember(owned);
-            };
+            recall.rememberClosed(gone, now.?);
             world.layouts().forgetIdentity(world.windows()[index].identity);
             focus_history.forget(world.windows()[index].identity);
             world.removeWindow(index);
         } else index += 1;
     }
-    if (!session_loaded) load: {
-        session_loaded = true;
-        if (!world.config().session.enabled) break :load;
-        var loaded = session.load(allocator, sessionScope());
-        defer if (loaded.parsed) |*parsed| parsed.deinit();
-        session_status.load = switch (loaded.diagnostic) {
-            .none => .none,
-            .ready => .pending,
-            .rejected => .rejected,
-        };
-        if (loaded.rejection) |rejection| sessionError(@tagName(rejection));
-        const checkpoint = if (loaded.parsed) |*parsed| &parsed.value else break :load;
-        const current = sessionWindows() catch |err| {
-            sessionError(@errorName(err));
-            session_status.load = .failed;
-            break :load;
-        };
-        defer allocator.free(current);
-        var screens: [32]continuity.Screen = undefined;
-        // Saved runtime homes are seeded before placement so moved workspaces restore on their homes.
-        if (world.config().workspace_monitors != null) for (continuity.savedHomes(checkpoint, world.config()), &placements) |saved, *placement| if (saved) |hint| {
-            placement.home = @splat(0);
-            @memcpy(placement.home[0..hint.len], hint);
-        };
-        const imported = continuity.restore(checkpoint, current, sessionScreens(&screens), world.config(), resolvePlacements()) catch |err| {
-            sessionError(@errorName(err));
-            session_status.load = .failed;
-            break :load;
-        };
-        defer imported.deinit();
-        world.layouts().* = imported.store.*;
-        for (imported.assignments) |assignment| {
-            const window = &world.windows()[world.windowIndex(assignment.identity) orelse continue];
-            window.display = assignment.display;
-            window.workspace = assignment.workspace;
-            window.floating = assignment.floating;
-            if (assignment.frame) |frame| {
-                const screen = world.displays()[world.displayIndex(assignment.display).?];
-                window.floating_frame = world.boundedFloating(frame, screen.area());
-                window.floating_restore = true;
-            }
-        }
-        for (imported.active) |active| if (world.displayIndex(active.display)) |slot| {
-            world.displays()[slot].workspace = active.workspace;
-        };
-        session_status.matched = imported.matched;
-        session_status.unmatched = checkpoint.windows.len - imported.matched;
-        session_status.ambiguous = imported.ambiguous;
-        session_status.load = if (imported.matched > 0) .restored else .none;
-        session_focus_pending = imported.matched > 0;
-    }
+    checkpoint.restore();
     if (!world.isSuspended() and transition == null) routing_blocked = !routeMembership();
     observeFocus(observed_focus, true);
     if (focused) |identity| if (world.windowIndex(identity) == null) {
@@ -1716,8 +1376,7 @@ export fn wm_tick() void {
     world.ensureSelection();
     trackCurrentDisplay();
     reconcile();
-    if (session_focus_pending) {
-        session_focus_pending = false;
+    if (checkpoint.takeFocusPending()) {
         focusWorkspace(world.displays()[world.activeDisplay()].identity, null);
     }
 }
@@ -2048,12 +1707,9 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 .transition_error = journal.lastError(),
                 .hotkeys = .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds },
                 .mouse = .{ .availability = interaction.huen_input_status(), .generation = pointer_controls.generation, .err_message = pointer_controls.error_message, .forced_stop = pointer_controls.forced_stop },
-                .session = session_status,
-                .parking_recovery = parking_recovery,
-                .placement_memory = .{ .entries = if (placement_memory.count == 0) 0 else unexpired: {
-                    placement_memory.prune(native.platform_monotonic());
-                    break :unexpired placement_memory.count;
-                }, .claimed = placement_claims },
+                .session = checkpoint.status(),
+                .parking_recovery = recovery.status(),
+                .placement_memory = recall.status(),
                 .config_reload = reload.status(),
             });
         },
@@ -2125,13 +1781,13 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
                 native.platform_quit();
                 return json(.{ .ok = true });
             }
-            freezeSession();
+            checkpoint.freeze();
             world.markSuspended();
             const outstanding = native.platform_restore();
-            persistPlacements();
+            recall.persist();
             if (outstanding == 0) {
-                saveSession(true);
-                settleParkingJournal();
+                checkpoint.save(true);
+                recovery.settle();
             }
             native.platform_border(0, 0, 0);
             if (outstanding != 0) return json(.{ .@"error" = true, .err_message = "Geometry restoration incomplete. Retry restore after unminimizing or leaving fullscreen.", .outstanding = outstanding, .suspended = true });
@@ -2488,7 +2144,7 @@ export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
     return json(.{ .ok = true });
 }
 export fn wm_shutdown() bool {
-    freezeSession();
+    checkpoint.freeze();
     world.markSuspended();
     edits.cancelClose(false);
     status_active = false;
@@ -2499,9 +2155,9 @@ export fn wm_shutdown() bool {
     if (pointer_controls.forced_stop) native.platform_error("Input release drain exceeded 250 ms; tap teardown forced");
     cancelTransition();
     const outstanding = native.platform_restore();
-    persistPlacements();
-    saveSession(outstanding == 0);
-    if (outstanding == 0) settleParkingJournal() else {
+    recall.persist();
+    checkpoint.save(outstanding == 0);
+    if (outstanding == 0) recovery.settle() else {
         native.platform_error("Shutdown left unrestored windows; live-session recovery is incomplete");
         _ = journal.append("error", .{ .message = "Shutdown left unrestored windows", .outstanding = outstanding });
     }

@@ -102,7 +102,6 @@ pub fn addWindow(window: Window) void {
     window_list.appendAssumeCapacity(window);
 }
 
-// The successor takes the ghost's slot because the master layout orders its stack by slot.
 pub fn replaceWithSuccessor(index: usize, successor_slot: usize, successor: Window) void {
     window_list.items[index] = successor;
     _ = window_list.orderedRemove(successor_slot);
