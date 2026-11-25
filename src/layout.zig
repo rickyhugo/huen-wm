@@ -220,6 +220,7 @@ pub const Store = struct {
             };
             if (count < needed) return error.LayoutCapacityExceeded;
             const added = available[0];
+            var leaf_parent: ?Handle = null;
             if (destination.root) |root| {
                 var target = if (focused) |identity| self.leaf(identity) orelse root else root;
                 if (self.rootOf(target) != root) target = root;
@@ -254,13 +255,10 @@ pub const Store = struct {
                 self.nodes[target].parent = branch;
                 self.nodes[target].previous = null;
                 self.nodes[target].next = null;
-                self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .parent = branch, .content = .{ .leaf = member.identity }, .active = member.active, .bounds = member.bounds };
-            } else {
-                self.serial +%= 1;
-                self.nodes[added] = .{ .generation = self.serial, .content = .{ .leaf = member.identity }, .active = member.active, .bounds = member.bounds };
-                destination.root = added;
-            }
+                leaf_parent = branch;
+            } else destination.root = added;
+            self.serial +%= 1;
+            self.nodes[added] = .{ .generation = self.serial, .parent = leaf_parent, .content = .{ .leaf = member.identity }, .active = member.active, .bounds = member.bounds };
             self.revision +%= 1;
             self.arrange(destination, member.area, gap);
         }
@@ -270,7 +268,6 @@ pub const Store = struct {
         };
     }
 
-    /// A visible branch whose second side starts before the first side ends.
     fn overlapped(self: *const Store, handle: Handle) bool {
         const node = self.nodes[handle];
         if (node.content != .branch or !node.visible) return false;
@@ -332,7 +329,9 @@ pub const Store = struct {
                     const cascade = @max(first.compact[dimension] + second.layers[dimension] * overlap_step, second.compact[dimension] + first.layers[dimension] * overlap_step);
                     node.compact[dimension] = @min(first.compact[dimension] + second.compact[dimension] + gap, cascade);
                     node.layers[dimension] = first.layers[dimension] + second.layers[dimension];
-                    node.ceiling[dimension] = combineAlong(first.ceiling[dimension], second.ceiling[dimension], gap);
+                    if (first.ceiling[dimension]) |leading| if (second.ceiling[dimension]) |trailing| {
+                        node.ceiling[dimension] = .{ .accepted = leading.accepted + trailing.accepted + gap, .largest_refused = leading.largest_refused + trailing.largest_refused + gap };
+                    };
                 }
             },
             .group => |*group| {
@@ -382,27 +381,20 @@ pub const Store = struct {
         var node = &self.nodes[handle];
         node.frame = frame;
         node.visible = node.active;
-        if (node.content == .group) {
-            const group = node.content.group;
-            const header_height = self.headerHeight(handle);
-            var content = frame;
-            content.top += header_height;
-            content.height = @max(0, content.height - header_height);
-            if (self.nodes[group.selected].active) self.project(group.selected, content, gap);
-            return;
+        switch (node.content) {
+            .group => |group| {
+                const header_height = self.headerHeight(handle);
+                var content = frame;
+                content.top += header_height;
+                content.height = @max(0, content.height - header_height);
+                if (self.nodes[group.selected].active) self.project(group.selected, content, gap);
+            },
+            .branch => |branch| {
+                const halves = if (self.nodes[branch.children[0]].active and self.nodes[branch.children[1]].active) split(frame, branch.axis, branch.ratio, gap, self.sides(branch)) else .{ frame, frame };
+                for (branch.children, halves) |child, half| if (self.nodes[child].active) self.project(child, half, gap);
+            },
+            else => {},
         }
-        if (node.content != .branch) return;
-        const branch = node.content.branch;
-        const first = branch.children[0];
-        const second = branch.children[1];
-        if (!self.nodes[first].active or !self.nodes[second].active) {
-            if (self.nodes[first].active) self.project(first, frame, gap);
-            if (self.nodes[second].active) self.project(second, frame, gap);
-            return;
-        }
-        const halves = split(frame, branch.axis, branch.ratio, gap, self.sides(branch));
-        self.project(first, halves[0], gap);
-        self.project(second, halves[1], gap);
     }
 
     fn sides(self: *const Store, branch: Branch) [2]Side {
@@ -412,15 +404,20 @@ pub const Store = struct {
         return result;
     }
 
-    /// The extent the two sides of a branch share and the least and most of it for the first side. Null when the sides overlap or follow the ratio.
-    fn range(self: *const Store, handle: Handle, gap: f64) ?struct { available: f64, minimum: f64, maximum: f64 } {
+    /// The branch ratio after its first side grows by delta within its limits, and how far it grew. Null when the sides overlap or follow the ratio.
+    fn resized(self: *const Store, handle: Handle, delta: f64, gap: f64) ?struct { ratio: f64, applied: f64 } {
         const node = self.nodes[handle];
-        const extent = if (node.content.branch.axis == .width) node.frame.width else node.frame.height;
+        const branch = node.content.branch;
+        const extent = if (branch.axis == .width) node.frame.width else node.frame.height;
         const available = extent - @min(gap, @max(0, extent - 2));
-        return switch (leadingRange(available, available * node.content.branch.ratio, self.sides(node.content.branch))) {
-            .fits => |limits| if (available > 0) .{ .available = available, .minimum = limits.lower, .maximum = limits.upper } else null,
-            .overlaps => null,
+        const limits = switch (leadingRange(available, available * branch.ratio, self.sides(branch))) {
+            .fits => |range| range,
+            .overlaps => return null,
         };
+        if (!(available > 0)) return null;
+        const previous = std.math.clamp(available * branch.ratio, limits.lower, limits.upper);
+        const next = std.math.clamp(previous + delta, limits.lower, limits.upper);
+        return .{ .ratio = next / available, .applied = next - previous };
     }
 
     pub fn arrange(self: *Store, state: *WorkspaceLayout, frame: Rect, gap: f64) void {
@@ -448,9 +445,7 @@ pub const Store = struct {
     pub fn orient(self: *Store, identity: u64, orientation: commands.Orientation) !void {
         const handle = self.leaf(identity) orelse return error.WindowNotTiled;
         var ancestor = self.nodes[handle].parent;
-        while (ancestor) |current| : (ancestor = self.nodes[current].parent) {
-            if (self.nodes[current].content == .branch) break;
-        }
+        while (ancestor) |current| : (ancestor = self.nodes[current].parent) if (self.nodes[current].content == .branch) break;
         const parent = ancestor orelse return error.NoSplit;
         var branch = &self.nodes[parent].content.branch;
         branch.axis = switch (orientation) {
@@ -470,26 +465,24 @@ pub const Store = struct {
             const first = branch.children[0];
             const second = branch.children[1];
             if (branch.axis != axis or !self.nodes[first].active or !self.nodes[second].active) continue;
-            const limits = self.range(parent, gap) orelse return 0;
-            const previous = std.math.clamp(limits.available * branch.ratio, limits.minimum, limits.maximum);
             const sign: f64 = if (child == first) 1 else -1;
-            const next = std.math.clamp(previous + sign * delta, limits.minimum, limits.maximum);
-            branch.ratio = next / limits.available;
+            const moved = self.resized(parent, sign * delta, gap) orelse return 0;
+            branch.ratio = moved.ratio;
             self.revision +%= 1;
-            return (next - previous) * sign;
+            return moved.applied * sign;
         }
         return 0;
     }
 
     pub fn adjustRatio(self: *Store, state: *WorkspaceLayout, delta: f64) void {
+        var root_branch: ?*Branch = null;
         if (state.layout == .dwindle) if (state.root) |root| if (self.nodes[root].content == .branch) {
-            state.ratio = self.nodes[root].content.branch.ratio;
+            root_branch = &self.nodes[root].content.branch;
         };
+        if (root_branch) |branch| state.ratio = branch.ratio;
         state.ratio = std.math.clamp(state.ratio + delta, 0.1, 0.9);
         self.revision +%= 1;
-        if (state.layout == .dwindle) if (state.root) |root| if (self.nodes[root].content == .branch) {
-            self.nodes[root].content.branch.ratio = state.ratio;
-        };
+        if (root_branch) |branch| branch.ratio = state.ratio;
     }
 
     fn clearVisibility(self: *Store, handle: Handle) void {
@@ -544,9 +537,7 @@ pub const Store = struct {
         if (node.content == .leaf) return if (node.active) node.content.leaf else null;
         if (node.last_child) |child| if (self.eligibleLeaf(child)) |identity| return identity;
         const group_child: ?Handle = if (node.content == .group) node.content.group.selected else null;
-        if (group_child) |child| if (node.last_child != child) {
-            if (self.eligibleLeaf(child)) |identity| return identity;
-        };
+        if (group_child) |child| if (node.last_child != child) if (self.eligibleLeaf(child)) |identity| return identity;
         var child = self.firstChild(handle);
         while (child) |current| : (child = self.nextChild(handle, current)) {
             if (node.last_child == current or group_child == current) continue;
@@ -580,10 +571,7 @@ pub const Store = struct {
         state.last_focused = identity;
         state.selection = self.reference(handle);
         var child = handle;
-        while (self.nodes[child].parent) |parent| {
-            self.nodes[parent].last_child = child;
-            child = parent;
-        }
+        while (self.nodes[child].parent) |parent| : (child = parent) self.nodes[parent].last_child = child;
     }
 
     pub fn forgetIdentity(self: *Store, identity: u64) void {
@@ -620,10 +608,9 @@ pub const Store = struct {
         const handle = self.leaf(identity) orelse return;
         if (state.root != self.rootOf(handle)) return error.WrongWorkspace;
         var child = handle;
-        while (self.nodes[child].parent) |parent| {
+        while (self.nodes[child].parent) |parent| : (child = parent) {
             if (self.nodes[parent].content == .group) self.nodes[parent].content.group.selected = child;
             self.nodes[parent].last_child = child;
-            child = parent;
         }
         self.revision +%= 1;
     }
@@ -745,10 +732,7 @@ pub const Store = struct {
         const source = try self.selected(state, focused);
         const target = try self.directionalTarget(state, source, direction);
         try self.drop(state, source, target, switch (direction) {
-            .left => .left,
-            .right => .right,
-            .up => .up,
-            .down => .down,
+            inline else => |value| @field(Drop, @tagName(value)),
         });
     }
 
@@ -955,10 +939,8 @@ pub const Store = struct {
         const first = self.nodes[branch.children[0]];
         const second = self.nodes[branch.children[1]];
         if (!first.visible or !second.visible) return error.StaleGesture;
-        const limits = self.range(handle, gap) orelse return .{ .boundary = boundary, .ratio = branch.ratio, .applied_delta = 0 };
-        const previous = std.math.clamp(limits.available * branch.ratio, limits.minimum, limits.maximum);
-        const next = std.math.clamp(previous + delta, limits.minimum, limits.maximum);
-        return .{ .boundary = boundary, .ratio = next / limits.available, .applied_delta = next - previous };
+        const moved = self.resized(handle, delta, gap) orelse return .{ .boundary = boundary, .ratio = branch.ratio, .applied_delta = 0 };
+        return .{ .boundary = boundary, .ratio = moved.ratio, .applied_delta = moved.applied };
     }
 
     pub fn commitResize(self: *Store, preview: ResizePreview, gap: f64) !void {
@@ -1078,23 +1060,13 @@ pub fn combineAcross(first: ?Ceiling, second: ?Ceiling) ?Ceiling {
     return .{ .accepted = @max(leading.accepted, trailing.accepted), .largest_refused = @min(leading.largest_refused, trailing.largest_refused) };
 }
 
-fn combineAlong(first: ?Ceiling, second: ?Ceiling, gap: f64) ?Ceiling {
-    const leading = first orelse return null;
-    const trailing = second orelse return null;
-    return .{ .accepted = leading.accepted + trailing.accepted + gap, .largest_refused = leading.largest_refused + trailing.largest_refused + gap };
-}
-
-/// The least extent of each side when the sides fit side by side: the minimums when they fit, and else the compact minimums.
-fn leastExtents(available: f64, sides: [2]Side) ?[2]f64 {
-    for ([_][2]f64{ .{ sides[0].minimum, sides[1].minimum }, .{ sides[0].compact, sides[1].compact } }) |least| if (available - least[1] >= least[0]) return least;
-    return null;
-}
-
 pub const LeadingRange = struct { lower: f64, upper: f64 };
 pub const SplitFit = union(enum) { fits: LeadingRange, overlaps };
 
 pub fn leadingRange(available: f64, share: f64, sides: [2]Side) SplitFit {
-    const least = leastExtents(available, sides) orelse return .overlaps;
+    const least = for ([_][2]f64{ .{ sides[0].minimum, sides[1].minimum }, .{ sides[0].compact, sides[1].compact } }) |extents| {
+        if (available - extents[1] >= extents[0]) break extents;
+    } else return .overlaps;
     const base: LeadingRange = .{ .lower = least[0], .upper = available - least[1] };
     var tightened = base;
     if (sides[0].ceiling) |ceiling| if (ceiling.binds(share)) {
