@@ -9,7 +9,7 @@ description = "Build huen-wm"
 run = "zig build"
 
 [tasks.test]
-description = "Run the manager-seam test suite, one process per case"
+description = "Run the manager-seam cases, one process per case, and the pure-module tests"
 run = "zig build test"
 
 [tasks.install]

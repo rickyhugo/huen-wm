@@ -65,7 +65,7 @@ pub fn build(builder: *std.Build) void {
     layout.addArg("-o");
     suite.addObjectFile(layout.addOutputFileArg("layout.o"));
     const tests = builder.addExecutable(.{ .name = "manager-tests", .root_module = suite });
-    const test_step = builder.step("test", "Run each manager-seam test case in its own process");
+    const test_step = builder.step("test", "Run each manager-seam test case in its own process, and the pure-module tests");
     for (@import("tests/cases.zig").all) |case| {
         const first = builder.addRunArtifact(tests);
         first.setName(case.name);
@@ -83,5 +83,12 @@ pub fn build(builder: *std.Build) void {
         second.addFileArg(state);
         second.has_side_effects = true;
         test_step.dependOn(&second.step);
+    }
+
+    // Two pure modules have a seam of their own, tested as Zig test blocks: every order of the hotkey reports, and tile geometry.
+    for ([_][]const u8{ "delivery", "layout" }) |unit| {
+        const subject = builder.createModule(.{ .root_source_file = builder.path(builder.fmt("src/{s}.zig", .{unit})), .target = target, .optimize = optimize });
+        const checks = builder.addTest(.{ .name = unit, .root_module = builder.createModule(.{ .root_source_file = builder.path(builder.fmt("tests/pure/{s}.zig", .{unit})), .target = target, .optimize = optimize, .imports = &.{.{ .name = unit, .module = subject }} }) });
+        test_step.dependOn(&builder.addRunArtifact(checks).step);
     }
 }

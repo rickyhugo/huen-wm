@@ -22,6 +22,7 @@ mise exec -- hk install --mise
 
 `mise run test` builds `manager-tests` and runs each case in its own process.
 The manager keeps its state in globals, so one process is one manager lifetime.
+It also runs the tests of two pure modules. See [pure-module tests](#pure-module-tests).
 `mise exec -- zig build test --summary all` lists every case with its result.
 
 `mise run smoke` runs `tools/smoke.zig` against the built binary: CLI arguments, config validation, and the socket client's handling of bad replies.
@@ -81,7 +82,7 @@ References are the [mise configuration](https://mise.jdx.dev/configuration.html)
 The suite tests one seam, the exported `wm_*` functions.
 Each case acts as a user, an application, or a command-line caller, and asserts on what they observe.
 That is the JSON reply of `windows`, `status`, or another command, or the frame where the fake screen shows a window.
-The suite has no tests of pure modules or of the command line.
+The suite has no tests of the command line.
 
 `tests/fake/adapter.zig` replaces `native/` and is the only mock.
 It models Accessibility, Carbon, the clock, and the private files, as `native/platform.m` behaves where a case depends on it.
@@ -97,3 +98,15 @@ To add a case:
 
 A case marked `restart` runs twice. The first process saves the fake world to a state file in the build cache, and the second process loads it.
 `manager.world.restarted` tells the case which process it is in.
+
+## Pure-module tests
+
+Two pure modules have a seam of their own, because one manager case per combination does not scale.
+The tests are Zig `test` blocks in `tests/pure/`, and `zig build test` runs them.
+
+| Seam | File | What the tests cover |
+| --- | --- | --- |
+| `delivery.Watch` | `tests/pure/delivery.zig` | Every order and timing of the reports of one and two key presses, with a stall of the main thread at each report. |
+| `layout.Store` | `tests/pure/layout.zig` | Tile geometry for 1 to 8 windows at several ratios, gaps, and areas, and the 80-point tile minimum. |
+
+Do not add a seam without agreement. A test that fits the manager seam belongs there.

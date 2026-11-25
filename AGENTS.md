@@ -7,4 +7,5 @@ single letter variable and parameters are strictly forbidden.
 ## tests
 
 tests are strictly forbidden unless explicitly requested.
-the manager-seam suite in `tests/` is the exception the user requested, and it grows only on request.
+the suite in `tests/` is the exception the user requested, and it grows only on request.
+its seams are the exported `wm_*` functions, `delivery.Watch` and `layout.Store`. a new seam needs the user's agreement.
