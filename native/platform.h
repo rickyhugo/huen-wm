@@ -3,9 +3,6 @@
 #include <stdint.h>
 #include "session.h"
 #include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <lua.h>
 #include <lauxlib.h>
 #include <lualib.h>
@@ -67,7 +64,6 @@ extern void wm_config_poll(void);
 extern void wm_tick(void);
 extern void wm_input_poll(void);
 extern const char *wm_command(const char *command);
-extern void wm_hotkey(const char *command);
 extern void wm_hotkey_pressed(uint32_t slot, const char *command);
 extern void wm_hotkey_delivered(uint32_t slot, const char *command);
 extern void wm_hotkey_poll(void);
