@@ -21,10 +21,12 @@ const Config = world.Config;
 const Placement = struct { display: ?u32 = null, home: [128]u8 = @splat(0), shown: bool = false, shown_when_lost: bool = false };
 var placements: [10]Placement = @splat(.{});
 var global_previous: ?usize = null;
+
 // The most recently selected display that had a placed workspace. With global routing, an empty
 // selected display resolves "current workspace" from this display.
 var current_display: ?u32 = null;
 var routing_blocked = false;
+
 fn applyLayoutDefaults(candidate: *const Config) void {
     var remap: [10]?usize = @splat(null);
     var claimed: [10]bool = @splat(false);
@@ -72,16 +74,20 @@ fn applyLayoutDefaults(candidate: *const Config) void {
     } else 0;
     global_previous = remapPrevious(global_previous, current, &remap);
 }
+
 fn remapPrevious(previous: ?usize, current: usize, remap: []const ?usize) ?usize {
     const next = remap[previous orelse return null] orelse return null;
     return if (next == current) null else next;
 }
+
 fn previousWorkspace(display_slot: usize) *?usize {
     return if (world.config().workspace_monitors != null) &global_previous else &world.displays()[display_slot].previous_workspace;
 }
+
 pub fn recordPrevious(display_slot: usize, from: usize, workspace: usize) void {
     if (from != workspace) previousWorkspace(display_slot).* = from;
 }
+
 // With global routing, an empty display uses the active workspace of the most recently selected
 // display that had one, else the lowest shown workspace.
 pub fn currentWorkspace(display_slot: usize) usize {
@@ -91,11 +97,13 @@ pub fn currentWorkspace(display_slot: usize) usize {
     for (0..world.config().workspace_count) |workspace| if (shownWorkspace(workspace)) return workspace;
     return @min(display.workspace, world.config().workspace_count - 1);
 }
+
 pub fn trackCurrentDisplay() void {
     const identity = world.selected() orelse return;
     const index = world.displayIndex(identity) orelse return;
     if (placedWorkspace(world.displays()[index]) != null) current_display = identity;
 }
+
 pub fn view(display_slot: usize) selector.View {
     var occupied: selector.Occupancy = .empty;
     const display = world.displays()[display_slot];
@@ -105,24 +113,29 @@ pub fn view(display_slot: usize) selector.View {
     const back_and_forth = world.config().workspace_back_and_forth and (placedWorkspace(display) != null or owner() != null);
     return .{ .config = world.config(), .current = currentWorkspace(display_slot), .previous = previousWorkspace(display_slot).*, .occupied = occupied, .back_and_forth = back_and_forth };
 }
+
 pub fn resolveWorkspace(selection: commands.WorkspaceSelector, display_slot: usize) !usize {
     return selector.resolve(selection, view(display_slot));
 }
+
 pub fn owner() ?u32 {
     const first = placements[0].display orelse return null;
     for (placements[1..world.config().workspace_count]) |placement| if (placement.display != first) return null;
     return first;
 }
+
 // The display's active workspace, or null when global routing places no workspace on it.
 pub fn placedWorkspace(display: Display) ?usize {
     if (world.config().workspace_monitors == null or placements[display.workspace].display == display.identity) return display.workspace;
     return null;
 }
+
 pub fn shownWorkspace(workspace: usize) bool {
     const identity = placements[workspace].display orelse return false;
     if (world.displayIndex(identity)) |index| return world.displays()[index].workspace == workspace;
     return placements[workspace].shown;
 }
+
 pub fn resolve() [10]?u32 {
     var resolved: [10]?u32 = @splat(null);
     const preferences = world.config().workspace_monitors orelse return resolved;
@@ -143,7 +156,9 @@ pub fn resolve() [10]?u32 {
     }
     return resolved;
 }
+
 pub const Activation = struct { display: u32, workspace: usize };
+
 pub fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { index: usize, display: u32, workspace: usize }) bool {
     const workspace_count = world.config().workspace_count;
     var activations: [11]Activation = undefined;
@@ -247,6 +262,7 @@ pub fn route(resolved: [10]?u32, forced: []const Activation, send: ?struct { ind
     routing_blocked = false;
     return true;
 }
+
 fn routeMembership() bool {
     const resolved = resolve();
     var needed = placementsChange(resolved);

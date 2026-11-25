@@ -17,6 +17,7 @@ var shortcut_buffer: [64]commands.WorkspaceSelector = undefined;
 var workspace_shortcuts: std.ArrayList(commands.WorkspaceSelector) = .initBuffer(&shortcut_buffer);
 var hotkey_watch: delivery.Watch = .{};
 var hotkey_recovery: struct { missed: usize = 0, rebinds: usize = 0, rebound: f64 = -std.math.inf(f64) } = .{};
+
 // Runs the queued workspace shortcuts, merging the ones that land on one display into a single switch.
 pub fn flush() void {
     if (workspace_shortcuts.items.len == 0) return;

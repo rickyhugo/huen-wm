@@ -3,6 +3,7 @@ const native = @import("native.zig");
 const session = @import("session.zig");
 
 var journal_failed = false;
+
 // `last_error` is the last workspace transition or placement failure. `journaled` is the last one written, so a failure
 // that repeats every tick is written once.
 var last_error: ?[]const u8 = null;

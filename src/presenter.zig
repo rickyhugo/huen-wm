@@ -24,8 +24,10 @@ const StatusPresentation = union(enum) {
     disabled,
     visible: struct { display_identity: ?u32, content: native.WMStatusPresentation },
 };
+
 var published_status: StatusPresentation = .disabled;
 var status_active = false;
+
 fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
     @memset(destination, 0);
     var length: usize = 0;
@@ -37,11 +39,13 @@ fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
     }
     @memcpy(destination[0..length], source[0..length]);
 }
+
 pub fn present() void {
     journal.flushTransition();
     gestures.publish();
     publishStatus();
 }
+
 pub fn publishStatus() void {
     if (!status_active) return;
     const next: StatusPresentation = if (!world.config().status_bar.enabled) .disabled else status: {

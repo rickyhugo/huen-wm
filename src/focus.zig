@@ -19,12 +19,15 @@ const Direction = commands.Direction;
 var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var last_observed_focus: ?u64 = null;
+
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
+
 // A workspace switch within about 250 ms of an activation makes the applications involved wait on WindowServer for 300
 // to 500 ms. Every AX call to them times out meanwhile, so their windows go stale and block placement.
 const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
+
 pub fn select(identity: u32) void {
     if (world.selected() == identity) return;
     world.setSelected(identity);
@@ -37,6 +40,7 @@ pub fn select(identity: u32) void {
     if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
     if (!native.platform_warp_pointer(.{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 })) native.platform_error("Mouse warp failed");
 }
+
 fn rememberFocus(identity: u64) void {
     const index = world.windowIndex(identity) orelse return;
     const window = world.windows()[index];
@@ -46,6 +50,7 @@ fn rememberFocus(identity: u64) void {
         journal.setError(@errorName(err));
     };
 }
+
 pub fn verify(identity: u64) bool {
     activated = native.platform_monotonic();
     if (!native.platform_focus(identity) or native.platform_focused_window() != identity) return false;
@@ -58,6 +63,7 @@ pub fn verify(identity: u64) bool {
     }
     return true;
 }
+
 // Records a native focus change. A command leaves an activation request to the next tick, and so does a tick during a
 // workspace transition. A tick reads focus from the last scan, and a scan of one application leaves the focus of the
 // others as it was, so a tick confirms a request against live focus.
@@ -108,6 +114,7 @@ pub fn observe(observed: ?u64, settle: bool) void {
     rememberFocus(identity);
     if (world.displayIndex(window.display) != null) select(window.display);
 }
+
 pub fn readingOrder(display: u32, kind: ?commands.WindowKind, output: []u64) []u64 {
     const Entry = struct {
         floating: bool,
@@ -132,6 +139,7 @@ pub fn readingOrder(display: u32, kind: ?commands.WindowKind, output: []u64) []u
     for (entries[0..count], 0..) |entry, index| output[index] = entry.identity;
     return output[0..count];
 }
+
 // How far the candidate's center lies ahead of the source's in `direction`, and how far it lies off that line.
 fn offsets(source: *const Window, candidate: *const Window, direction: Direction) [2]f64 {
     const from = if (source.floating) source.floating_frame else source.goal;
@@ -145,6 +153,7 @@ fn offsets(source: *const Window, candidate: *const Window, direction: Direction
         .down => .{ vertical, @abs(horizontal) },
     };
 }
+
 pub fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     var best: f64 = std.math.inf(f64);
     var result: ?usize = null;
@@ -160,10 +169,12 @@ pub fn neighbor(sourceIndex: usize, direction: Direction) ?usize {
     }
     return result;
 }
+
 pub fn focusable(identity: u64) bool {
     const window = world.windows()[world.windowIndex(identity) orelse return false];
     return window.eligible() and world.displayIndex(window.display) != null;
 }
+
 pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     discovery.refresh();
     if (!placer.deriveGoals()) return;
@@ -188,6 +199,7 @@ pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     }
     select(displayIdentity);
 }
+
 pub fn observeCommandState() void {
     discovery.refresh();
     const observed_focus = native.platform_focused_window();

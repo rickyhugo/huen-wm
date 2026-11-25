@@ -1,4 +1,3 @@
-const std = @import("std");
 const native = @import("native.zig");
 const commands = @import("command.zig");
 const tiling = @import("layout.zig");
@@ -15,11 +14,13 @@ const SnapshotPresentation = enum { idle, pending, instant, captured, fallback }
 var transition: ?Transition = null;
 var generation: u64 = 0;
 var snapshot_presentation: SnapshotPresentation = .idle;
+
 pub fn cancel() void {
     if (transition != null) snapshot_presentation = .idle;
     transition = null;
     native.huen_scene_cancel();
 }
+
 fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_target: ?u64) bool {
     const displayIdentity = world.displays()[displaySlot].identity;
     if (world.displayBlocked(displayIdentity)) {
@@ -45,6 +46,7 @@ fn commitWorkspace(displaySlot: usize, workspace: usize, from: usize, focus_targ
     native.platform_config_changed();
     return true;
 }
+
 fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const callbackGeneration = @intFromPtr(context orelse return);
     const request = transition orelse return;
@@ -59,7 +61,8 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     transition = null;
     if (covered) native.huen_scene_finish(request.generation);
 }
-pub fn switchTo(display_slot: usize, workspace: usize, from: usize, focus_target: ?u64) [*:0]const u8 {
+
+pub fn switchTo(display_slot: usize, workspace: usize, from: usize, focus_target: ?u64) reply.Reply {
     const destination = world.displays()[display_slot];
     if (workspace == destination.workspace) {
         focus.focusWorkspace(destination.identity, focus_target);
@@ -76,9 +79,10 @@ pub fn switchTo(display_slot: usize, workspace: usize, from: usize, focus_target
     native.huen_scene_begin(destination.identity, generation, world.config().duration, sceneReady, @ptrFromInt(generation));
     return reply.json(.{ .ok = true, .accepted = true, .generation = generation });
 }
+
 // Global mode: show `workspace` on its display and select that display. `from` is the
 // selected display's workspace and becomes the global previous workspace.
-pub fn show(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u8 {
+pub fn show(workspace: usize, from: usize, focus_target: ?u64) reply.Reply {
     const resolved = routing.resolve();
     const owner = resolved[workspace] orelse return reply.failure("NoWorkspaceOwner");
     const destination_slot = world.displayIndex(owner).?;
@@ -101,7 +105,8 @@ pub fn show(workspace: usize, from: usize, focus_target: ?u64) [*:0]const u8 {
     if (verified) routing.recordPrevious(destination_slot, from, workspace);
     return reply.json(.{ .ok = true, .changed = false, .monitor = owner, .verified = verified, .target = focus_target });
 }
-pub fn jump(identity: u64, display_slot: usize) [*:0]const u8 {
+
+pub fn jump(identity: u64, display_slot: usize) reply.Reply {
     const window = world.windows()[world.windowIndex(identity).?];
     if (world.config().workspace_monitors != null) return show(window.workspace, routing.currentWorkspace(display_slot), identity);
     const slot = world.displayIndex(window.display).?;

@@ -8,6 +8,7 @@ const text = native.text;
 
 pub const Rect = native.WMRect;
 pub const Config = configuration.ConfigCandidate;
+
 // Whether an application moves its window back on screen after it is parked. `escaped` holds when it last did.
 pub const Escape = union(enum) { settled, escaped: f64, exempt };
 pub const PendingTileWrite = struct { frame: Rect, at: f64, snap_candidate: ?Rect = null };
@@ -56,6 +57,7 @@ pub const Window = struct {
         return if (window.floating) window.floating_frame else window.bounds.fit(window.goal);
     }
 };
+
 pub const Display = struct {
     identity: u32,
     frame: Rect,

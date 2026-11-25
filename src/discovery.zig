@@ -1,6 +1,5 @@
 const std = @import("std");
 const native = @import("native.zig");
-const parking = @import("parking.zig");
 const journal = @import("journal.zig");
 const world = @import("world.zig");
 const routing = @import("routing.zig");
@@ -11,10 +10,12 @@ const recall = @import("recall.zig");
 const Window = world.Window;
 
 const replacement_grace = 0.5;
+
 fn replaces(ghost: Window, successor: Window) bool {
     const vanished = ghost.vanished orelse return false;
     return successor.vanished == null and successor.observation.pid == ghost.observation.pid and @abs(successor.discovered - vanished) <= replacement_grace and world.framesNear(successor.discovered_frame, ghost.observation.frame, 4);
 }
+
 pub fn refresh() void {
     var observed: [1024]native.WMWindow = undefined;
     const count = native.platform_refresh_windows(&observed, observed.len);

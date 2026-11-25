@@ -18,8 +18,10 @@ const Display = world.Display;
 
 const snap_back_window: f64 = 1.0;
 const launch_grace: f64 = 1.0;
+
 // macOS moves windows when a display goes away, which must not count as an application moving its own window.
 var topology_changed_at: f64 = -std.math.inf(f64);
+
 pub fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     const source = world.windows()[source_index];
     const state = world.workspaceLayout(source.display, source.workspace);
@@ -45,6 +47,7 @@ pub fn resizeTiled(source_index: usize, axis: commands.Axis, delta: f64) !f64 {
     state.ratio = next / available;
     return (next - previous) * sign;
 }
+
 pub const Transaction = struct {
     pub const Scope = union(enum) { all, display: u32, pair: [2]u32 };
     store: *tiling.Store,
@@ -155,6 +158,7 @@ pub const Transaction = struct {
         return world.windows()[first].observation.stack_order > world.windows()[second].observation.stack_order;
     }
 };
+
 fn floatRejectedTile(window: *Window) void {
     if (window.managedFullscreen()) {
         world.workspaceLayout(window.display, window.workspace).fullscreen = null;
@@ -167,6 +171,7 @@ fn floatRejectedTile(window: *Window) void {
     window.floating_frame = world.boundedFloating(window.parking_frame, world.displayArea(window.display));
     placementFailure(window, "Application rejected tile; retrying with floating recovery geometry");
 }
+
 pub fn deriveGoals() bool {
     for (&world.layouts().roots) |*slot| if (slot.*) |*state| {
         if (world.displayIndex(state.display) == null) {
@@ -253,9 +258,11 @@ pub fn deriveGoals() bool {
     }
     return true;
 }
+
 fn rowMinimum(window: Window) f64 {
     return @max(tiling.minimum_tile_extent, window.bounds.minimumAt(.height));
 }
+
 fn masterSides(indices: []const usize) [2]tiling.Side {
     var minimums: [2]f64 = @splat(tiling.minimum_tile_extent);
     for (indices, 0..) |index, ordinal| {
@@ -269,6 +276,7 @@ fn masterSides(indices: []const usize) [2]tiling.Side {
         .{ .minimum = minimums[1], .compact = minimums[1], .ceiling = stack_ceiling },
     };
 }
+
 fn placementFailure(window: *Window, message: []const u8) void {
     const repeated = if (window.placement_error) |previous| std.mem.eql(u8, previous, message) else false;
     window.placement_error = message;
@@ -283,6 +291,7 @@ fn placementFailure(window: *Window, message: []const u8) void {
     _ = std.fmt.bufPrint(&buffer, "Window {d}: {s}", .{ window.identity, message }) catch return;
     native.platform_error(&buffer);
 }
+
 fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
     const area = world.displays()[world.displayIndex(displayIdentity).?].frame;
     const bottom = area.top + area.height;
@@ -293,13 +302,16 @@ fn parkedFrameAccepted(actual: Rect, target: Rect, displayIdentity: u32) bool {
         actual.top >= area.top and actual.top <= bottom and actual.top + actual.height >= bottom and
         !world.overlapsOtherDisplays(actual, displayIdentity);
 }
+
 fn verifiedFrame(identity: u64, target: Rect, parkedDisplay: ?u32, actual: *Rect) bool {
     _ = native.platform_frame(identity, target, 0, .verified_placement);
     if (!native.platform_read_frame(identity, actual)) return false;
     return if (parkedDisplay) |displayIdentity| parkedFrameAccepted(actual.*, target, displayIdentity) else world.framesNear(actual.*, target, 2);
 }
+
 // A refusal carries the frame the application accepted instead.
 const PlacementOutcome = union(enum) { applied, rolled_back: Rect, recovery_required: Rect, unreadable, no_corner };
+
 fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutcome {
     var original: Rect = undefined;
     if (!native.platform_read_frame(window.identity, &original)) return .unreadable;
@@ -324,6 +336,7 @@ fn attemptVisibility(window: *Window, target: Rect, parked: bool) PlacementOutco
     window.parked_at = null;
     return .{ .recovery_required = accepted };
 }
+
 fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
     switch (outcome) {
         .applied => {},
@@ -333,6 +346,7 @@ fn reportPlacementOutcome(window: *Window, outcome: PlacementOutcome) void {
         .no_corner => placementFailure(window, "No parking corner avoids other displays"),
     }
 }
+
 fn placeVisible(window: *Window) PlacementOutcome {
     const target = window.targetFrame();
     var outcome = attemptVisibility(window, target, false);
@@ -355,6 +369,7 @@ fn placeVisible(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
+
 // A learned bound can come from a size someone else set during placement, such as a native edge drag, and a minimum never
 // lowers itself. A resize it blocks clears it, and placement learns it again if the application still refuses.
 pub fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
@@ -368,6 +383,7 @@ pub fn forgetWorkspaceBounds(display: u32, workspace: usize) bool {
     }
     return forgot;
 }
+
 fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     if (!window.established and native.platform_monotonic() - window.discovered < launch_grace) return false;
     const area = world.displays()[world.displayIndex(window.display) orelse return false].area();
@@ -383,6 +399,7 @@ fn learnBounds(window: *Window, requested: Rect, accepted: Rect) bool {
     _ = deriveGoals();
     return false;
 }
+
 fn parkWindow(window: *Window) PlacementOutcome {
     if (window.escape == .exempt) return .applied;
     const outcome: PlacementOutcome = outcome: {
@@ -429,6 +446,7 @@ fn parkWindow(window: *Window) PlacementOutcome {
     reportPlacementOutcome(window, outcome);
     return outcome;
 }
+
 pub fn reconcile() void {
     if (world.isSuspended() or scene.pending() or world.displays().len == 0 or routing.blocked()) return;
     if (!deriveGoals()) return;

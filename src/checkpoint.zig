@@ -24,11 +24,14 @@ pub const Status = struct {
     errors: usize = 0,
     err_message: ?[]const u8 = null,
 };
+
 var session_status: Status = .{};
+
 fn sessionError(message: []const u8) void {
     session_status.err_message = message;
     session_status.errors += 1;
 }
+
 pub fn configure() void {
     if (!world.config().session.enabled) return;
     const encoded = std.json.Stringify.valueAlloc(allocator, world.config().*, .{}) catch |err| {
@@ -40,9 +43,11 @@ pub fn configure() void {
     if (!session.huen_session_boot_identity(&session_boot, session_boot.len)) sessionError("BootIdentityUnavailable");
     if (!session_loaded) session_status.load = .pending;
 }
+
 fn sessionScope() session.Scope {
     return .{ .config = &session_config_hash, .filter = std.mem.span(native.platform_filter()), .boot = text(&session_boot) };
 }
+
 fn sessionWindows() ![]continuity.LiveWindow {
     var result: std.ArrayList(continuity.LiveWindow) = .empty;
     errdefer result.deinit(allocator);
@@ -57,6 +62,7 @@ fn sessionWindows() ![]continuity.LiveWindow {
     }
     return result.toOwnedSlice(allocator);
 }
+
 fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
     for (world.displays(), 0..) |display, index| {
         output[index] = .{ .identity = display.identity, .workspace = display.workspace, .full_bounds = display.full_bounds, .hint = @splat(0) };
@@ -64,6 +70,7 @@ fn sessionScreens(output: []continuity.Screen) []continuity.Screen {
     }
     return output[0..world.displays().len];
 }
+
 pub fn freeze() void {
     if (session_freeze_attempted) return;
     session_freeze_attempted = true;
@@ -75,10 +82,12 @@ pub fn freeze() void {
     session_frozen = continuity.freeze(world.layouts(), current, sessionScreens(&screens), world.config(), homes[0..world.config().workspace_count], sessionScope()) catch |err| return saveFailed(err);
     session_status.save = .frozen;
 }
+
 fn saveFailed(err: anyerror) void {
     sessionError(@errorName(err));
     session_status.save = .failed;
 }
+
 pub fn save(clean: bool) void {
     if (session_save_attempted or !world.config().session.enabled) return;
     session_save_attempted = true;

@@ -291,7 +291,7 @@ fn settle() reply.Reply {
     return reply.json(.{ .ok = true });
 }
 
-fn swapWindows(source_index: usize, target_index: usize) [*:0]const u8 {
+fn swapWindows(source_index: usize, target_index: usize) reply.Reply {
     const source = &world.windows()[source_index];
     const target = &world.windows()[target_index];
     const identity = source.identity;

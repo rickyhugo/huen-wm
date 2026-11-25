@@ -10,6 +10,7 @@ const Window = world.Window;
 
 var parking_journal: parking.Writer = .{};
 var parking_journal_failed = false;
+
 // A parked window the manager lost track of while its application still runs. Its record stays in the journal and is
 // matched against new windows for up to a minute, because most orphans are windows their application closed while parked.
 const orphan_lifetime = 60.0;
@@ -17,13 +18,16 @@ const Orphan = struct { bundle: [256]u8, pid: c_int, token: f64, original: Rect,
 var orphan_buffer: [256]Orphan = undefined;
 var orphans: std.ArrayList(Orphan) = .initBuffer(&orphan_buffer);
 const ParkingRecovery = struct { records: usize = 0, recovered: usize = 0, failed: usize = 0 };
+
 // Null until the first tick that has displays has matched the journal of the previous process.
 var parking_recovery: ?ParkingRecovery = null;
+
 fn reportParkingJournal(message: []const u8, err: anyerror) void {
     var buffer: [256:0]u8 = @splat(0);
     _ = std.fmt.bufPrint(&buffer, "{s}: {s}", .{ message, @errorName(err) }) catch return;
     native.platform_error(&buffer);
 }
+
 fn writeParkingJournal(records: []const parking.Record) void {
     parking_journal.save(allocator, std.mem.span(native.platform_filter()), records) catch |err| {
         if (!parking_journal_failed) reportParkingJournal("Parking journal save failed", err);
@@ -32,6 +36,7 @@ fn writeParkingJournal(records: []const parking.Record) void {
     };
     parking_journal_failed = false;
 }
+
 // A corner that touches another display is never used, so a window there is not a parked one.
 fn parkingRecord(window: *const Window) ?parking.Record {
     const display = world.displays()[world.displayIndex(window.display) orelse return null];
@@ -43,14 +48,17 @@ fn parkingRecord(window: *const Window) ?parking.Record {
     const record: parking.Record = .{ .bundle = text(&window.observation.bundle), .pid = window.observation.pid, .token = window.observation.process_token, .original = window.parking_frame, .corners = corners };
     return if (parking.valid(record)) record else null;
 }
+
 fn orphanRecord(lost: *const Orphan) parking.Record {
     return .{ .bundle = text(&lost.bundle), .pid = lost.pid, .token = lost.token, .original = lost.original, .corners = lost.corners };
 }
+
 fn orphanOf(record: parking.Record, since: f64) Orphan {
     var result: Orphan = .{ .bundle = @splat(0), .pid = record.pid, .token = record.token, .original = record.original, .corners = record.corners, .since = since };
     @memcpy(result.bundle[0..record.bundle.len], record.bundle);
     return result;
 }
+
 // `prior` is the window state a rollback is about to return to. A window that the transaction showed goes back to its corner.
 pub fn save(prior: []const Window) void {
     var records: [parking.max_records]parking.Record = undefined;
@@ -71,12 +79,14 @@ pub fn save(prior: []const Window) void {
     };
     writeParkingJournal(records[0..count]);
 }
+
 // After a verified restore only the orphans can still sit at a corner.
 pub fn settle() void {
     var records: [256]parking.Record = undefined;
     for (orphans.items, records[0..orphans.items.len]) |*lost, *record| record.* = orphanRecord(lost);
     writeParkingJournal(records[0..orphans.items.len]);
 }
+
 // The display layout may have changed since the crash, so the frame is bounded to the display it overlaps most.
 pub fn restingFrame(frame: Rect) Rect {
     var largest: f64 = 0;
@@ -92,6 +102,7 @@ pub fn restingFrame(frame: Rect) Rect {
     }
     return world.boundedFloating(frame, area);
 }
+
 pub fn processExited(process: memory.Process) bool {
     return native.platform_process_token(process.pid) != process.token;
 }

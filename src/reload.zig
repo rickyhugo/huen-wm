@@ -1,4 +1,3 @@
-const std = @import("std");
 const native = @import("native.zig");
 const configuration = @import("config.zig");
 const reply = @import("reply.zig");

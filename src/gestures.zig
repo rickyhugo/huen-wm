@@ -1,4 +1,3 @@
-const std = @import("std");
 const native = @import("native.zig");
 const tiling = @import("layout.zig");
 const size_bounds = @import("bounds.zig");
@@ -17,9 +16,11 @@ const Rect = world.Rect;
 var swipe_recognizer: swiping.Recognizer = .{};
 var gestures_enabled = false;
 var pointer_controls: pointer.Controls = .{};
+
 // A modified drag that moves or resizes a floating window. A resize moves the edges nearest the press, as in Hyprland.
 const FloatingDrag = struct { gesture_id: u64, identity: u64, origin: interaction.Point, frame: Rect, from_left: bool, from_top: bool };
 var floating_drag: ?FloatingDrag = null;
+
 fn pointerWindows(output: []pointer.Window) []pointer.Window {
     for (world.windows(), 0..) |window, index| {
         const hit = window.visible() and !window.parked and !window.managedFullscreen() and !world.displayBlocked(window.display) and window.observation.hit_eligible and window.observation.motion == .idle;
@@ -35,6 +36,7 @@ fn pointerWindows(output: []pointer.Window) []pointer.Window {
     }
     return output[0..world.windows().len];
 }
+
 pub fn publish() void {
     // A new publication cancels the active gesture, and the dragged window's hit changes with every update.
     if (!world.isInitialized() or pointer_controls.stop_deadline != null or floating_drag != null) return;
@@ -46,6 +48,7 @@ pub fn publish() void {
         interaction.huen_groups_clear();
     };
 }
+
 pub fn poll() void {
     if (!world.isInitialized()) return;
     if (world.isSuspended() or pointer_controls.stop_deadline != null) {
@@ -175,6 +178,7 @@ pub fn poll() void {
     }
     if (pointer_controls.revision != world.layouts().revision) publish();
 }
+
 pub fn configure() void {
     pointer_controls.configure(world.config().mouse.enabled, world.config().mouse.modifiers);
     if (gestures_enabled == world.config().swipe.enabled) return;

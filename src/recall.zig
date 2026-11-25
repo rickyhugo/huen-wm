@@ -14,6 +14,7 @@ const Window = world.Window;
 var placement_memory: memory.Memory = .{};
 var placement_memory_loaded = false;
 var placement_claims: usize = 0;
+
 fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
     if (window.observation.bundle[0] == 0) return null;
     var entry: memory.Entry = .{ .bundle = window.observation.bundle, .floating = window.floating, .floating_frame = window.floating_frame, .frame = frame, .expires = expires };
@@ -21,12 +22,14 @@ fn placementEntry(window: Window, frame: Rect, expires: f64) ?memory.Entry {
     @memcpy(entry.workspace[0..name.len], name);
     return entry;
 }
+
 fn writePlacements(entries: []const memory.Entry) void {
     const hash = session.storageKey(memory.stem, std.mem.span(native.platform_filter()));
     const encoded = memory.encode(allocator, entries) catch return native.platform_error("Placement memory: out of memory");
     defer allocator.free(encoded);
     if (!session.huen_session_write(memory.stem, &hash, encoded.ptr, encoded.len, true)) native.platform_error("Placement memory: file write failed");
 }
+
 // After restoration each window is where a restarted manager will discover it.
 pub fn persist() void {
     if (!world.config().placement_memory) return;
