@@ -16,7 +16,6 @@ pub const WorkspaceMonitors = struct {
     }
 };
 pub const Workspace = struct { name: [64:0]u8 = @splat(0), layout: Layout = .dwindle, ratio: f64 = 0.55, monitor: WorkspaceMonitors = .{} };
-pub const Rule = Rules.Rule;
 pub const Session = struct { enabled: bool = false };
 // Fractions of the usable display area for a window that toggle-floating floats for the first time.
 pub const FloatingSize = struct { width: f64 = 0.5, height: f64 = 0.5 };
@@ -53,7 +52,7 @@ pub const ConfigCandidate = struct {
     workspace_count: usize = 5,
     modes: [8]Mode = @splat(.{}),
     mode_count: usize = 1,
-    rules: [64]Rule = @splat(.{}),
+    rules: [64]Rules.Rule = @splat(.{}),
     rule_count: usize = 0,
 
     pub fn modeIndex(self: *const ConfigCandidate, name: []const u8) ?usize {
@@ -149,41 +148,32 @@ pub fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callcon
         candidate.workspace_monitors = .{ .count = preferences.len };
         @memcpy(candidate.workspace_monitors.?.order[0..preferences.len], preferences);
     }
-    for (wire.workspaces, 0..) |workspace, index| {
-        try copyText(&candidate.workspaces[index].name, workspace.name);
-        candidate.workspaces[index].layout = workspace.layout;
-        candidate.workspaces[index].ratio = workspace.ratio;
+    for (wire.workspaces, candidate.workspaces[0..wire.workspaces.len]) |workspace, *target| {
+        try copyText(&target.name, workspace.name);
+        target.layout = workspace.layout;
+        target.ratio = workspace.ratio;
         const selectors = workspace.monitor orelse continue;
         if (selectors.len == 0) return error.EmptyWorkspaceMonitors;
         if (selectors.len > 4) return error.TooManyWorkspaceMonitors;
-        candidate.workspaces[index].monitor.count = selectors.len;
-        for (selectors, 0..) |value, position| candidate.workspaces[index].monitor.selectors[position] = try workspaceMonitor(value);
+        target.monitor.count = selectors.len;
+        for (selectors, target.monitor.selectors[0..selectors.len]) |value, *selection| selection.* = try workspaceMonitor(value);
     }
-    for (wire.modes, 0..) |mode, mode_index| {
+    for (wire.modes, candidate.modes[0..wire.modes.len]) |mode, *target| {
         if (mode.bindings.len > 128) return error.InvalidCollectionSize;
-        const target = &candidate.modes[mode_index];
         try copyText(&target.name, mode.name);
         target.binding_count = mode.bindings.len;
-        for (mode.bindings, 0..) |binding, index| {
-            target.bindings[index].key = binding.key;
-            target.bindings[index].modifiers = binding.modifiers;
-            try copyText(&target.bindings[index].command, binding.command);
+        for (mode.bindings, target.bindings[0..mode.bindings.len]) |binding, *slot| {
+            slot.key = binding.key;
+            slot.modifiers = binding.modifiers;
+            try copyText(&slot.command, binding.command);
         }
     }
-    for (wire.rules, 0..) |rule, index| {
-        try copyText(&candidate.rules[index].bundle, rule.bundle);
-        candidate.rules[index].bundle_kind = rule.bundle_kind;
-        candidate.rules[index].floating = rule.floating;
-        candidate.rules[index].workspace = rule.workspace;
-        candidate.rules[index].geometry = rule.geometry;
-        candidate.rules[index].centered = rule.centered;
-        candidate.rules[index].focus_on_activate = rule.focus_on_activate;
-        candidate.rules[index].border = rule.border;
-        candidate.rules[index].border_width = rule.border_width;
-        candidate.rules[index].border_color = rule.border_color;
+    for (wire.rules, candidate.rules[0..wire.rules.len]) |rule, *target| {
+        target.* = .{ .bundle_kind = rule.bundle_kind, .floating = rule.floating, .workspace = rule.workspace, .geometry = rule.geometry, .centered = rule.centered, .focus_on_activate = rule.focus_on_activate, .border = rule.border, .border_width = rule.border_width, .border_color = rule.border_color };
+        try copyText(&target.bundle, rule.bundle);
         if (rule.title) |title| {
-            candidate.rules[index].title = .{ .kind = title.kind };
-            try copyText(&candidate.rules[index].title.?.pattern, title.pattern);
+            target.title = .{ .kind = title.kind };
+            try copyText(&target.title.?.pattern, title.pattern);
         }
     }
     try validate(&candidate);
@@ -218,14 +208,9 @@ const WireConfig = struct {
 };
 
 fn workspaceMonitor(value: []const u8) !commands.MonitorSelector {
-    const selection = commands.parseMonitorSelector(value) catch |err| return switch (err) {
-        error.InvalidMonitorSelector => error.UnknownMonitor,
-        else => err,
-    };
-    return switch (selection) {
-        .class, .name => selection,
-        .direction, .step => error.RelativeMonitorSelector,
-    };
+    const selection = commands.parseMonitorSelector(value) catch |err| return if (err == error.InvalidMonitorSelector) error.UnknownMonitor else err;
+    if (selection == .direction or selection == .step) return error.RelativeMonitorSelector;
+    return selection;
 }
 
 fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
@@ -235,10 +220,7 @@ fn checkNumber(number: f64, minimum: f64, maximum: f64) !void {
 fn validate(candidate: *const ConfigCandidate) !void {
     if (candidate.mouse.modifiers == 0 or candidate.mouse.modifiers & ~@as(u32, 256 | 512 | 2048 | 4096) != 0) return error.UnknownModifier;
     if (candidate.swipe.fingers != 3 and candidate.swipe.fingers != 4) return error.InvalidSwipeFingers;
-    if (candidate.workspace_monitors) |preferences| {
-        if (preferences.count == 0 or preferences.count > 2) return error.InvalidMonitorPreferences;
-        if (preferences.count == 2 and preferences.order[0] == preferences.order[1]) return error.DuplicateMonitor;
-    }
+    if (candidate.workspace_monitors) |preferences| if (preferences.count == 2 and preferences.order[0] == preferences.order[1]) return error.DuplicateMonitor;
     try checkNumber(candidate.gap, 0, 100);
     try checkNumber(candidate.border_width, 0, 12);
     try checkNumber(candidate.duration, 0, 0.5);
@@ -247,13 +229,9 @@ fn validate(candidate: *const ConfigCandidate) !void {
     for (candidate.workspaces[0..candidate.workspace_count]) |*workspace| {
         if (text(&workspace.name).len == 0) return error.EmptyWorkspaceName;
         try checkNumber(workspace.ratio, 0.1, 0.9);
-        if (workspace.monitor.count > workspace.monitor.selectors.len) return error.TooManyWorkspaceMonitors;
         const selectors = workspace.monitor.slice();
         if (selectors.len > 0 and candidate.workspace_monitors == null) return error.MonitorRequiresGlobalWorkspaces;
-        for (selectors, 0..) |selection, position| {
-            if (selection != .class and selection != .name) return error.RelativeMonitorSelector;
-            for (selectors[0..position]) |previous| if (std.meta.eql(previous, selection)) return error.DuplicateMonitor;
-        }
+        for (selectors, 0..) |selection, position| for (selectors[0..position]) |previous| if (std.meta.eql(previous, selection)) return error.DuplicateMonitor;
     }
     if (!std.mem.eql(u8, text(&candidate.modes[0].name), "main")) return error.MainModeRequired;
     var total_bindings: usize = 0;
@@ -343,10 +321,7 @@ fn pop(state: *native.lua_State) void {
 
 fn plainTable(state: *native.lua_State) !void {
     if (native.lua_type(state, -1) != native.LUA_TTABLE) return error.ExpectedTable;
-    if (lua_getmetatable(state, -1) != 0) {
-        pop(state);
-        return error.ConfigurationMetatable;
-    }
+    if (lua_getmetatable(state, -1) != 0) return error.ConfigurationMetatable;
 }
 
 fn arrayCount(state: *native.lua_State, capacity: usize) !usize {
@@ -428,7 +403,6 @@ fn modifiers(value: []const u8) !u32 {
         if (flags & flag != 0) return error.DuplicateModifier;
         flags |= flag;
     }
-    if (flags == 0) return error.ModifierRequired;
     return flags;
 }
 
@@ -456,10 +430,6 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     }
     var result: ConfigCandidate = .{};
     try copyText(&result.modes[0].name, "main");
-    for (&result.workspaces, 0..) |*workspace, index| {
-        const name = try std.fmt.bufPrint(&workspace.name, "{d}", .{index + 1});
-        workspace.name[name.len] = 0;
-    }
     const state = native.platform_lua_open() orelse return error.LuaAllocationFailed;
     defer native.lua_close(state);
     const chunk_name = try std.fmt.allocPrintSentinel(allocator, "@{s}", .{std.mem.span(path)}, 0);
@@ -527,7 +497,8 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     if (try fieldColor(state, "border_color")) |color| result.border_color = color;
     const layout = if (try fieldString(state, "layout")) |name| std.meta.stringToEnum(Layout, name) orelse return error.InvalidLayout else .dwindle;
     const ratio = try fieldNumber(state, "master_ratio", 0.55, 0.1, 0.9);
-    for (&result.workspaces) |*workspace| {
+    for (&result.workspaces, 0..) |*workspace, index| {
+        _ = try std.fmt.bufPrint(&workspace.name, "{d}", .{index + 1});
         workspace.layout = layout;
         workspace.ratio = ratio;
     }
@@ -592,18 +563,14 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
             if (rawField(state, "bundle") == native.LUA_TTABLE) {
                 const pattern = try patternField(state);
                 rule.bundle_kind = pattern.kind;
-                try copyText(&rule.bundle, pattern.text);
+                rule.bundle = pattern.pattern;
                 pop(state);
             } else {
                 pop(state);
                 try copyText(&rule.bundle, (try fieldString(state, "bundle")) orelse return error.MissingBundle);
             }
             rule.floating = try fieldBool(state, "floating", @as(?bool, null));
-            if (rawField(state, "title") != native.LUA_TNIL) {
-                const pattern = try patternField(state);
-                rule.title = .{ .kind = pattern.kind };
-                try copyText(&rule.title.?.pattern, pattern.text);
-            }
+            if (rawField(state, "title") != native.LUA_TNIL) rule.title = try patternField(state);
             pop(state);
             if (rawField(state, "geometry") != native.LUA_TNIL) {
                 try checkKeys(state, &.{ "left", "top", "width", "height" });
@@ -694,17 +661,16 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     return allocator.dupe(u8, writer.buffered());
 }
 
-/// Reads the pattern table on top of the stack: exactly one of `literal`, `glob`, or `regex`.
-fn patternField(state: *native.lua_State) !struct { kind: Rules.PatternKind, text: []const u8 } {
+fn patternField(state: *native.lua_State) !Rules.Title {
     try checkKeys(state, &.{ "literal", "glob", "regex" });
     const literal = try fieldString(state, "literal");
     const glob = try fieldString(state, "glob");
     const regex = try fieldString(state, "regex");
     const count = @as(u8, @intFromBool(literal != null)) + @intFromBool(glob != null) + @intFromBool(regex != null);
     if (count != 1) return error.InvalidPattern;
-    if (literal) |value| return .{ .kind = .literal, .text = value };
-    if (glob) |value| return .{ .kind = .glob, .text = value };
-    return .{ .kind = .regex, .text = regex.? };
+    var pattern: Rules.Title = .{ .kind = if (literal != null) .literal else if (glob != null) .glob else .regex };
+    try copyText(&pattern.pattern, literal orelse glob orelse regex.?);
+    return pattern;
 }
 
 fn luaText(state: *native.lua_State) []const u8 {
