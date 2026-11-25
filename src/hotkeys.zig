@@ -9,7 +9,7 @@ const world = @import("world.zig");
 const routing = @import("routing.zig");
 const scene = @import("scene.zig");
 const focus = @import("focus.zig");
-const main = @import("main.zig");
+const presenter = @import("presenter.zig");
 const text = native.text;
 
 var active_mode: usize = 0;
@@ -22,7 +22,7 @@ pub fn flush() void {
     if (workspace_shortcuts.items.len == 0) return;
     defer workspace_shortcuts.clearRetainingCapacity();
     if (world.isSuspended() or world.displays().len == 0 or scene.pending()) return;
-    defer main.publishState();
+    defer presenter.present();
     var remaining = workspace_shortcuts.items;
     while (remaining.len != 0) {
         focus.observeCommandState();

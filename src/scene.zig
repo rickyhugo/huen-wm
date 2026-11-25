@@ -8,7 +8,7 @@ const world = @import("world.zig");
 const placer = @import("placer.zig");
 const routing = @import("routing.zig");
 const focus = @import("focus.zig");
-const main = @import("main.zig");
+const presenter = @import("presenter.zig");
 
 const Transition = struct { display: u32, workspace: usize, from: usize, generation: u64, focus_target: ?u64 };
 const SnapshotPresentation = enum { idle, pending, instant, captured, fallback };
@@ -49,7 +49,7 @@ fn sceneReady(context: ?*anyopaque, covered: bool) callconv(.c) void {
     const callbackGeneration = @intFromPtr(context orelse return);
     const request = transition orelse return;
     if (callbackGeneration != request.generation) return;
-    defer main.publishStatus();
+    defer presenter.publishStatus();
     defer journal.flushTransition();
     native.platform_settle_budget_begin();
     snapshot_presentation = if (covered) .captured else .fallback;
