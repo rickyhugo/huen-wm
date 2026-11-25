@@ -236,3 +236,23 @@ pub fn overlap(first: Rect, second: Rect, comptime axis: enum { horizontal, vert
         .vertical => @min(first.top + first.height, second.top + second.height) - @max(first.top, second.top),
     };
 }
+
+pub const DisplayScan = struct { observed: [32]native.WMDisplay, count: usize, updated: [monitor.capacity]Display, changed: bool };
+
+pub fn scanDisplays(scan: *DisplayScan) void {
+    scan.count = native.platform_displays(&scan.observed, scan.observed.len);
+    scan.changed = scan.count != display_list.items.len;
+}
+
+// Carries each known display's workspaces over to the scan and notes whether the topology changed.
+pub fn stageDisplays(scan: *DisplayScan) void {
+    for (scan.observed[0..scan.count], scan.updated[0..scan.count]) |observation, *display| {
+        const previous: ?Display = if (displayIndex(observation.identity)) |index| display_list.items[index] else null;
+        if (previous == null or !std.meta.eql(previous.?.full_bounds, observation.full_bounds) or !std.meta.eql(previous.?.frame, observation.frame) or previous.?.built_in != observation.built_in) scan.changed = true;
+        display.* = .{ .identity = observation.identity, .frame = observation.frame, .full_bounds = observation.full_bounds, .name = observation.name, .built_in = observation.built_in, .workspace = if (previous) |known| known.workspace else 0, .previous_workspace = if (previous) |known| known.previous_workspace else null };
+    }
+}
+
+pub fn commitDisplays(scan: *const DisplayScan) void {
+    replaceDisplays(scan.updated[0..scan.count]);
+}

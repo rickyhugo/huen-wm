@@ -11,7 +11,7 @@ const world = @import("world.zig");
 const placer = @import("placer.zig");
 const routing = @import("routing.zig");
 const scene = @import("scene.zig");
-const main = @import("main.zig");
+const discovery = @import("discovery.zig");
 const Rect = world.Rect;
 const Window = world.Window;
 const Direction = commands.Direction;
@@ -165,7 +165,7 @@ pub fn focusable(identity: u64) bool {
     return window.eligible() and world.displayIndex(window.display) != null;
 }
 pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
-    main.refreshObservations();
+    discovery.refresh();
     if (!placer.deriveGoals()) return;
     const index = world.displayIndex(displayIdentity) orelse return;
     const state = world.workspaceLayout(displayIdentity, world.displays()[index].workspace);
@@ -189,7 +189,7 @@ pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
     select(displayIdentity);
 }
 pub fn observeCommandState() void {
-    main.refreshObservations();
+    discovery.refresh();
     const observed_focus = native.platform_focused_window();
     observe(if (observed_focus != 0) observed_focus else null, false);
     routing.trackCurrentDisplay();
