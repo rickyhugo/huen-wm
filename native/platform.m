@@ -134,7 +134,6 @@ lua_State *platform_lua_open(void) {
     return state;
 }
 
-static const double kInvalidConfirmDelay = 0.5;
 static BOOL readInvalidElement = NO;
 // Set when an AX read times out. A scan stops reading that application, or each further read would wait for the timeout again.
 static BOOL readTimedOut = NO;
@@ -221,7 +220,13 @@ static BOOL framesNear(WMRect first, WMRect second, double tolerance) {
     return fabs(first.left - second.left) <= tolerance && fabs(first.top - second.top) <= tolerance && fabs(first.width - second.width) <= tolerance && fabs(first.height - second.height) <= tolerance;
 }
 
-static BOOL sessionUnavailable(void);
+// AX reports every window element invalid while the session is locked or off console.
+static BOOL sessionUnavailable(void) {
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    if (!session || [session[@"CGSSessionScreenIsLocked"] boolValue]) return YES;
+    NSNumber *onConsole = session[(__bridge NSString *)kCGSessionOnConsoleKey];
+    return onConsole && !onConsole.boolValue;
+}
 
 static void observationCallback(AXObserverRef observer, AXUIElementRef element, CFStringRef notification, void *context) {
     (void)observer;
@@ -255,14 +260,6 @@ static void observationCallback(AXObserverRef observer, AXUIElementRef element, 
     commandScanNeeded = YES;
 }
 
-// AX reports every window element invalid while the session is locked or off console.
-static BOOL sessionUnavailable(void) {
-    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
-    if (!session || [session[@"CGSSessionScreenIsLocked"] boolValue]) return YES;
-    NSNumber *onConsole = session[(__bridge NSString *)kCGSessionOnConsoleKey];
-    return onConsole && !onConsole.boolValue;
-}
-
 static void freezeRecordsForUnavailableSession(void) {
     for (WindowRecord *record in records) {
         WMWindow observation = record.observation; observation.stale = true; record.observation = observation;
@@ -271,19 +268,9 @@ static void freezeRecordsForUnavailableSession(void) {
     }
 }
 
-static BOOL confirmInvalidRecordRemoval(WindowRecord *record, double now) {
-    if (record.liveness == WMRecordDestroyedNotified) return YES;
-    if (record.liveness == WMRecordInvalidPending) return now - record.invalidSince >= kInvalidConfirmDelay;
-    record.liveness = WMRecordInvalidPending;
-    record.invalidSince = now;
-    requestSettleScans(record.observation.pid);
-    return NO;
-}
-
 // A nonzero process limits AX reads to that application. Other applications keep their last observations.
 // AX can reflect our placement before WindowServer publishes the matching CG bounds, so a scan with an unmatched placement retries.
 static void scanWindows(pid_t onlyProcess) {
-    if (sessionUnavailable()) { freezeRecordsForUnavailableSession(); return; }
     for (NSUInteger attempt = 0; attempt < 3; attempt++) {
         if (attempt) usleep(10000);
         if (sessionUnavailable()) { freezeRecordsForUnavailableSession(); return; }
@@ -366,7 +353,6 @@ static void scanWindows(pid_t onlyProcess) {
             for (id object in windows) {
                 if (readTimedOut) break;
                 AXUIElementRef element = (__bridge AXUIElementRef)object;
-                AXUIElementSetMessagingTimeout(element, 0.08);
                 WindowRecord *record = nil;
                 for (WindowRecord *candidate in records) if (candidate.observation.pid == application.processIdentifier && CFEqual(candidate.element, element)) { record = candidate; break; }
                 if (record) { record.liveness = WMRecordAlive; record.invalidSince = 0; }
@@ -394,7 +380,6 @@ static void scanWindows(pid_t onlyProcess) {
                     else record.placementVisibilityDeadline = CACurrentMediaTime() + 0.25;
                     WMWindow initial = {0}; initial.identity = nextIdentity++; initial.pid = application.processIdentifier; record.observation = initial;
                     [records addObject:record];
-                    AXUIElementSetMessagingTimeout(element, 0.08);
                     observer = [observers[process] pointerValue];
                     if (observer) for (NSString *name in @[(__bridge NSString *)kAXUIElementDestroyedNotification, (__bridge NSString *)kAXMovedNotification, (__bridge NSString *)kAXResizedNotification, (__bridge NSString *)kAXWindowMiniaturizedNotification, (__bridge NSString *)kAXWindowDeminiaturizedNotification]) AXObserverAddNotification(observer, element, (__bridge CFStringRef)name, (void *)(uintptr_t)initial.identity);
                 }
@@ -420,13 +405,7 @@ static void scanWindows(pid_t onlyProcess) {
                 observation.onscreen = unique && (matchingCG == 1 || assumedVisible);
                 observation.stack_order = matchedOrder == NSNotFound ? UINT32_MAX : (uint32_t)matchedOrder;
                 if (!observation.onscreen) observation.public_window_id = 0;
-                observation.hit_eligible = observation.public_window_id != 0;
-                for (NSUInteger frontIndex = 0; observation.hit_eligible && frontIndex < matchedOrder; frontIndex++) {
-                    NSDictionary *front = visibleWindows[frontIndex];
-                    if ([front[(__bridge NSString *)kCGWindowOwnerPID] intValue] == getpid() || [front[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
-                    CGRect bounds;
-                    if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)front[(__bridge NSString *)kCGWindowBounds], &bounds) || CGRectIntersectsRect(CGRectMake(frame.left, frame.top, frame.width, frame.height), bounds)) observation.hit_eligible = false;
-                }
+                observation.hit_eligible = platform_input_rect_unobscured(observation.public_window_id, frame);
                 observation.minimized = [attribute(element, kAXMinimizedAttribute) boolValue];
                 observation.fullscreen = [attribute(element, CFSTR("AXFullScreen")) boolValue];
                 if (!observation.minimized && !observation.fullscreen && unique && matchingCG == 0 && !assumedVisible && CACurrentMediaTime() < record.placementVisibilityDeadline) unmatched = YES;
@@ -460,7 +439,11 @@ static void scanWindows(pid_t onlyProcess) {
                 record.animationDuration = 0; record.motion = WMMotionIdle;
                 if (role) CFRelease(role);
                 if (minimized) CFRelease(minimized);
-                if (nonWindowRole || (invalidHandle && confirmInvalidRecordRemoval(record, now))) [pendingRemovals addObject:record];
+                if (!nonWindowRole && invalidHandle && record.liveness == WMRecordAlive) {
+                    record.liveness = WMRecordInvalidPending;
+                    record.invalidSince = now;
+                    requestSettleScans(record.observation.pid);
+                } else if (nonWindowRole || (invalidHandle && (record.liveness == WMRecordDestroyedNotified || now - record.invalidSince >= 0.5))) [pendingRemovals addObject:record];
             }
             CFRelease(appElement);
         }
@@ -736,8 +719,7 @@ bool platform_close(uint64_t identity, bool track, double *process_token) {
 }
 
 int platform_close_state(uint64_t identity, int pid, double process_token) {
-    if (sessionUnavailable()) return -1;
-    if (!closingRecord || closingRecord.observation.identity != identity || closingRecord.observation.pid != pid || closingProcessToken != process_token) return -1;
+    if (sessionUnavailable() || !closingRecord || closingRecord.observation.identity != identity || closingRecord.observation.pid != pid || closingProcessToken != process_token) return -1;
     NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
     if (application.terminated || application.launchDate.timeIntervalSinceReferenceDate != process_token) return -1;
     AXUIElementRef appElement = AXUIElementCreateApplication(pid);
@@ -808,7 +790,6 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
 
 @interface StatusItemOwner : NSObject
 @property(nonatomic, strong) NSStatusItem *item;
-- (void)dispatchCommand:(NSMenuItem *)sender;
 @end
 
 @implementation StatusItemOwner
@@ -951,27 +932,6 @@ void platform_drag_active(bool active) {
     lastScan = 0;
 }
 static void signalHandler(int signalNumber) { (void)signalNumber; interrupted = 1; }
-static NSDictionary *journalReport(void) {
-    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM"];
-    NSMutableDictionary<NSString *, NSNumber *> *events = [NSMutableDictionary dictionary];
-    id lastMark = NSNull.null;
-    // The rotated file is older, so it is read first.
-    for (NSString *name in @[@"journal.1.jsonl", @"journal.jsonl"]) {
-        NSData *contents = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:name] options:NSDataReadingMappedIfSafe error:NULL];
-        const char *bytes = contents.bytes; NSUInteger start = 0;
-        while (start < contents.length) {
-            const char *newline = memchr(bytes + start, '\n', contents.length - start);
-            NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
-            NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
-            start = end + 1;
-            if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
-            events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
-            if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
-        }
-    }
-    return @{ @"path": [directory stringByAppendingPathComponent:@"journal.jsonl"], @"events": events, @"last_mark": lastMark };
-}
-
 int platform_main(int argc, char **argv) {
     @autoreleasepool {
         configPath = [NSHomeDirectory() stringByAppendingPathComponent:@".config/huen-wm/config.lua"];
@@ -1001,7 +961,24 @@ int platform_main(int argc, char **argv) {
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
         if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nhuen-wm move-app BUNDLE SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nhuen-wm wrong [NOTE...]\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
         if ([verb isEqualToString:@"doctor"]) {
-            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @HUEN_ZIG_VERSION, @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()), @"journal": journalReport() };
+            NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/HuenWM"];
+            NSMutableDictionary<NSString *, NSNumber *> *events = [NSMutableDictionary dictionary];
+            id lastMark = NSNull.null;
+            // The rotated file is older, so it is read first.
+            for (NSString *name in @[@"journal.1.jsonl", @"journal.jsonl"]) {
+                NSData *contents = [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:name] options:NSDataReadingMappedIfSafe error:NULL];
+                const char *bytes = contents.bytes; NSUInteger start = 0;
+                while (start < contents.length) {
+                    const char *newline = memchr(bytes + start, '\n', contents.length - start);
+                    NSUInteger end = newline ? (NSUInteger)(newline - bytes) : contents.length;
+                    NSDictionary *record = [NSJSONSerialization JSONObjectWithData:[contents subdataWithRange:NSMakeRange(start, end - start)] options:0 error:NULL];
+                    start = end + 1;
+                    if (![record isKindOfClass:NSDictionary.class] || ![record[@"event"] isKindOfClass:NSString.class]) continue;
+                    events[record[@"event"]] = @(events[record[@"event"]].unsignedIntegerValue + 1);
+                    if ([record[@"event"] isEqualToString:@"mark"]) lastMark = record;
+                }
+            }
+            NSDictionary *report = @{ @"accessibility": AXIsProcessTrusted() ? @YES : @NO, @"screen_capture": @(huen_scene_capture_allowed()), @"screen_capture_required_for_tiling": @NO, @"zig": @HUEN_ZIG_VERSION, @"socket": socketPath, @"config": configPath, @"bundle_id": NSBundle.mainBundle.bundleIdentifier ?: @"unbundled", @"workspace_backend": @"reversible-corner-parking", @"recovery": @"parking-journal", @"permission_prompted": @NO, @"input_monitoring": @(CGPreflightListenEventAccess()), @"journal": @{ @"path": [directory stringByAppendingPathComponent:@"journal.jsonl"], @"events": events, @"last_mark": lastMark } };
             NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingSortedKeys error:nil]; fwrite(data.bytes, 1, data.length, stdout); puts(""); return 0;
         }
         if ([verb isEqualToString:@"validate"]) { BOOL valid = wm_initialize(configPath.fileSystemRepresentation); if (valid) puts("{\"ok\":true}"); return valid ? 0 : 1; }
