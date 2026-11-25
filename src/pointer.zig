@@ -73,8 +73,7 @@ pub const Controls = struct {
             for (windows) |window| {
                 if (!window.eligible) continue;
                 const node = store.nodeForIdentity(window.identity) orelse continue;
-                if (!belongs(store, node, state)) continue;
-                if (store.goal(window.identity) == null) continue;
+                if (!belongs(store, node, state) or store.goal(window.identity) == null) continue;
                 try hits.append(allocator, .{ .kind = .tile, .rect = window.goal, .node = reference(node), .group = none, .boundary = none, .window_identity = window.identity, .window_id = window.public_id });
             }
             var projected_headers: [2047]layout.Header = undefined;
@@ -117,10 +116,7 @@ pub const Controls = struct {
             var boundaries: [1023]layout.Boundary = undefined;
             const boundary_count = try store.boundaries(state, 6, &boundaries);
             for (boundaries[0..boundary_count]) |boundary| {
-                if (!safeSubtree(store, boundary.node, windows)) continue;
-                const identity = (try store.representative(boundary.node)) orelse continue;
-                const window = findWindow(windows, identity) orelse continue;
-                if (!native.platform_input_rect_unobscured(window.public_id, boundary.rect)) continue;
+                if (!safeSubtree(store, boundary.node, windows) or !unobscured(store, boundary.node, windows, boundary.rect)) continue;
                 try hits.append(allocator, .{ .kind = .boundary, .rect = boundary.rect, .node = none, .group = none, .boundary = reference(boundary.node), .window_identity = 0, .window_id = 0 });
             }
         };
