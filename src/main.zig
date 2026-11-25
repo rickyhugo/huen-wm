@@ -107,9 +107,7 @@ export fn wm_hotkey_pressed(slot: u32, command: [*:0]const u8) void {
 }
 
 export fn wm_hotkey_delivered(slot: u32, command: [*:0]const u8) void {
-    if (!hotkeys.delivered(slot)) return;
-    wm_hotkey(command);
-    hotkeys.ran(slot);
+    if (hotkeys.delivered(slot)) wm_hotkey(command);
 }
 
 export fn wm_swipe(fingers: u32, horizontal: f64, vertical: f64) void {

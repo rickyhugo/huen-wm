@@ -114,15 +114,11 @@ pub fn overdue(now: f64) ?delivery.Command {
 }
 
 pub fn pressed(slot: u32, command: []const u8) void {
-    hotkey_watch.pressed(slot, command, native.platform_monotonic());
+    hotkey_watch.pressed(slot, command);
 }
 
 pub fn delivered(slot: u32) bool {
-    return hotkey_watch.delivered(slot, native.platform_monotonic());
-}
-
-pub fn ran(slot: u32) void {
-    hotkey_watch.ran(slot, native.platform_monotonic());
+    return hotkey_watch.delivered(slot);
 }
 
 pub fn status() struct { watchdog: []const u8, missed: usize, rebinds: usize } {

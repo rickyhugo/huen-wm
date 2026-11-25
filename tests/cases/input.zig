@@ -115,3 +115,35 @@ pub fn @"a hotkey that macOS delivers before a key press that waits 300 ms on it
     manager.tick(20);
     try expect((try manager.report(focused)).floating, "the focused window floating after one toggle", .{});
 }
+
+/// Another command holds the main thread after the delivered command returned, so the tap's report waits longer than the lead.
+pub fn @"a hotkey that macOS delivers 400 ms of a busy main thread before the key press runs once"(manager: *Manager) !void {
+    const focused = try hotkeyWorld(manager);
+    manager.deliver(0, "toggle-floating");
+    manager.advance(0.4);
+    manager.press(0, "toggle-floating");
+    manager.tick(20);
+    try expect((try manager.report(focused)).floating, "the focused window floating after one toggle", .{});
+}
+
+pub fn @"a hotkey that macOS delivers 2 s of a busy main thread after the manager ran it from the key press runs once"(manager: *Manager) !void {
+    const focused = try hotkeyWorld(manager);
+    manager.press(0, "toggle-floating");
+    manager.tick(14);
+    manager.advance(2);
+    manager.deliver(0, "toggle-floating");
+    manager.tick(4);
+    try expect((try manager.report(focused)).floating, "the focused window floating after one toggle", .{});
+}
+
+/// The timer fires before the queued delivery when the main thread comes back.
+pub fn @"a hotkey that a busy main thread holds for 2 s is not reported as missed"(manager: *Manager) !void {
+    const focused = try hotkeyWorld(manager);
+    manager.press(0, "toggle-floating");
+    manager.advance(2);
+    manager.tick(1);
+    manager.deliver(0, "toggle-floating");
+    manager.tick(4);
+    const missed = (try manager.parse(suite.Status, "status")).hotkeys.missed;
+    try expect((try manager.report(focused)).floating and missed == 0, "the focused window floating and no missed hotkey, got {d} missed", .{missed});
+}
