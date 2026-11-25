@@ -10,17 +10,8 @@ end
 message_file:close()
 
 local allowed_types = {
-  build = true,
-  chore = true,
-  ci = true,
-  docs = true,
-  feat = true,
-  fix = true,
-  perf = true,
-  refactor = true,
-  revert = true,
-  style = true,
-  test = true,
+  build = true, chore = true, ci = true, docs = true, feat = true, fix = true,
+  perf = true, refactor = true, revert = true, style = true, test = true,
 }
 
 local commit_type, suffix, subject = (title or ""):match("^([a-zA-Z]+)(.-): (.*)$")
