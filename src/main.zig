@@ -228,8 +228,7 @@ export fn wm_input_poll() void {
         floating_drag = null;
         native.platform_drag_active(false);
         var discarded: interaction.Event = undefined;
-        var count: usize = 0;
-        while (count < 64 and interaction.huen_input_poll(&discarded)) : (count += 1) {}
+        for (0..64) |_| if (!interaction.huen_input_poll(&discarded)) break;
         return;
     }
     var sample: interaction.Event = undefined;
@@ -299,12 +298,11 @@ export fn wm_input_poll() void {
             interaction.huen_groups_preview(null);
             continue;
         } orelse continue;
-        const reference_value = switch (edit) {
+        var handle = layouts.resolve(switch (edit) {
             .group => |selection| selection.group,
             .drop => |preview| preview.source,
             .resize => |preview| preview.boundary.node,
-        };
-        var handle = layouts.resolve(reference_value) catch |err| {
+        }) catch |err| {
             pointer_controls.error_message = @errorName(err);
             continue;
         };
@@ -362,6 +360,11 @@ fn statusText(destination: []u8, source: []const u8, scalar_limit: usize) void {
         length += width;
     }
     @memcpy(destination[0..length], source[0..length]);
+}
+fn publishState() void {
+    journalTransition();
+    publishPointer();
+    publishStatus();
 }
 fn publishStatus() void {
     if (!status_active) return;
@@ -1579,9 +1582,7 @@ export fn wm_tick() void {
         native.platform_close_cancel();
     }
     if (!initialized) return;
-    defer publishStatus();
-    defer publishPointer();
-    defer journalTransition();
+    defer publishState();
     var observedDisplays: [32]native.WMDisplay = undefined;
     const displayCount = native.platform_displays(&observedDisplays, observedDisplays.len);
     var updated: [monitor.capacity]Display = undefined;
@@ -2155,9 +2156,7 @@ fn placeShortcuts() void {
     if (workspace_shortcuts.items.len == 0) return;
     defer workspace_shortcuts.clearRetainingCapacity();
     if (suspended or displays.items.len == 0 or transition != null) return;
-    defer publishStatus();
-    defer publishPointer();
-    defer journalTransition();
+    defer publishState();
     var remaining = workspace_shortcuts.items;
     while (remaining.len != 0) {
         observeCommandState();
@@ -2192,9 +2191,7 @@ export fn wm_hotkey(commandText: [*:0]const u8) void {
     workspace_shortcuts.appendAssumeCapacity(command.workspace);
 }
 export fn wm_command(commandText: [*:0]const u8) [*:0]const u8 {
-    defer publishStatus();
-    defer publishPointer();
-    defer journalTransition();
+    defer publishState();
     const command = parseCommand(std.mem.span(commandText), config.workspace_count) catch |err| return failure(@errorName(err));
     switch (command) {
         .status, .windows, .monitors, .workspaces, .wrong => {},
