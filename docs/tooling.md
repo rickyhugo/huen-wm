@@ -33,7 +33,8 @@ The repository has no Python. Helpers are Zig programs under `tools/`, built by 
 `mise run check` checks Zig formatting, Lua syntax, and source names without a build.
 `mise run fmt` formats Zig files and runs the other checks.
 Pre-commit applies the same checks to staged files and stages Zig formatting fixes.
-hk preserves unstaged work with its default pre-commit stash behavior.
+Pre-commit also runs `zig build test` when a staged file is Zig, C, or `build.zig.zon`. This adds about 10 seconds.
+hk preserves unstaged work with its default pre-commit stash behavior, so the suite tests the staged content.
 
 Use a Conventional Commit title for each new commit.
 The format is `type(scope)!: subject`. The scope and `!` are optional.

@@ -3,6 +3,15 @@ amends "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Config.pk
 min_hk_version = "2.9.0"
 
 hooks {
+  // The steps below also run before a commit. The suite runs there only, because CI runs it as its own job step.
+  ["pre-commit"] {
+    steps {
+      ["test"] {
+        glob = List("*.zig", "*.zon", "*.c", "*.h")
+        check = "mise exec -- zig build test"
+      }
+    }
+  }
   ["commit-msg"] {
     steps {
       ["conventional-commit"] {
