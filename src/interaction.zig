@@ -1,5 +1,3 @@
-pub const title_bytes = 256;
-
 pub const Rect = @import("native.zig").WMRect;
 pub const Point = @import("native.zig").WMPoint;
 pub const NodeRef = extern struct { slot: u32, generation: u64 };
@@ -43,7 +41,7 @@ pub const HeaderItem = extern struct {
     window_identity: u64,
     window_id: u32,
     rect: Rect,
-    title: [title_bytes]u8,
+    title: [256]u8,
     selected: bool,
     eligible: bool,
 };
