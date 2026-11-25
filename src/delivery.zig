@@ -29,6 +29,17 @@ pub const Watch = struct {
         return true;
     }
 
+    /// The tap's report of the press waits on the main thread while the delivered command runs,
+    /// so the delivery's `lead` starts when the command returns.
+    pub fn ran(self: *Watch, slot: u32, now: f64) void {
+        var newest: ?usize = null;
+        for (self.entries, 0..) |candidate, index| if (candidate) |entry| {
+            if (entry.state != .delivered or entry.slot != slot) continue;
+            if (newest == null or entry.at >= self.entries[newest.?].?.at) newest = index;
+        };
+        if (newest) |index| self.entries[index].?.at = now;
+    }
+
     pub fn overdue(self: *Watch, now: f64) ?Command {
         self.expire(now);
         const index = self.oldest(null, .pressed) orelse return null;

@@ -121,6 +121,10 @@ pub fn delivered(slot: u32) bool {
     return hotkey_watch.delivered(slot, native.platform_monotonic());
 }
 
+pub fn ran(slot: u32) void {
+    hotkey_watch.ran(slot, native.platform_monotonic());
+}
+
 pub fn status() struct { watchdog: []const u8, missed: usize, rebinds: usize } {
     return .{ .watchdog = if (native.huen_observe_active()) "active" else "unavailable", .missed = hotkey_recovery.missed, .rebinds = hotkey_recovery.rebinds };
 }

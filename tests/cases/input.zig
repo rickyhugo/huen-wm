@@ -104,3 +104,14 @@ pub fn @"a hotkey that macOS delivers after the manager ran it from the key pres
     manager.tick(4);
     try expect((try manager.report(focused)).floating, "the focused window floating after one toggle", .{});
 }
+
+/// The command's frame write stalls for 300 ms, so the tap's report of the same press runs after it.
+pub fn @"a hotkey that macOS delivers before a key press that waits 300 ms on its command runs once"(manager: *Manager) !void {
+    const focused = try hotkeyWorld(manager);
+    manager.world.write_latency = 0.3;
+    manager.deliver(0, "toggle-floating");
+    manager.world.write_latency = 0;
+    manager.press(0, "toggle-floating");
+    manager.tick(20);
+    try expect((try manager.report(focused)).floating, "the focused window floating after one toggle", .{});
+}

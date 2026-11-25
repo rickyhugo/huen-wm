@@ -29,6 +29,7 @@ pub const all = [_]Case{
     .{ .name = "a hotkey press that macOS never delivers runs its command once" },
     .{ .name = "a hotkey press that macOS delivers runs its command once" },
     .{ .name = "a hotkey that macOS delivers after the manager ran it from the key press runs once" },
+    .{ .name = "a hotkey that macOS delivers before a key press that waits 300 ms on its command runs once" },
     .{ .name = "a three-finger swipe switches one workspace" },
     .{ .name = "a vertical three-finger swipe does not switch the workspace" },
     .{ .name = "the placement journal records a refused placement without the window title" },

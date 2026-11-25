@@ -99,6 +99,8 @@ pub const World = struct {
     last_scan: f64 = -std.math.inf(f64),
     /// Size and position writes that reached an application.
     frame_writes: usize = 0,
+    /// Seconds each frame write keeps the main thread, as a stalled application does.
+    write_latency: f64 = 0,
     journal: std.ArrayList([]const u8) = .empty,
     tile_hits: std.ArrayList(abi.HitRegion) = .empty,
     boundary_hits: std.ArrayList(abi.HitRegion) = .empty,
@@ -140,6 +142,7 @@ pub const World = struct {
             accepted.height = @max(accepted.height, minimum.height);
         }
         self.frame_writes += 1;
+        self.clock += self.write_latency;
         target.frame = accepted;
         return true;
     }
