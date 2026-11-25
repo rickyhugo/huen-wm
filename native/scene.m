@@ -47,21 +47,17 @@ static HuenSceneTransition *currentTransition;
     self.context = NULL;
     if (callback) callback(context, covered);
 }
-
-- (void)retireAndSettleCallback {
-    self.state = HuenSceneRetired;
-    [self.panel orderOut:nil];
-    [self.panel.contentView.layer removeAllAnimations];
-    self.panel.contentView.layer.contents = nil;
-    [self.panel close];
-    self.panel = nil;
-    [self settle:false];
-}
 @end
 
 static void retire_and_settle_callback(HuenSceneTransition *transition) {
     if (currentTransition == transition) currentTransition = nil;
-    [transition retireAndSettleCallback];
+    transition.state = HuenSceneRetired;
+    [transition.panel orderOut:nil];
+    [transition.panel.contentView.layer removeAllAnimations];
+    transition.panel.contentView.layer.contents = nil;
+    [transition.panel close];
+    transition.panel = nil;
+    [transition settle:false];
 }
 
 static NSScreen *screen_for_display(uint32_t displayID) {
@@ -88,7 +84,7 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
     transition.state = HuenSceneCapturing;
     HuenSceneTransition *previousTransition = currentTransition;
     currentTransition = transition;
-    [previousTransition retireAndSettleCallback];
+    retire_and_settle_callback(previousTransition);
     if (currentTransition != transition) return;
     if (!huen_scene_capture_allowed() || !screen_for_display(display_id)) {
         retire_and_settle_callback(transition);
@@ -160,8 +156,7 @@ void huen_scene_begin(uint32_t display_id, uint64_t generation,
                                                        NSWindowCollectionBehaviorStationary |
                                                        NSWindowCollectionBehaviorIgnoresCycle;
                             panel.animationBehavior = NSWindowAnimationBehaviorNone;
-                            NSView *imageView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, screen.frame.size.width,
-                                                                                      screen.frame.size.height)];
+                            NSView *imageView = [[NSView alloc] initWithFrame:(NSRect){NSZeroPoint, screen.frame.size}];
                             CALayer *layer = [CALayer layer];
                             layer.frame = imageView.bounds;
                             imageView.layer = layer;
