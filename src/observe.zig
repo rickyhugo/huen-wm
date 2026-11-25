@@ -15,26 +15,6 @@ var tap: ?macos.CFMachPortRef = null;
 var source: ?macos.CFRunLoopSourceRef = null;
 var gestures = false;
 
-fn reportTouches(event: macos.CGEventRef) void {
-    const pool = macos.objc_autoreleasePoolPush();
-    defer macos.objc_autoreleasePoolPop(pool);
-    const event_class = macos.objc_getClass("NSEvent") orelse return;
-    const wrapped = macos.message(fn (macos.Object, macos.Selector, macos.CGEventRef) callconv(.c) ?macos.Object)(event_class, macos.selector("eventWithCGEvent:"), event) orelse return;
-    const touches = macos.message(fn (macos.Object, macos.Selector, usize, ?macos.Object) callconv(.c) ?macos.Object)(wrapped, macos.selector("touchesMatchingPhase:inView:"), touch_phase_touching, null) orelse return;
-    const ordered = macos.send(touches, "allObjects") orelse return;
-    const touch_count = macos.count(ordered, "count");
-    var horizontal: f64 = 0;
-    var vertical: f64 = 0;
-    for (0..touch_count) |index| {
-        const touch = macos.message(fn (macos.Object, macos.Selector, usize) callconv(.c) macos.Object)(ordered, macos.selector("objectAtIndex:"), index);
-        const position = macos.message(fn (macos.Object, macos.Selector) callconv(.c) macos.CGPoint)(touch, macos.selector("normalizedPosition"));
-        horizontal += position.horizontal;
-        vertical += position.vertical;
-    }
-    const divisor: f64 = @floatFromInt(touch_count);
-    wm_swipe(@intCast(touch_count), if (touch_count != 0) horizontal / divisor else 0, if (touch_count != 0) vertical / divisor else 0);
-}
-
 fn observeCallback(proxy: macos.CGEventTapProxy, event_type: u32, event: macos.CGEventRef, context: ?*anyopaque) callconv(.c) ?macos.CGEventRef {
     _ = proxy;
     _ = context;
@@ -43,7 +23,24 @@ fn observeCallback(proxy: macos.CGEventTapProxy, event_type: u32, event: macos.C
         return event;
     }
     if (event_type == macos.EventType.gesture) {
-        if (gestures) reportTouches(event);
+        if (!gestures) return event;
+        const pool = macos.objc_autoreleasePoolPush();
+        defer macos.objc_autoreleasePoolPop(pool);
+        const event_class = macos.objc_getClass("NSEvent") orelse return event;
+        const wrapped = macos.message(fn (macos.Object, macos.Selector, macos.CGEventRef) callconv(.c) ?macos.Object)(event_class, macos.selector("eventWithCGEvent:"), event) orelse return event;
+        const touches = macos.message(fn (macos.Object, macos.Selector, usize, ?macos.Object) callconv(.c) ?macos.Object)(wrapped, macos.selector("touchesMatchingPhase:inView:"), touch_phase_touching, null) orelse return event;
+        const ordered = macos.send(touches, "allObjects") orelse return event;
+        const touch_count = macos.count(ordered, "count");
+        var horizontal: f64 = 0;
+        var vertical: f64 = 0;
+        for (0..touch_count) |index| {
+            const touch = macos.message(fn (macos.Object, macos.Selector, usize) callconv(.c) macos.Object)(ordered, macos.selector("objectAtIndex:"), index);
+            const position = macos.message(fn (macos.Object, macos.Selector) callconv(.c) macos.CGPoint)(touch, macos.selector("normalizedPosition"));
+            horizontal += position.horizontal;
+            vertical += position.vertical;
+        }
+        const divisor: f64 = @floatFromInt(touch_count);
+        wm_swipe(@intCast(touch_count), if (touch_count != 0) horizontal / divisor else 0, if (touch_count != 0) vertical / divisor else 0);
         return event;
     }
     if (event_type != macos.EventType.key_down or macos.CGEventGetIntegerValueField(event, macos.field_keyboard_autorepeat) != 0) return event;
