@@ -168,6 +168,7 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
             [button removeFromSuperview];
         }
     }
+    NSColor *accent = border_color(presentation->border_color, 0.95);
     for (size_t index = 0; index < rows.count; index++) {
         if (index == headerPanels.count) [headerPanels addObject:new_panel(true)];
         HuenHeaderRow *row = rows[index];
@@ -198,10 +199,8 @@ bool huen_groups_publish(const HuenHeaderPresentation *presentation) {
                 encoding:NSUTF8StringEncoding] ?: @"Untitled";
             button.contentTintColor = item.selected ? NSColor.whiteColor :
                 [NSColor colorWithWhite:0.78 alpha:1];
-            button.layer.backgroundColor = item.selected ?
-                border_color(presentation->border_color, 0.95).CGColor :
-                [NSColor colorWithWhite:0.12 alpha:0.96].CGColor;
-            button.layer.borderColor = border_color(presentation->border_color, 0.95).CGColor;
+            button.layer.backgroundColor = item.selected ? accent.CGColor : [NSColor colorWithWhite:0.12 alpha:0.96].CGColor;
+            button.layer.borderColor = accent.CGColor;
             button.layer.borderWidth = presentation->border_width;
             button.layer.cornerRadius = 3;
             button.layer.masksToBounds = YES;
