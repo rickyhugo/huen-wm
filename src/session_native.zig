@@ -112,7 +112,7 @@ fn sessionDirectory() libc.fd_t {
         if (next < 0) return -1;
         var status: libc.Stat = undefined;
         if (libc.fstat(next, &status) != 0 or status.uid != libc.geteuid() or
-            status.mode & 0o022 != 0 or (final and !privateFile(next, libc.S.IFDIR, 0o700)))
+            status.mode & 0o022 != 0 or (final and (status.mode & libc.S.IFMT != libc.S.IFDIR or status.mode & mode_mask != 0o700)))
         {
             _ = libc.close(next);
             return -1;
@@ -123,12 +123,12 @@ fn sessionDirectory() libc.fd_t {
 }
 
 /// Stem is 1 to 16 lowercase letters.
-fn stemValid(stem: [*:0]const u8) bool {
+fn fileName(buffer: *[96]u8, stem: [*:0]const u8, hash: [*:0]const u8) ?[:0]u8 {
     var length: usize = 0;
     while (length < 17 and stem[length] != 0) : (length += 1) {}
-    if (length == 0 or length > 16) return false;
-    for (stem[0..length]) |character| if (character < 'a' or character > 'z') return false;
-    return true;
+    if (length == 0 or length > 16) return null;
+    for (stem[0..length]) |character| if (character < 'a' or character > 'z') return null;
+    return std.fmt.bufPrintSentinel(buffer, "{s}-{s}.json", .{ stem[0..length], std.mem.span(hash) }, 0) catch null;
 }
 
 fn writeAll(descriptor: libc.fd_t, bytes: []const u8) bool {
@@ -145,15 +145,13 @@ fn writeAll(descriptor: libc.fd_t, bytes: []const u8) bool {
 /// Hash is exactly 64 lowercase hexadecimal characters. Returns 0 when loaded, 1 when missing, and -1 on failure.
 export fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*]u8, capacity: usize, used: *usize) c_int {
     used.* = 0;
-    if (!stemValid(stem)) return -1;
     var name_buffer: [96]u8 = undefined;
-    const name = std.fmt.bufPrintSentinel(&name_buffer, "{s}-{s}.json", .{ std.mem.span(stem), std.mem.span(hash) }, 0) catch return -1;
+    const name = fileName(&name_buffer, stem, hash) orelse return -1;
     const directory = sessionDirectory();
     if (directory < 0) return -1;
+    defer _ = libc.close(directory);
     const descriptor = libc.openat(directory, name, .{ .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true });
-    const missing = failedWith(.NOENT);
-    _ = libc.close(directory);
-    if (descriptor < 0) return if (missing) 1 else -1;
+    if (descriptor < 0) return if (failedWith(.NOENT)) 1 else -1;
     defer _ = libc.close(descriptor);
     var status: libc.Stat = undefined;
     if (libc.fstat(descriptor, &status) != 0 or status.mode & libc.S.IFMT != libc.S.IFREG or status.uid != libc.geteuid() or
@@ -167,11 +165,8 @@ export fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*
         offset += @intCast(count);
     }
     var extra: [1]u8 = undefined;
-    var trailing: isize = undefined;
-    while (true) {
-        trailing = libc.read(descriptor, &extra, 1);
-        if (!(trailing < 0 and failedWith(.INTR))) break;
-    }
+    var trailing = libc.read(descriptor, &extra, 1);
+    while (trailing < 0 and failedWith(.INTR)) trailing = libc.read(descriptor, &extra, 1);
     if (trailing != 0 or offset == 0) return -1;
     used.* = offset;
     return 0;
@@ -179,9 +174,8 @@ export fn huen_session_read(stem: [*:0]const u8, hash: [*:0]const u8, output: [*
 
 /// A write that is not durable skips the fsyncs and survives the death of this process, not of the machine.
 export fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*]const u8, length: usize, durable: bool) bool {
-    if (!stemValid(stem)) return false;
     var name_buffer: [96]u8 = undefined;
-    const name = std.fmt.bufPrintSentinel(&name_buffer, "{s}-{s}.json", .{ std.mem.span(stem), std.mem.span(hash) }, 0) catch return false;
+    const name = fileName(&name_buffer, stem, hash) orelse return false;
     var temporary_buffer: [128]u8 = undefined;
     const temporary = std.fmt.bufPrintSentinel(&temporary_buffer, ".{s}-{s}-{x:0>8}.tmp", .{ std.mem.span(stem), std.mem.span(hash), arc4random() }, 0) catch return false;
     const directory = sessionDirectory();
@@ -206,20 +200,13 @@ export fn huen_session_write(stem: [*:0]const u8, hash: [*:0]const u8, bytes: [*
 export fn huen_journal_append(line: [*]const u8, length: usize) bool {
     const directory = sessionDirectory();
     if (directory < 0) return false;
+    defer _ = libc.close(directory);
     var existing: libc.Stat = undefined;
     if (libc.fstatat(directory, "journal.jsonl", &existing, libc.AT.SYMLINK_NOFOLLOW) == 0) {
         if (existing.mode & libc.S.IFMT != libc.S.IFREG or existing.uid != libc.geteuid() or existing.mode & mode_mask != 0o600 or
-            (@as(u64, @intCast(existing.size)) + length > 1024 * 1024 and libc.renameat(directory, "journal.jsonl", directory, "journal.1.jsonl") != 0))
-        {
-            _ = libc.close(directory);
-            return false;
-        }
-    } else if (!failedWith(.NOENT)) {
-        _ = libc.close(directory);
-        return false;
-    }
+            (@as(u64, @intCast(existing.size)) + length > 1024 * 1024 and libc.renameat(directory, "journal.jsonl", directory, "journal.1.jsonl") != 0)) return false;
+    } else if (!failedWith(.NOENT)) return false;
     const descriptor = libc.openat(directory, "journal.jsonl", .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(libc.mode_t, 0o600));
-    _ = libc.close(directory);
     if (descriptor < 0) return false;
     var success = privateFile(descriptor, libc.S.IFREG, 0o600) and writeAll(descriptor, line[0..length]);
     if (libc.close(descriptor) != 0) success = false;
