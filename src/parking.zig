@@ -30,27 +30,6 @@ pub fn valid(record: Record) bool {
         rectValid(record.original) and rectValid(record.corners[0]) and rectValid(record.corners[1]);
 }
 
-pub fn encode(allocator: std.mem.Allocator, records: []const Record) ![]u8 {
-    if (records.len > max_records) return error.Capacity;
-    for (records) |record| if (!valid(record)) return error.InvalidRecord;
-    const bytes = try std.json.Stringify.valueAlloc(allocator, Journal{ .version = 1, .records = records }, .{});
-    if (bytes.len > max_bytes) {
-        allocator.free(bytes);
-        return error.TooLarge;
-    }
-    return bytes;
-}
-
-pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(Journal) {
-    if (bytes.len > max_bytes) return error.TooLarge;
-    const parsed = try std.json.parseFromSlice(Journal, allocator, bytes, .{ .allocate = .alloc_always, .max_value_len = max_bytes });
-    errdefer parsed.deinit();
-    if (parsed.value.version != 1) return error.Version;
-    if (parsed.value.records.len > max_records) return error.Capacity;
-    for (parsed.value.records) |record| if (!valid(record)) return error.InvalidRecord;
-    return parsed;
-}
-
 // macOS can clamp the vertical position of a parked window, so the frame only has to cross the bottom edge the corner sits on.
 // `eligible` marks the observations that may match, and `claimed` receives the records that did.
 pub fn match(records: []const Record, observed: []const native.WMWindow, eligible: []const bool, claimed: []bool, output: []Recovery) []Recovery {
@@ -92,7 +71,12 @@ pub fn load(allocator: std.mem.Allocator, filter: []const u8) !?std.json.Parsed(
         1 => return null,
         else => return error.Storage,
     }
-    return try decode(allocator, bytes[0..used]);
+    const parsed = try std.json.parseFromSlice(Journal, allocator, bytes[0..used], .{ .allocate = .alloc_always, .max_value_len = max_bytes });
+    errdefer parsed.deinit();
+    if (parsed.value.version != 1) return error.Version;
+    if (parsed.value.records.len > max_records) return error.Capacity;
+    for (parsed.value.records) |record| if (!valid(record)) return error.InvalidRecord;
+    return parsed;
 }
 
 // The journal only has to outlive this process. A record whose application ended with the machine can never match, so the write is not durable.
@@ -100,16 +84,17 @@ pub const Writer = struct {
     written: ?[]u8 = null,
 
     pub fn save(self: *Writer, allocator: std.mem.Allocator, filter: []const u8, records: []const Record) !void {
-        const bytes = try encode(allocator, records);
+        if (records.len > max_records) return error.Capacity;
+        for (records) |record| if (!valid(record)) return error.InvalidRecord;
+        const bytes = try std.json.Stringify.valueAlloc(allocator, Journal{ .version = 1, .records = records }, .{});
+        errdefer allocator.free(bytes);
+        if (bytes.len > max_bytes) return error.TooLarge;
         if (self.written) |previous| if (std.mem.eql(u8, previous, bytes)) {
             allocator.free(bytes);
             return;
         };
         const hash = journalHash(filter);
-        if (!session.huen_session_write("parked", &hash, bytes.ptr, bytes.len, false)) {
-            allocator.free(bytes);
-            return error.Storage;
-        }
+        if (!session.huen_session_write("parked", &hash, bytes.ptr, bytes.len, false)) return error.Storage;
         if (self.written) |previous| allocator.free(previous);
         self.written = bytes;
     }
