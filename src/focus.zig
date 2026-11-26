@@ -35,18 +35,28 @@ var focus_lost: f64 = -std.math.inf(f64);
 const activation_settle = 0.3;
 var activated: f64 = -std.math.inf(f64);
 
+fn warpInto(bounds: Rect) void {
+    if (bounds.width <= 0 or bounds.height <= 0) return;
+    var point: native.WMPoint = undefined;
+    if (!native.platform_pointer(&point)) return;
+    if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
+    const destination: native.WMPoint = .{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 };
+    if (native.platform_warp_pointer(destination)) last_pointer = destination else native.platform_error("Mouse warp failed");
+}
+
+fn warpTo(identity: u64) void {
+    if (!desktop.config().focus_follows_mouse) return;
+    const index = desktop.windowIndex(identity) orelse return;
+    warpInto(desktop.windows()[index].observation.frame);
+}
+
 pub fn select(identity: u32) void {
     if (desktop.selected() == identity) return;
     desktop.setSelected(identity);
     routing.trackCurrentDisplay();
     if (!desktop.config().mouse_follows_monitor) return;
     const index = desktop.displayIndex(identity) orelse return;
-    const bounds = desktop.displays()[index].full_bounds;
-    var point: native.WMPoint = undefined;
-    if (!native.platform_pointer(&point)) return;
-    if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
-    const destination: native.WMPoint = .{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 };
-    if (native.platform_warp_pointer(destination)) last_pointer = destination else native.platform_error("Mouse warp failed");
+    warpInto(desktop.displays()[index].full_bounds);
 }
 
 pub fn followPointer() void {
@@ -205,29 +215,36 @@ pub fn focusable(identity: u64) bool {
     return window.eligible() and desktop.displayIndex(window.display) != null;
 }
 
-pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
+fn focusWorkspaceTarget(displayIdentity: u32, focus_target: ?u64) ?u64 {
     discovery.refresh();
-    if (!placer.deriveGoals()) return;
-    const index = desktop.displayIndex(displayIdentity) orelse return;
+    if (!placer.deriveGoals()) return null;
+    const index = desktop.displayIndex(displayIdentity) orelse return null;
     const state = desktop.workspaceLayout(displayIdentity, desktop.displays()[index].workspace);
     var members: [1024]tiling.Member = undefined;
+    var verified: ?u64 = null;
     if (focus_target orelse desktop.layouts().focusCandidate(state, desktop.layoutMembers(&members))) |identity| {
-        const window = desktop.windows()[desktop.windowIndex(identity) orelse return];
+        const window = desktop.windows()[desktop.windowIndex(identity) orelse return null];
         if (!window.visible() or window.parked) {
             const transaction = placer.Transaction.begin(.{ .display = displayIdentity }) catch |err| {
                 journal.setError(@errorName(err));
-                return;
+                return null;
             };
             defer transaction.deinit();
             desktop.layouts().reveal(state, identity) catch |err| {
                 journal.setError(transaction.abort(err));
-                return;
+                return null;
             };
-            if (!transaction.commit()) return;
+            if (!transaction.commit()) return null;
         }
-        if (!verify(identity)) return;
+        if (!verify(identity)) return null;
+        verified = identity;
     }
     select(displayIdentity);
+    return verified;
+}
+
+pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
+    _ = focusWorkspaceTarget(displayIdentity, focus_target);
 }
 
 pub fn observeCommandState() void {
@@ -242,7 +259,7 @@ pub fn toMonitor(selection: commands.MonitorSelector, slot: usize) reply.Reply {
     var screens: [monitor.capacity]monitor.Screen = undefined;
     const target = monitor.resolve(selection, desktop.monitorScreens(&screens), display.identity) catch |err| return reply.failure(@errorName(err));
     const changed = desktop.selected() != target;
-    focusWorkspace(target, null);
+    if (focusWorkspaceTarget(target, null)) |identity| warpTo(identity);
     return reply.json(.{ .ok = true, .accepted = true, .changed = changed, .monitor = target, .verified = desktop.selected() == target, .focused = focused });
 }
 
@@ -250,14 +267,19 @@ pub fn cycle(request: commands.Cycle, slot: usize) reply.Reply {
     const display = &desktop.displays()[slot];
     var identities: [1024]u64 = undefined;
     const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return reply.failure("NoWindowToCycle");
-    return reply.json(.{ .ok = true, .accepted = true, .verified = verify(target), .target = target });
+    const verified = verify(target);
+    if (verified) warpTo(target);
+    return reply.json(.{ .ok = true, .accepted = true, .verified = verified, .target = target });
 }
 
 pub fn jumpBack(prefer_urgent: bool, slot: usize) reply.Reply {
     const urgent: ?u64 = if (prefer_urgent) for (desktop.windows()) |window| {
         if (window.urgent and focusable(window.identity)) break window.identity;
     } else null else null;
-    return scene.jump(urgent orelse focus_history.pick(focused, focusable) orelse return reply.failure("NoPreviousWindow"), slot);
+    const target = urgent orelse focus_history.pick(focused, focusable) orelse return reply.failure("NoPreviousWindow");
+    const response = scene.jump(target, slot);
+    if (focused == target) warpTo(target);
+    return response;
 }
 
 pub fn toward(source_index: usize, request: commands.Focus) reply.Reply {
@@ -285,7 +307,9 @@ pub fn toward(source_index: usize, request: commands.Focus) reply.Reply {
         break :wrapped forward_target orelse wrap_target;
     } else neighbor(source_index, request.direction) orelse return reply.failure("NoWindowInDirection");
     const identity = desktop.windows()[target].identity;
-    return reply.json(.{ .ok = true, .accepted = true, .verified = verify(identity), .target = identity });
+    const verified = verify(identity);
+    if (verified) warpTo(identity);
+    return reply.json(.{ .ok = true, .accepted = true, .verified = verified, .target = identity });
 }
 
 pub fn current() ?u64 {

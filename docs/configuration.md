@@ -52,7 +52,7 @@ On macOS 26, the border follows each window's corner radius. With Screen Recordi
 
 ## Mouse and trackpad
 
-`focus_follows_mouse = true` is the default. Moving the pointer over a managed window focuses it without clicking, matching Hyprland `follow_mouse = 1`. A window that appears or moves under a still pointer does not take focus. Set `focus_follows_mouse = false` to disable it. It needs no extra permission.
+`focus_follows_mouse = true` is the default. Moving the pointer over a managed window focuses it without clicking, matching Hyprland `follow_mouse = 1`. A window that appears or moves under a still pointer does not take focus. While `focus_follows_mouse` is enabled, keyboard focus commands move the pointer to the newly focused window's center when the pointer is outside that window. Set `focus_follows_mouse = false` to disable it. It needs no extra permission.
 
 Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. On a floating window, the left button moves it and the right button resizes it from the nearest corner, as in Hyprland. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](mouse-controls.md).
 
