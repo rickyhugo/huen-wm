@@ -45,7 +45,7 @@ open -n -g -a "$HOME/Applications/Huen WM.app" --args start --app dev.huen-wm.fi
 
 Drop `--app` to manage everything. Opening the app with no arguments, for example from Raycast, Spotlight or Finder, starts it with your config.
 
-> **Menu-bar item missing?** On macOS 26, an app started from inside another app's terminal can be filed under that app in **System Settings → Menu Bar → Allow in the Menu Bar**. Start it from Raycast, Spotlight or Finder instead.
+> **Menu-bar item missing?** `huen-wm start` relaunches the bundle through `open` so macOS 26 files the menu-bar item under **Huen WM** instead of the calling app. If an earlier direct run already linked `dev.huen-wm` under another app in **System Settings → Menu Bar → Allow in the Menu Bar**, turning that other app off still hides Huen WM's icon until you allow it or clear `trackedApplications` in `~/Library/Group Containers/group.com.apple.controlcenter/Library/Preferences/group.com.apple.controlcenter.plist` and run `killall cfprefsd ControlCenter`.
 
 ## Drive it
 

@@ -1065,8 +1065,8 @@ int platform_main(int argc, char **argv) {
             } else if (!strncmp(argv[index], "--", 2) && strcmp(argv[index], "--help")) { fprintf(stderr, "unknown option: %s\n", argv[index]); return 1; }
             else [arguments addObject:[NSString stringWithUTF8String:argv[index]]];
         }
-        // Raycast, Finder, and Spotlight launch the app through launchd with no arguments.
-        if (argc == 1 && getppid() == 1) [arguments addObject:@"start"];
+        // Raycast, Finder, and Spotlight launch the app through Launch Services with no arguments.
+        if (argc == 1 && NSRunningApplication.currentApplication.bundleIdentifier) [arguments addObject:@"start"];
         NSString *verb = arguments.firstObject ?: @"--help";
         if (([verb isEqualToString:@"start"] || [verb isEqualToString:@"doctor"] || [verb isEqualToString:@"validate"]) && arguments.count != 1) { fputs("unexpected positional argument\n", stderr); return 1; }
         if ([verb isEqualToString:@"--help"] || [verb isEqualToString:@"help"]) { puts("huen-wm start [--config PATH] [--app BUNDLE_ID]\nhuen-wm doctor | validate [--config PATH]\nhuen-wm status | windows | monitors | workspaces\nhuen-wm focus [--wrap] left|right|up|down | focus last | focus urgent\nhuen-wm focus-monitor|send-to-monitor|move-to-monitor MONITOR\nhuen-wm move-workspace-to-monitor|swap-monitor-workspaces MONITOR\nMONITOR: left | right | up | down | next | previous | built-in | external | name:NAME\nhuen-wm cycle next|previous [tiled|floating]\nhuen-wm swap left|right|up|down|next|previous\nhuen-wm move left|right|up|down | resize DELTA\nhuen-wm resize width|height DELTA\nhuen-wm center | move-by DX DY | resize-by DX DY\nhuen-wm split horizontal|vertical|toggle | fullscreen\nhuen-wm toggle-floating | layout dwindle|master\nhuen-wm workspace|send-to-workspace|move-to-workspace SELECTOR\nhuen-wm move-app BUNDLE SELECTOR\nSELECTOR: INDEX | name:NAME | previous | +N | -N | occupied+N | occupied-N | empty | next-empty\nhuen-wm mode NAME | launch [--new-instance] BUNDLE\nhuen-wm exec-and-forget SHELLTEXT\nhuen-wm close [--quit-if-last-window]\nhuen-wm reload | restore | recover | stop | quit\nhuen-wm wrong [NOTE...]\nWorkspace parking is reversible during a live session. After a crash, the next start returns parked windows of still-running applications to their prior frames."); return 0; }
@@ -1132,9 +1132,36 @@ int platform_main(int argc, char **argv) {
             if (fwrite(reply.bytes, 1, reply.length, stdout) != reply.length || fflush(stdout) != 0) { perror("reply output"); return 1; }
             return [parsed isKindOfClass:NSDictionary.class] && parsed[@"error"] ? 1 : 0;
         }
+        // A direct exec inherits its parent app's TCC responsible identity, so macOS checks the parent's permissions
+        // and files the menu-bar item under the parent. Relaunch the bundle through Launch Services so Huen WM owns itself.
+        if (!NSRunningApplication.currentApplication.bundleIdentifier) {
+            NSBundle *bundle = NSBundle.mainBundle;
+            if (!bundle.bundleIdentifier || ![bundle.bundleURL.pathExtension isEqualToString:@"app"]) {
+                fputs("huen-wm start must run from the signed Huen WM.app bundle (install with mise run install, then open the app)\n", stderr);
+                return 1;
+            }
+            NSString *lockPath = [socketPath stringByAppendingString:@".lock"];
+            int lockDescriptor = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+            if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) {
+                if (lockDescriptor >= 0) close(lockDescriptor);
+                fputs("huen-wm already running or lock unavailable\n", stderr);
+                return 1;
+            }
+            close(lockDescriptor);
+            NSString *resolvedConfig = [NSURL fileURLWithPath:configPath].standardizedURL.path;
+            if (!wm_initialize(resolvedConfig.fileSystemRepresentation)) return 1;
+            NSMutableArray<NSString *> *launchArgs = [NSMutableArray arrayWithObjects:@"/usr/bin/open", @"-n", @"-g", @"-a", bundle.bundlePath, @"--args", @"start", @"--config", resolvedConfig, nil];
+            if (bundleFilter.length) { [launchArgs addObject:@"--app"]; [launchArgs addObject:bundleFilter]; }
+            char *launchVector[13];
+            for (NSUInteger index = 0; index < launchArgs.count; index++) launchVector[index] = (char *)launchArgs[index].fileSystemRepresentation;
+            launchVector[launchArgs.count] = NULL;
+            execv("/usr/bin/open", launchVector);
+            perror("open");
+            return 1;
+        }
         NSString *lockPath = [socketPath stringByAppendingString:@".lock"];
         int lockDescriptor = open(lockPath.fileSystemRepresentation, O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
-        if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) { fputs("huen-wm already running or lock unavailable\n", stderr); return 1; }
+        if (lockDescriptor < 0 || flock(lockDescriptor, LOCK_EX | LOCK_NB) != 0) { if (lockDescriptor >= 0) close(lockDescriptor); fputs("huen-wm already running or lock unavailable\n", stderr); return 1; }
         if (!AXIsProcessTrusted()) { fputs("Accessibility permission required. Grant it to the signed Huen WM app in System Settings, then start explicitly. No permission was requested.\n", stderr); close(lockDescriptor); return 1; }
         [NSApplication sharedApplication]; [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         records = [NSMutableArray array]; observers = [NSMutableDictionary dictionary]; applications = [NSMutableDictionary dictionary]; timeoutCounts = [NSMutableDictionary dictionary]; timeoutRetryTimes = [NSMutableDictionary dictionary];
