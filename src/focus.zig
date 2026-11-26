@@ -20,6 +20,8 @@ var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var last_observed_focus: ?u64 = null;
 var last_requested: ?u64 = null;
+// A keyboard jump that animates to another workspace focuses its window when the transition commits.
+var warp_on_focus: ?u64 = null;
 var last_pointer: ?native.WMPoint = null;
 
 // Activating another application completes after `verify` returns, so a moving pointer asks for the same window once per
@@ -48,7 +50,7 @@ fn warpInto(bounds: Rect) void {
 fn warpTo(identity: u64) void {
     if (!desktop.config().focus_follows_mouse) return;
     const index = desktop.windowIndex(identity) orelse return;
-    warpInto(desktop.windows()[index].observation.frame);
+    warpInto(desktop.windows()[index].targetFrame());
 }
 
 pub fn select(identity: u32) void {
@@ -96,11 +98,14 @@ const FocusRequest = enum { failed, accepted, verified };
 
 fn requestFocus(identity: u64) FocusRequest {
     activated = native.platform_monotonic();
+    const warp = warp_on_focus == identity;
+    warp_on_focus = null;
     if (!native.platform_focus(identity)) {
         last_requested = null;
         return .failed;
     }
     last_requested = identity;
+    if (warp) warpTo(identity);
     if (native.platform_focused_window() != identity) return .accepted;
     focused = identity;
     last_observed_focus = identity;
@@ -291,7 +296,7 @@ pub fn jumpBack(prefer_urgent: bool, slot: usize) reply.Reply {
     const target = urgent orelse focus_history.pick(focused, focusable) orelse return reply.failure("NoPreviousWindow");
     last_requested = null;
     const response = scene.jump(target, slot);
-    if (!scene.pending() and last_requested == target) warpTo(target);
+    if (scene.pending()) warp_on_focus = target else if (last_requested == target) warpTo(target);
     return response;
 }
 
