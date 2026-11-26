@@ -19,6 +19,7 @@ const Direction = commands.Direction;
 var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var last_observed_focus: ?u64 = null;
+var last_requested: ?u64 = null;
 var last_pointer: ?native.WMPoint = null;
 
 // Activating another application completes after `verify` returns, so a moving pointer asks for the same window once per
@@ -91,9 +92,16 @@ fn rememberFocus(identity: u64) void {
     };
 }
 
-pub fn verify(identity: u64) bool {
+const FocusRequest = enum { failed, accepted, verified };
+
+fn requestFocus(identity: u64) FocusRequest {
     activated = native.platform_monotonic();
-    if (!native.platform_focus(identity) or native.platform_focused_window() != identity) return false;
+    if (!native.platform_focus(identity)) {
+        last_requested = null;
+        return .failed;
+    }
+    last_requested = identity;
+    if (native.platform_focused_window() != identity) return .accepted;
     focused = identity;
     last_observed_focus = identity;
     rememberFocus(identity);
@@ -101,7 +109,11 @@ pub fn verify(identity: u64) bool {
         desktop.windows()[index].urgent = false;
         select(desktop.windows()[index].display);
     }
-    return true;
+    return .verified;
+}
+
+pub fn verify(identity: u64) bool {
+    return requestFocus(identity) == .verified;
 }
 
 // Records a native focus change. A command leaves an activation request to the next tick, and so does a tick during a
@@ -221,7 +233,7 @@ fn focusWorkspaceTarget(displayIdentity: u32, focus_target: ?u64) ?u64 {
     const index = desktop.displayIndex(displayIdentity) orelse return null;
     const state = desktop.workspaceLayout(displayIdentity, desktop.displays()[index].workspace);
     var members: [1024]tiling.Member = undefined;
-    var verified: ?u64 = null;
+    var requested: ?u64 = null;
     if (focus_target orelse desktop.layouts().focusCandidate(state, desktop.layoutMembers(&members))) |identity| {
         const window = desktop.windows()[desktop.windowIndex(identity) orelse return null];
         if (!window.visible() or window.parked) {
@@ -236,11 +248,11 @@ fn focusWorkspaceTarget(displayIdentity: u32, focus_target: ?u64) ?u64 {
             };
             if (!transaction.commit()) return null;
         }
-        if (!verify(identity)) return null;
-        verified = identity;
+        if (requestFocus(identity) == .failed) return null;
+        requested = identity;
     }
     select(displayIdentity);
-    return verified;
+    return requested;
 }
 
 pub fn focusWorkspace(displayIdentity: u32, focus_target: ?u64) void {
@@ -267,9 +279,9 @@ pub fn cycle(request: commands.Cycle, slot: usize) reply.Reply {
     const display = &desktop.displays()[slot];
     var identities: [1024]u64 = undefined;
     const target = selector.cycleTarget(readingOrder(display.identity, request.kind, &identities), focused, request.step) orelse return reply.failure("NoWindowToCycle");
-    const verified = verify(target);
-    if (verified) warpTo(target);
-    return reply.json(.{ .ok = true, .accepted = true, .verified = verified, .target = target });
+    const result = requestFocus(target);
+    if (result != .failed) warpTo(target);
+    return reply.json(.{ .ok = true, .accepted = true, .verified = result == .verified, .target = target });
 }
 
 pub fn jumpBack(prefer_urgent: bool, slot: usize) reply.Reply {
@@ -277,8 +289,9 @@ pub fn jumpBack(prefer_urgent: bool, slot: usize) reply.Reply {
         if (window.urgent and focusable(window.identity)) break window.identity;
     } else null else null;
     const target = urgent orelse focus_history.pick(focused, focusable) orelse return reply.failure("NoPreviousWindow");
+    last_requested = null;
     const response = scene.jump(target, slot);
-    if (focused == target) warpTo(target);
+    if (!scene.pending() and last_requested == target) warpTo(target);
     return response;
 }
 
@@ -307,9 +320,9 @@ pub fn toward(source_index: usize, request: commands.Focus) reply.Reply {
         break :wrapped forward_target orelse wrap_target;
     } else neighbor(source_index, request.direction) orelse return reply.failure("NoWindowInDirection");
     const identity = desktop.windows()[target].identity;
-    const verified = verify(identity);
-    if (verified) warpTo(identity);
-    return reply.json(.{ .ok = true, .accepted = true, .verified = verified, .target = identity });
+    const result = requestFocus(identity);
+    if (result != .failed) warpTo(identity);
+    return reply.json(.{ .ok = true, .accepted = true, .verified = result == .verified, .target = identity });
 }
 
 pub fn current() ?u64 {
