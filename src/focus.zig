@@ -19,6 +19,7 @@ const Direction = commands.Direction;
 var focused: ?u64 = null;
 var focus_history: history.Ring = .{};
 var last_observed_focus: ?u64 = null;
+var last_pointer: ?native.WMPoint = null;
 
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
@@ -38,7 +39,26 @@ pub fn select(identity: u32) void {
     var point: native.WMPoint = undefined;
     if (!native.platform_pointer(&point)) return;
     if (point.left >= bounds.left and point.left < bounds.left + bounds.width and point.top >= bounds.top and point.top < bounds.top + bounds.height) return;
-    if (!native.platform_warp_pointer(.{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 })) native.platform_error("Mouse warp failed");
+    const destination: native.WMPoint = .{ .left = bounds.left + bounds.width / 2, .top = bounds.top + bounds.height / 2 };
+    if (native.platform_warp_pointer(destination)) last_pointer = destination else native.platform_error("Mouse warp failed");
+}
+
+pub fn followPointer() void {
+    var point: native.WMPoint = undefined;
+    if (!native.platform_pointer(&point)) return;
+    const previous = last_pointer;
+    last_pointer = point;
+    if (previous == null) return;
+    if (previous.?.left == point.left and previous.?.top == point.top) return;
+    if (!desktop.config().focus_follows_mouse or desktop.isSuspended() or scene.pending() or routing.blocked() or native.platform_pointer_buttons()) return;
+    const window_id = native.platform_window_at(point);
+    if (window_id == 0) return;
+    for (desktop.windows()) |window| {
+        if (window.observation.public_window_id != window_id) continue;
+        if (!window.visible() or window.parked or !window.eligible() or focused == window.identity) return;
+        _ = verify(window.identity);
+        return;
+    }
 }
 
 fn rememberFocus(identity: u64) void {

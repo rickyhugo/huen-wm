@@ -15,6 +15,7 @@ typedef struct { double left; double top; } WMPoint;
 bool platform_pointer(WMPoint *point);
 bool platform_warp_pointer(WMPoint point);
 bool platform_pointer_buttons(void);
+uint32_t platform_window_at(WMPoint point);
 typedef struct { uint32_t key, modifiers; char command[128]; } WMBinding;
 typedef struct { char title[80], command[128]; bool checked, enabled; } WMStatusRow;
 typedef struct { char title[160], badge[128], tooltip[256]; size_t row_count; WMStatusRow rows[12]; } WMStatusPresentation;

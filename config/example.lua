@@ -35,6 +35,7 @@ return {
     border_width = 2,
     border_color = "#9BAFFF",
     border_single_window = true,
+    focus_follows_mouse = true,
     focus_on_activate = false,
     floating_size = { width = 0.5, height = 0.5 },
     -- single_window_max_width = 1800,

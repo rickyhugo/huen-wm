@@ -34,6 +34,7 @@ pub const MonitorPreferences = struct { order: [2]Monitor = .{ .external, .@"bui
 pub const ConfigCandidate = struct {
     workspace_monitors: ?MonitorPreferences = null,
     mouse_follows_monitor: bool = false,
+    focus_follows_mouse: bool = true,
     workspace_back_and_forth: bool = false,
     focus_on_activate: bool = false,
     placement_memory: bool = true,
@@ -142,7 +143,7 @@ pub fn evaluate(path: [*:0]const u8, cancelled: ?*const fn (?*anyopaque) callcon
     defer parsed.deinit();
     const wire = parsed.value;
     if (wire.workspaces.len == 0 or wire.workspaces.len > 10 or wire.modes.len == 0 or wire.modes.len > 8 or wire.rules.len > 64) return error.InvalidCollectionSize;
-    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .swipe = wire.swipe, .mouse_follows_monitor = wire.mouse_follows_monitor, .workspace_back_and_forth = wire.workspace_back_and_forth, .focus_on_activate = wire.focus_on_activate, .placement_memory = wire.placement_memory, .floating_size = wire.floating_size, .single_window_max_width = wire.single_window_max_width, .border_single_window = wire.border_single_window };
+    var candidate: ConfigCandidate = .{ .gap = wire.gap, .border_width = wire.border_width, .border_color = wire.border_color, .duration = wire.duration, .workspace_count = wire.workspaces.len, .mode_count = wire.modes.len, .rule_count = wire.rules.len, .status_bar = wire.status_bar, .session = wire.session, .mouse = wire.mouse, .swipe = wire.swipe, .mouse_follows_monitor = wire.mouse_follows_monitor, .focus_follows_mouse = wire.focus_follows_mouse, .workspace_back_and_forth = wire.workspace_back_and_forth, .focus_on_activate = wire.focus_on_activate, .placement_memory = wire.placement_memory, .floating_size = wire.floating_size, .single_window_max_width = wire.single_window_max_width, .border_single_window = wire.border_single_window };
     if (wire.workspace_monitors) |preferences| {
         if (preferences.len == 0 or preferences.len > 2) return error.InvalidMonitorPreferences;
         candidate.workspace_monitors = .{ .count = preferences.len };
@@ -188,6 +189,7 @@ const WireRule = struct { bundle: []const u8, bundle_kind: Rules.PatternKind, ti
 const WireConfig = struct {
     workspace_monitors: ?[]const Monitor,
     mouse_follows_monitor: bool,
+    focus_follows_mouse: bool = true,
     workspace_back_and_forth: bool,
     focus_on_activate: bool,
     placement_memory: bool = true,
@@ -436,7 +438,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
         if (native.lua_type(state, -1) == native.LUA_TSTRING) native.platform_error(native.lua_tolstring(state, -1, null));
         return error.LuaConfigurationFailed;
     }
-    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "workspace_back_and_forth", "focus_on_activate", "placement_memory", "session", "mouse", "swipe", "floating_size", "single_window_max_width" });
+    try checkKeys(state, &.{ "gap", "layout", "master_ratio", "border_width", "border_color", "border_single_window", "motion_duration", "workspaces", "bindings", "modes", "rules", "status_bar", "workspace_monitors", "mouse_follows_monitor", "focus_follows_mouse", "workspace_back_and_forth", "focus_on_activate", "placement_memory", "session", "mouse", "swipe", "floating_size", "single_window_max_width" });
     if (rawField(state, "session") != native.LUA_TNIL) {
         try checkKeys(state, &.{"enabled"});
         result.session.enabled = try fieldBool(state, "enabled", false);
@@ -467,6 +469,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     pop(state);
     result.single_window_max_width = try fieldNumber(state, "single_window_max_width", 0, 0, 100000);
     result.mouse_follows_monitor = try fieldBool(state, "mouse_follows_monitor", false);
+    result.focus_follows_mouse = try fieldBool(state, "focus_follows_mouse", true);
     result.workspace_back_and_forth = try fieldBool(state, "workspace_back_and_forth", false);
     result.focus_on_activate = try fieldBool(state, "focus_on_activate", false);
     result.placement_memory = try fieldBool(state, "placement_memory", true);
@@ -638,6 +641,7 @@ fn evaluateLua(path: [*:0]const u8) ![]u8 {
     std.json.Stringify.value(WireConfig{
         .workspace_monitors = if (result.workspace_monitors) |*preferences| preferences.order[0..preferences.count] else null,
         .mouse_follows_monitor = result.mouse_follows_monitor,
+        .focus_follows_mouse = result.focus_follows_mouse,
         .workspace_back_and_forth = result.workspace_back_and_forth,
         .focus_on_activate = result.focus_on_activate,
         .placement_memory = result.placement_memory,

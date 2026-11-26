@@ -543,6 +543,20 @@ bool platform_warp_pointer(WMPoint point) {
     return CGWarpMouseCursorPosition(CGPointMake(point.left, point.top)) == kCGErrorSuccess;
 }
 
+uint32_t platform_window_at(WMPoint point) {
+    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    CGPoint location = CGPointMake(point.left, point.top);
+    pid_t selfPID = getpid();
+    for (NSDictionary *window in windows) {
+        if ([window[(__bridge NSString *)kCGWindowOwnerPID] intValue] == selfPID || [window[(__bridge NSString *)kCGWindowAlpha] doubleValue] <= 0) continue;
+        CGRect bounds;
+        if (!CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)window[(__bridge NSString *)kCGWindowBounds], &bounds) || !CGRectContainsPoint(bounds, location)) continue;
+        if ([window[(__bridge NSString *)kCGWindowLayer] intValue] != 0) return 0;
+        return [window[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
+    }
+    return 0;
+}
+
 bool platform_frame(uint64_t identity, WMRect frame, double duration, WMFrameIntent intent) {
     for (WindowRecord *record in records) if (record.observation.identity == identity) {
         if (record.observation.stale || record.observation.minimized || record.observation.fullscreen) return false;

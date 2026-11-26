@@ -193,6 +193,7 @@ fn restoreWindows() usize {
 
 export fn wm_input_poll() void {
     gestures.poll();
+    if (desktop.isInitialized()) focus.followPointer();
 }
 
 export fn wm_shutdown() bool {

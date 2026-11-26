@@ -52,6 +52,8 @@ On macOS 26, the border follows each window's corner radius. With Screen Recordi
 
 ## Mouse and trackpad
 
+`focus_follows_mouse = true` is the default. Moving the pointer over a managed window focuses it without clicking, matching Hyprland `follow_mouse = 1`. A window that appears or moves under a still pointer does not take focus. Set `focus_follows_mouse = false` to disable it. It needs no extra permission.
+
 Set `mouse = { enabled = true, mods = "ctrl+alt" }` to enable mouse tiling. Hold Control+Option and drag a tile with the left button to rearrange it, or drag a shared boundary with the right button to resize it. Changes commit on release. On a floating window, the left button moves it and the right button resizes it from the nearest corner, as in Hyprland. Escape or modifier loss cancels. These gestures require eligible dwindle tiles. See [mouse controls](mouse-controls.md).
 
 Set `swipe = { enabled = true, fingers = 3 }` to switch workspaces with a trackpad swipe. `fingers` is 3 or 4. Moving the fingers left runs `workspace occupied+1` on the display under the pointer, and moving them right runs `workspace occupied-1`. One swipe switches once, and the next switch needs the fingers to lift first. A swipe with a mouse button held does nothing. Swipes need Input Monitoring permission, which the manager never requests. Turn off the macOS gesture that uses the same number of fingers in System Settings, Trackpad, More Gestures, or both act on the same swipe.

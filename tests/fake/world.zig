@@ -34,6 +34,7 @@ pub const WireRule = struct { bundle: []const u8, bundle_kind: PatternKind = .li
 pub const Config = struct {
     workspace_monitors: ?[]const []const u8 = null,
     mouse_follows_monitor: bool = false,
+    focus_follows_mouse: bool = true,
     workspace_back_and_forth: bool = false,
     focus_on_activate: bool = false,
     placement_memory: bool = true,

@@ -164,6 +164,20 @@ export fn platform_pointer_buttons() bool {
     return world.pointer_buttons;
 }
 
+export fn platform_window_at(point: abi.Point) u32 {
+    var best_id: u32 = 0;
+    var best_stacking: u64 = 0;
+    for (world.windows.items) |member| {
+        if (member.minimized) continue;
+        if (point.left < member.frame.left or point.left >= member.frame.left + member.frame.width or point.top < member.frame.top or point.top >= member.frame.top + member.frame.height) continue;
+        if (best_id == 0 or member.stacking > best_stacking) {
+            best_id = @truncate(member.identity);
+            best_stacking = member.stacking;
+        }
+    }
+    return best_id;
+}
+
 /// Presses the close button: the application closes the window at once. Its record goes at the next scan.
 export fn platform_close(identity: u64, track: bool, process_token: *f64) bool {
     const entry = world.record(identity) orelse return false;
