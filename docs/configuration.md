@@ -46,7 +46,7 @@ The example binds:
 
 `border_width` and `border_color` style the focused-window border. Set `border_single_window = false` to hide it when the focused window is the only visible window on its workspace. Minimized windows and hidden group members do not count. [Window rules](window-rules.md) can hide the border or change its width and color for matching windows.
 
-On macOS 26, the border follows each window's corner radius. With Screen Recording access, Huen WM reads the radius from the window's own top-left corner. Without it, Huen WM estimates the radius from the position of the close button, which is wrong for applications that move that button. The focused window is checked four times a second, so the border follows a corner that changes, as when a toolbar is hidden.
+On macOS 26, the border follows each window's corner radius. With Screen Recording access, Huen WM reads the radius from the window's own top-left corner, measuring alpha relative to the interior edges so translucent windows are handled accurately. Without it, Huen WM estimates the radius from the position of the close button, which is wrong for applications that move that button. The focused window's close button is checked four times a second, skipping applications in Accessibility timeout backoff, so toolbar changes update promptly. With Screen Recording access, the corner is also re-measured when focus arrives and every two seconds while the window stays focused, so shape changes that do not move the close button still update, and transient capture failures retry with doubling backoff up to 30 seconds.
 
 `motion_duration = 0` disables movement animation and workspace snapshot capture. Durations are capped at 0.5 seconds.
 

@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include "platform.h"
+#include "corner.h"
 #include "scene.h"
 #include "observe.h"
 
@@ -29,7 +30,14 @@ typedef NS_ENUM(NSInteger, WMCornerMeasurement) { WMCornerUnmeasured, WMCornerMe
 @property double placementVisibilityDeadline;
 @property double estimatedCornerRadius;
 @property double cornerRadius;
+@property BOOL cornerMeasured;
 @property WMCornerMeasurement cornerMeasurement;
+@property NSUInteger cornerGeneration;
+@property double cornerMeasuredTime;
+@property NSUInteger cornerFailureCount;
+@property double cornerRetryTime;
+@property NSUInteger borderPollTimeoutCount;
+@property double borderPollRetryTime;
 @property double assumedVisibleDeadline;
 @property BOOL changed;
 @property BOOL sizeSettable;
@@ -153,9 +161,10 @@ static id attribute(AXUIElementRef element, CFStringRef name) {
 
 static BOOL readFrame(AXUIElementRef element, WMRect *frame) {
     id position = attribute(element, kAXPositionAttribute);
+    if (!position || CFGetTypeID((__bridge CFTypeRef)position) != AXValueGetTypeID()) return NO;
     id size = attribute(element, kAXSizeAttribute);
     CGPoint origin; CGSize extent;
-    if (!position || !size || CFGetTypeID((__bridge CFTypeRef)position) != AXValueGetTypeID() || CFGetTypeID((__bridge CFTypeRef)size) != AXValueGetTypeID()) return NO;
+    if (!size || CFGetTypeID((__bridge CFTypeRef)size) != AXValueGetTypeID()) return NO;
     if (!AXValueGetValue((__bridge AXValueRef)position, kAXValueCGPointType, &origin) || !AXValueGetValue((__bridge AXValueRef)size, kAXValueCGSizeType, &extent)) return NO;
     *frame = (WMRect){origin.x, origin.y, extent.width, extent.height};
     return YES;
@@ -762,38 +771,45 @@ static void scanAndTick(pid_t process) {
 }
 
 // No public API reports a window's corner radius, so it is read from the transparency of the window's own top-left corner.
-// A continuous corner of radius R cuts 1.0584 times the area of a circular one, R²(1 - π/4).
-// A translucent window is not opaque inside the corner either, so transparency is relative to the alpha just inside it.
 static double cornerRadiusFromImage(CGImageRef image, double side) {
     size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
-    NSMutableData *pixels = [NSMutableData dataWithLength:width * height * 4];
-    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, space, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(space);
-    if (!context || width < 2 || height < 2) { if (context) CGContextRelease(context); return -1; }
+    if (width < 2 || height < 2) return -1;
+    NSMutableData *alpha = [NSMutableData dataWithLength:width * height];
+    CGContextRef context = CGBitmapContextCreate(alpha.mutableBytes, width, height, 8, width, NULL, (CGBitmapInfo)kCGImageAlphaOnly);
+    if (!context) return -1;
     CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
     CGContextRelease(context);
-    const uint8_t *bytes = pixels.bytes;
-    double inside = bytes[(width * height - 1) * 4 + 3];
-    if (inside < 32) return -1;
-    double cut = 0;
-    for (size_t index = 0; index < width * height; index++) cut += MAX(0, 1 - bytes[index * 4 + 3] / inside);
-    return sqrt(cut / ((1 - M_PI / 4) * 1.0584)) * side / width;
+    return huen_corner_radius(alpha.bytes, width, height, side);
 }
 
-static void measureCorner(WindowRecord *record) {
+static void measureCorner(WindowRecord *record, BOOL force) {
     CGWindowID windowID = record.observation.public_window_id;
-    if (record.cornerMeasurement != WMCornerUnmeasured || !windowID || !huen_scene_capture_allowed()) return;
+    if (!windowID || !huen_scene_capture_allowed()) return;
+    double now = CACurrentMediaTime();
+    BOOL retryDue = record.cornerMeasurement == WMCornerUnmeasurable && now >= record.cornerRetryTime;
+    // One capture costs ~120 ms wall time (~2.7 ms process CPU); a 2-second refresh catches silent shape changes at ~0.14% CPU.
+    BOOL refreshDue = record.cornerMeasurement == WMCornerMeasured && now - record.cornerMeasuredTime >= 2.0;
+    if (!force && record.cornerMeasurement != WMCornerUnmeasured && !retryDue && !refreshDue) return;
     record.cornerMeasurement = WMCornerMeasuring;
-    double estimate = record.estimatedCornerRadius;
+    NSUInteger generation = record.cornerGeneration + 1;
+    record.cornerGeneration = generation;
     __weak WindowRecord *weakRecord = record;
     void (^finish)(double) = ^(double radius) {
         dispatch_async(dispatch_get_main_queue(), ^{
             WindowRecord *measured = weakRecord;
-            // A changed estimate means the corner changed during the capture, and a new measurement has started.
-            if (!measured || measured.estimatedCornerRadius != estimate) return;
+            // A newer generation means the corner changed during the capture, and a new measurement has started.
+            if (!measured || measured.cornerGeneration != generation) return;
             // The 48-point capture holds a continuous corner of radius 31 at most.
-            if (radius < 0 || radius > 31) { measured.cornerMeasurement = WMCornerUnmeasurable; return; }
+            if (radius < 0 || radius > 31) {
+                NSUInteger failures = measured.cornerFailureCount + 1;
+                measured.cornerFailureCount = failures;
+                // Transient failures (for example, a window momentarily off screen) retry with doubling backoff up to 30 seconds.
+                measured.cornerRetryTime = CACurrentMediaTime() + MIN(30.0, (double)(1u << MIN(failures - 1, (NSUInteger)5)));
+                measured.cornerMeasurement = WMCornerUnmeasurable;
+                return;
+            }
+            measured.cornerFailureCount = 0; measured.cornerRetryTime = 0;
+            measured.cornerMeasured = YES; measured.cornerMeasuredTime = CACurrentMediaTime();
             measured.cornerMeasurement = WMCornerMeasured; measured.cornerRadius = radius;
             if (measured == borderRecord && borderPanel.visible) borderPanel.contentView.layer.cornerRadius = radius + borderPanel.contentView.layer.borderWidth;
         });
@@ -820,16 +836,35 @@ static void measureCorner(WindowRecord *record) {
 // 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
 // Applications that move their close button break that estimate, so it only stands in until the corner is measured.
 // A toolbar that appears or goes away moves the close button with the corner, so a changed estimate starts a new measurement.
-static void applyBorderCorner(WindowRecord *record, WMRect frame) {
+static void applyBorderCorner(WindowRecord *record, WMRect frame, BOOL forceMeasure, BOOL frameFresh) {
     double radius = 10;
     if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
-        id button = attribute(record.element, kAXCloseButtonAttribute);
-        WMRect bounds;
-        double estimate = !button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds) ? 16
-            : MIN(MAX(MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left), 10), 26);
-        if (estimate != record.estimatedCornerRadius) { record.estimatedCornerRadius = estimate; record.cornerMeasurement = WMCornerUnmeasured; }
-        measureCorner(record);
-        radius = record.cornerMeasurement == WMCornerMeasured ? record.cornerRadius : estimate;
+        if (frameFresh) {
+            readTimedOut = NO;
+            id button = attribute(record.element, kAXCloseButtonAttribute);
+            BOOL hasButton = button && CFGetTypeID((__bridge CFTypeRef)button) == AXUIElementGetTypeID();
+            // A child element inherits the default AX timeout, which would stall the main thread if the app stops answering.
+            if (hasButton) AXUIElementSetMessagingTimeout((__bridge AXUIElementRef)button, 0.08);
+            WMRect bounds;
+            BOOL hasBounds = hasButton && readFrame((__bridge AXUIElementRef)button, &bounds);
+            if (!readTimedOut) {
+                double estimate = !hasBounds ? 16
+                    : MIN(MAX(MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left), 10), 26);
+                if (estimate != record.estimatedCornerRadius) {
+                    BOOL hadEstimate = record.estimatedCornerRadius > 0;
+                    record.estimatedCornerRadius = estimate;
+                    if (hadEstimate) {
+                        record.cornerMeasured = NO;
+                        record.cornerMeasurement = WMCornerUnmeasured;
+                        record.cornerGeneration = record.cornerGeneration + 1;
+                        record.cornerFailureCount = 0;
+                        record.cornerRetryTime = 0;
+                    }
+                }
+            }
+        }
+        measureCorner(record, forceMeasure);
+        radius = record.cornerMeasured ? record.cornerRadius : (record.estimatedCornerRadius > 0 ? record.estimatedCornerRadius : 16);
     }
     // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
     borderPanel.contentView.layer.cornerRadius = radius + borderPanel.contentView.layer.borderWidth;
@@ -839,7 +874,7 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     if (pointerMoving || dragActive) return;
     WindowRecord *focused = nil;
     for (WindowRecord *record in records) if (record.observation.identity == identity && !record.observation.minimized && !record.observation.fullscreen && !record.observation.stale) focused = record;
-    if (!focused || width <= 0) { [borderPanel orderOut:nil]; return; }
+    if (!focused || width <= 0) { [borderPanel orderOut:nil]; borderRecord = nil; return; }
     if (!borderPanel) {
         borderPanel = [[NSPanel alloc] initWithContentRect:NSZeroRect styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel backing:NSBackingStoreBuffered defer:NO];
         borderPanel.opaque = NO; borderPanel.backgroundColor = NSColor.clearColor; borderPanel.ignoresMouseEvents = YES; borderPanel.level = NSFloatingWindowLevel;
@@ -850,10 +885,14 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
         // macOS 26 draws window corners as continuous curves.
         if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) borderPanel.contentView.layer.cornerCurve = kCACornerCurveContinuous;
     }
-    WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
+    BOOL targetChanged = focused != borderRecord || !borderPanel.visible;
+    NSNumber *process = @(focused.observation.pid);
+    BOOL processInBackoff = timeoutRetryTimes[process] && CACurrentMediaTime() < timeoutRetryTimes[process].doubleValue;
+    WMRect frame = focused.observation.frame;
+    BOOL frameFresh = !processInBackoff && readFrame(focused.element, &frame);
     [borderPanel setFrame:NSInsetRect(NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height), -width, -width) display:YES];
     borderPanel.contentView.layer.borderWidth = width;
-    applyBorderCorner(focused, frame);
+    applyBorderCorner(focused, frame, targetChanged, frameFresh);
     borderRecord = focused;
     borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
     [borderPanel orderFrontRegardless];
@@ -1169,8 +1208,27 @@ int platform_main(int argc, char **argv) {
             WindowRecord *bordered = borderRecord;
             if (bordered && borderPanel.visible && !pointerMoving && !dragActive && now - lastCornerCheck > 0.25) {
                 lastCornerCheck = now;
-                WMRect frame;
-                if (readFrame(bordered.element, &frame)) applyBorderCorner(bordered, frame);
+                NSNumber *process = @(bordered.observation.pid);
+                BOOL processInBackoff = timeoutRetryTimes[process] && now < timeoutRetryTimes[process].doubleValue;
+                BOOL pollInBackoff = now < bordered.borderPollRetryTime;
+                if (!processInBackoff && !pollInBackoff) {
+                    readTimedOut = NO;
+                    WMRect frame;
+                    BOOL frameFresh = readFrame(bordered.element, &frame);
+                    if (frameFresh) applyBorderCorner(bordered, frame, NO, YES);
+                    else if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) measureCorner(bordered, NO);
+                    if (readTimedOut) {
+                        // Keep poll timeouts off the shared process backoff so periodic scans still run and mark stale windows.
+                        NSUInteger timeouts = bordered.borderPollTimeoutCount + 1;
+                        bordered.borderPollTimeoutCount = timeouts;
+                        bordered.borderPollRetryTime = CACurrentMediaTime() + MIN(30.0, 0.5 * (double)(1u << MIN(timeouts - 1, (NSUInteger)6)));
+                    } else if (frameFresh) {
+                        bordered.borderPollTimeoutCount = 0;
+                        bordered.borderPollRetryTime = 0;
+                    }
+                } else if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
+                    measureCorner(bordered, NO);
+                }
             }
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;

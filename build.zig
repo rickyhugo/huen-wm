@@ -17,6 +17,7 @@ pub fn build(builder: *std.Build) void {
     module.addIncludePath(builder.path("native"));
     module.addIncludePath(builder.path("native/vendor/lua-5.5.1"));
     module.addCSourceFile(.{ .file = builder.path("native/config_worker.c"), .flags = &.{ "-Wall", "-Wextra" } });
+    module.addCSourceFile(.{ .file = builder.path("native/corner.c"), .flags = &.{ "-Wall", "-Wextra" } });
     module.addCSourceFiles(.{ .root = builder.path("native/vendor/lua-5.5.1"), .files = &.{ "lapi.c", "lauxlib.c", "lbaselib.c", "lcode.c", "lcorolib.c", "lctype.c", "ldblib.c", "ldebug.c", "ldo.c", "ldump.c", "lfunc.c", "lgc.c", "linit.c", "liolib.c", "llex.c", "lmathlib.c", "lmem.c", "loadlib.c", "lobject.c", "lopcodes.c", "loslib.c", "lparser.c", "lstate.c", "lstring.c", "lstrlib.c", "ltable.c", "ltablib.c", "ltm.c", "lundump.c", "lutf8lib.c", "lvm.c", "lzio.c" }, .flags = &.{"-DLUA_USE_MACOSX"} });
     for ([_][]const u8{ "platform", "scene", "groups" }) |unit| {
         const compilation = builder.addSystemCommand(&.{ "xcrun", "clang", "-mmacosx-version-min=14.0", "-fobjc-arc", "-fmodules", "-Wall", "-Wextra", "-c" });
@@ -85,10 +86,14 @@ pub fn build(builder: *std.Build) void {
         test_step.dependOn(&second.step);
     }
 
-    // Two pure modules have a seam of their own, tested as Zig test blocks: every order of the hotkey reports, and tile geometry.
+    // Three pure modules have a seam of their own, tested as Zig test blocks: every order of the hotkey reports, tile geometry, and corner-radius measurement.
     for ([_][]const u8{ "delivery", "layout" }) |unit| {
         const subject = builder.createModule(.{ .root_source_file = builder.path(builder.fmt("src/{s}.zig", .{unit})), .target = target, .optimize = optimize });
         const checks = builder.addTest(.{ .name = unit, .root_module = builder.createModule(.{ .root_source_file = builder.path(builder.fmt("tests/pure/{s}.zig", .{unit})), .target = target, .optimize = optimize, .imports = &.{.{ .name = unit, .module = subject }} }) });
         test_step.dependOn(&builder.addRunArtifact(checks).step);
     }
+    const corner_module = builder.createModule(.{ .root_source_file = builder.path("tests/pure/corner.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    corner_module.addCSourceFile(.{ .file = builder.path("native/corner.c"), .flags = &.{ "-Wall", "-Wextra" } });
+    const corner_checks = builder.addTest(.{ .name = "corner", .root_module = corner_module });
+    test_step.dependOn(&builder.addRunArtifact(corner_checks).step);
 }
