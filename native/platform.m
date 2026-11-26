@@ -2,6 +2,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
 #import <QuartzCore/QuartzCore.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/file.h>
@@ -15,6 +16,7 @@
 #include "observe.h"
 
 typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedNotified, WMRecordInvalidPending };
+typedef NS_ENUM(NSInteger, WMCornerMeasurement) { WMCornerUnmeasured, WMCornerMeasuring, WMCornerMeasured, WMCornerUnmeasurable };
 
 @interface WindowRecord : NSObject
 @property AXUIElementRef element;
@@ -26,6 +28,7 @@ typedef NS_ENUM(NSInteger, WMRecordLiveness) { WMRecordAlive, WMRecordDestroyedN
 @property double animationDuration;
 @property double placementVisibilityDeadline;
 @property double cornerRadius;
+@property WMCornerMeasurement cornerMeasurement;
 @property double assumedVisibleDeadline;
 @property BOOL changed;
 @property BOOL sizeSettable;
@@ -90,6 +93,7 @@ static BOOL stopping;
 static NSString *configPath;
 static NSString *bundleFilter;
 static NSPanel *borderPanel;
+static __weak WindowRecord *borderRecord;
 static BOOL pointerPressed, pointerMoving;
 // Set while huen's own modified drag moves or resizes a floating window. Its frame writes would otherwise trigger scans,
 // and each scan would redraw the border behind the window.
@@ -756,6 +760,59 @@ static void scanAndTick(pid_t process) {
     revealWhenPlaced();
 }
 
+// No public API reports a window's corner radius, so it is read from the transparency of the window's own top-left corner.
+// A continuous corner of radius R cuts 1.0584 times the area of a circular one, R²(1 - π/4).
+// A translucent window is not opaque inside the corner either, so transparency is relative to the alpha just inside it.
+static double cornerRadiusFromImage(CGImageRef image, double side) {
+    size_t width = CGImageGetWidth(image), height = CGImageGetHeight(image);
+    NSMutableData *pixels = [NSMutableData dataWithLength:width * height * 4];
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, space, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(space);
+    if (!context || width < 2 || height < 2) { if (context) CGContextRelease(context); return -1; }
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(context);
+    const uint8_t *bytes = pixels.bytes;
+    double inside = bytes[(width * height - 1) * 4 + 3];
+    if (inside < 32) return -1;
+    double cut = 0;
+    for (size_t index = 0; index < width * height; index++) cut += MAX(0, 1 - bytes[index * 4 + 3] / inside);
+    return sqrt(cut / ((1 - M_PI / 4) * 1.0584)) * side / width;
+}
+
+static void measureCorner(WindowRecord *record) {
+    CGWindowID windowID = record.observation.public_window_id;
+    if (record.cornerMeasurement != WMCornerUnmeasured || !windowID || !huen_scene_capture_allowed()) return;
+    record.cornerMeasurement = WMCornerMeasuring;
+    __weak WindowRecord *weakRecord = record;
+    void (^finish)(double) = ^(double radius) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            WindowRecord *measured = weakRecord;
+            if (!measured) return;
+            // The 40-point capture holds a continuous corner of radius 26 at most.
+            if (radius < 0 || radius > 26) { measured.cornerMeasurement = WMCornerUnmeasurable; return; }
+            measured.cornerMeasurement = WMCornerMeasured; measured.cornerRadius = radius;
+            if (measured == borderRecord && borderPanel.visible) borderPanel.contentView.layer.cornerRadius = radius + borderPanel.contentView.layer.borderWidth;
+        });
+    };
+    [SCShareableContent getShareableContentExcludingDesktopWindows:YES onScreenWindowsOnly:YES completionHandler:^(SCShareableContent *content, NSError *error) {
+        SCWindow *window = nil;
+        if (!error) for (SCWindow *candidate in content.windows) if (candidate.windowID == windowID) window = candidate;
+        if (!window) { finish(-1); return; }
+        SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
+        double side = 40;
+        SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+        configuration.sourceRect = CGRectMake(0, 0, side, side);
+        configuration.width = configuration.height = (size_t)(side * filter.pointPixelScale);
+        configuration.pixelFormat = kCVPixelFormatType_32BGRA;
+        configuration.ignoreShadowsSingleWindow = YES;
+        configuration.showsCursor = NO;
+        [SCScreenshotManager captureImageWithFilter:filter configuration:configuration completionHandler:^(CGImageRef image, NSError *captureError) {
+            finish(image && !captureError ? cornerRadiusFromImage(image, side) : -1);
+        }];
+    }];
+}
+
 void platform_border(uint64_t identity, double width, uint32_t color) {
     if (pointerMoving || dragActive) return;
     WindowRecord *focused = nil;
@@ -768,15 +825,18 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
         borderPanel.animationBehavior = NSWindowAnimationBehaviorNone;
         borderPanel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorFullScreenAuxiliary;
         borderPanel.contentView.wantsLayer = YES;
+        // macOS 26 draws window corners as continuous curves.
+        if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) borderPanel.contentView.layer.cornerCurve = kCACornerCurveContinuous;
     }
     WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
     [borderPanel setFrame:NSInsetRect(NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height), -width, -width) display:YES];
     borderPanel.contentView.layer.borderWidth = width;
     // macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
     // 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
+    // Applications that move their close button break that estimate, so it only stands in until the corner is measured.
     double radius = focused.cornerRadius;
     if (radius <= 0 && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) radius = focused.cornerRadius = 10;
-    else if (radius <= 0) {
+    else if (radius <= 0 && focused.cornerMeasurement != WMCornerMeasured) {
         id button = attribute(focused.element, kAXCloseButtonAttribute);
         WMRect bounds;
         if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds)) radius = 16;
@@ -784,6 +844,8 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     }
     // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
     borderPanel.contentView.layer.cornerRadius = radius + width;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) measureCorner(focused);
+    borderRecord = focused;
     borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
     [borderPanel orderFrontRegardless];
 }
