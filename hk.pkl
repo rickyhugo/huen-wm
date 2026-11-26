@@ -40,8 +40,5 @@ steps {
     glob = "src/**/*.zig"
     check = "sh -c 'if grep -En \"^[[:space:]]*test[[:space:]]\" \"$@\"; then echo \"Tests belong only in tests/\" >&2; exit 1; fi' _ {{files}}"
   }
-  ["lua-syntax"] {
-    glob = "*.lua"
-    check = "mise exec -- luac -p {{files}}"
-  }
+  ["luacheck"] = Builtins.luacheck
 }

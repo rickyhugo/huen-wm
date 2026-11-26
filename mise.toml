@@ -2,7 +2,7 @@
 zig = "0.17.1"
 hk = "2.12.0"
 pkl = "0.32.2"
-lua = "5.5.1"
+lua = { version = "5.5.1", postinstall = "luarocks install --dev luacheck" }
 
 [tasks.build]
 description = "Build huen-wm"
