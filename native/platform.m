@@ -27,6 +27,7 @@ typedef NS_ENUM(NSInteger, WMCornerMeasurement) { WMCornerUnmeasured, WMCornerMe
 @property double animationTime;
 @property double animationDuration;
 @property double placementVisibilityDeadline;
+@property double estimatedCornerRadius;
 @property double cornerRadius;
 @property WMCornerMeasurement cornerMeasurement;
 @property double assumedVisibleDeadline;
@@ -784,13 +785,15 @@ static void measureCorner(WindowRecord *record) {
     CGWindowID windowID = record.observation.public_window_id;
     if (record.cornerMeasurement != WMCornerUnmeasured || !windowID || !huen_scene_capture_allowed()) return;
     record.cornerMeasurement = WMCornerMeasuring;
+    double estimate = record.estimatedCornerRadius;
     __weak WindowRecord *weakRecord = record;
     void (^finish)(double) = ^(double radius) {
         dispatch_async(dispatch_get_main_queue(), ^{
             WindowRecord *measured = weakRecord;
-            if (!measured) return;
-            // The 40-point capture holds a continuous corner of radius 26 at most.
-            if (radius < 0 || radius > 26) { measured.cornerMeasurement = WMCornerUnmeasurable; return; }
+            // A changed estimate means the corner changed during the capture, and a new measurement has started.
+            if (!measured || measured.estimatedCornerRadius != estimate) return;
+            // The 48-point capture holds a continuous corner of radius 31 at most.
+            if (radius < 0 || radius > 31) { measured.cornerMeasurement = WMCornerUnmeasurable; return; }
             measured.cornerMeasurement = WMCornerMeasured; measured.cornerRadius = radius;
             if (measured == borderRecord && borderPanel.visible) borderPanel.contentView.layer.cornerRadius = radius + borderPanel.contentView.layer.borderWidth;
         });
@@ -800,7 +803,7 @@ static void measureCorner(WindowRecord *record) {
         if (!error) for (SCWindow *candidate in content.windows) if (candidate.windowID == windowID) window = candidate;
         if (!window) { finish(-1); return; }
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
-        double side = 40;
+        double side = 48;
         SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
         configuration.sourceRect = CGRectMake(0, 0, side, side);
         configuration.width = configuration.height = (size_t)(side * filter.pointPixelScale);
@@ -811,6 +814,25 @@ static void measureCorner(WindowRecord *record) {
             finish(image && !captureError ? cornerRadiusFromImage(image, side) : -1);
         }];
     }];
+}
+
+// macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
+// 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
+// Applications that move their close button break that estimate, so it only stands in until the corner is measured.
+// A toolbar that appears or goes away moves the close button with the corner, so a changed estimate starts a new measurement.
+static void applyBorderCorner(WindowRecord *record, WMRect frame) {
+    double radius = 10;
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) {
+        id button = attribute(record.element, kAXCloseButtonAttribute);
+        WMRect bounds;
+        double estimate = !button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds) ? 16
+            : MIN(MAX(MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left), 10), 26);
+        if (estimate != record.estimatedCornerRadius) { record.estimatedCornerRadius = estimate; record.cornerMeasurement = WMCornerUnmeasured; }
+        measureCorner(record);
+        radius = record.cornerMeasurement == WMCornerMeasured ? record.cornerRadius : estimate;
+    }
+    // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
+    borderPanel.contentView.layer.cornerRadius = radius + borderPanel.contentView.layer.borderWidth;
 }
 
 void platform_border(uint64_t identity, double width, uint32_t color) {
@@ -831,20 +853,7 @@ void platform_border(uint64_t identity, double width, uint32_t color) {
     WMRect frame = focused.observation.frame; readFrame(focused.element, &frame);
     [borderPanel setFrame:NSInsetRect(NSMakeRect(frame.left, CGDisplayBounds(CGMainDisplayID()).size.height - frame.top - frame.height, frame.width, frame.height), -width, -width) display:YES];
     borderPanel.contentView.layer.borderWidth = width;
-    // macOS 26 centers the close button on the window corner's arc, so its offset from the top-left is the corner radius:
-    // 16 for a title bar, 20 for a compact toolbar, 26 for a unified toolbar. Earlier releases use one fixed radius.
-    // Applications that move their close button break that estimate, so it only stands in until the corner is measured.
-    double radius = focused.cornerRadius;
-    if (radius <= 0 && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26) radius = focused.cornerRadius = 10;
-    else if (radius <= 0 && focused.cornerMeasurement != WMCornerMeasured) {
-        id button = attribute(focused.element, kAXCloseButtonAttribute);
-        WMRect bounds;
-        if (!button || CFGetTypeID((__bridge CFTypeRef)button) != AXUIElementGetTypeID() || !readFrame((__bridge AXUIElementRef)button, &bounds)) radius = 16;
-        else radius = focused.cornerRadius = MIN(MAX(MIN(bounds.top + bounds.height / 2 - frame.top, bounds.left + bounds.width / 2 - frame.left), 10), 26);
-    }
-    // The layer draws its border inside its bounds, so the outer radius grows by the width to keep the inner edge on the window's arc.
-    borderPanel.contentView.layer.cornerRadius = radius + width;
-    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26) measureCorner(focused);
+    applyBorderCorner(focused, frame);
     borderRecord = focused;
     borderPanel.contentView.layer.borderColor = [NSColor colorWithRed:((color >> 16) & 255) / 255.0 green:((color >> 8) & 255) / 255.0 blue:(color & 255) / 255.0 alpha:0.95].CGColor;
     [borderPanel orderFrontRegardless];
@@ -1102,7 +1111,7 @@ int platform_main(int argc, char **argv) {
         if (bindResult || listen(serverSocket, 8)) { platform_status_present(NULL); perror("IPC socket"); close(lockDescriptor); return 1; }
         fcntl(serverSocket, F_SETFL, O_NONBLOCK);
         signal(SIGINT, signalHandler); signal(SIGTERM, signalHandler); signal(SIGPIPE, SIG_IGN);
-        __block double lastConfigCheck = 0; __block struct timespec lastModified = {0};
+        __block double lastConfigCheck = 0, lastCornerCheck = 0; __block struct timespec lastModified = {0};
         // AX observers exist only for applications seen by an earlier scan, so launches need their own signal.
         NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
         for (NSNotificationName name in @[NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidUnhideApplicationNotification]) {
@@ -1156,6 +1165,13 @@ int platform_main(int argc, char **argv) {
             if (pointerMoving || dragActive) {
             } else if ((dirty && now - lastScan > 0.15) || (settling && !settleProcess && now - lastScan > 0.045) || now - lastScan > 2) scanAndTick(0);
             else if (settling && settleProcess && now - lastProcessScan > 0.012 && now > processScanRetryTime) scanAndTick(settleProcess);
+            // A window's corner can change without a notification or a frame change, as when its toolbar is hidden.
+            WindowRecord *bordered = borderRecord;
+            if (bordered && borderPanel.visible && !pointerMoving && !dragActive && now - lastCornerCheck > 0.25) {
+                lastCornerCheck = now;
+                WMRect frame;
+                if (readFrame(bordered.element, &frame)) applyBorderCorner(bordered, frame);
+            }
             if (now - lastConfigCheck > 0.25) {
                 struct stat metadata;
                 if (stat(configPath.fileSystemRepresentation, &metadata) == 0 && (metadata.st_mtimespec.tv_sec != lastModified.tv_sec || metadata.st_mtimespec.tv_nsec != lastModified.tv_nsec)) {
