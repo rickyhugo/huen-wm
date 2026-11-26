@@ -21,6 +21,12 @@ var focus_history: history.Ring = .{};
 var last_observed_focus: ?u64 = null;
 var last_pointer: ?native.WMPoint = null;
 
+// Activating another application completes after `verify` returns, so a moving pointer asks for the same window once per
+// half second instead of on every tick until a scan sees the new focus.
+const hover_retry = 0.5;
+var hover_request: ?u64 = null;
+var hover_requested: f64 = -std.math.inf(f64);
+
 // When the window that had focus last went away, so focus that macOS then hands to another window is not taken for a request.
 var focus_lost: f64 = -std.math.inf(f64);
 
@@ -56,6 +62,10 @@ pub fn followPointer() void {
     for (desktop.windows()) |window| {
         if (window.observation.public_window_id != window_id) continue;
         if (!window.visible() or window.parked or !window.eligible() or focused == window.identity) return;
+        const now = native.platform_monotonic();
+        if (hover_request == window.identity and now - hover_requested < hover_retry) return;
+        hover_request = window.identity;
+        hover_requested = now;
         _ = verify(window.identity);
         return;
     }
