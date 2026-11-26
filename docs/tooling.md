@@ -48,8 +48,7 @@ The commit-msg hook checks the title, not the body or footers.
 Merge, revert, and fixup commits also need a Conventional Commit title.
 Existing commits do not need changes.
 
-The Lua checker rejects whitespace-only subjects and repeated `!` markers
-that hk 2.9.0's built-in checker accepts.
+The commit-msg hook uses hk's built-in `Builtins.check_conventional_commit`.
 
 To check a message file without creating a commit, run:
 

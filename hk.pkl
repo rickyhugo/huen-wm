@@ -1,6 +1,7 @@
-amends "package://github.com/jdx/hk/releases/download/v2.9.0/hk@2.9.0#/Config.pkl"
+amends "package://github.com/jdx/hk/releases/download/v2.12.0/hk@2.12.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.12.0/hk@2.12.0#/Builtins.pkl"
 
-min_hk_version = "2.9.0"
+min_hk_version = "2.12.0"
 
 hooks {
   // The steps below also run before a commit. The build and the suite run there only: nothing else builds a commit.
@@ -14,11 +15,7 @@ hooks {
   }
   ["commit-msg"] {
     steps {
-      ["conventional-commit"] {
-        check = new Command {
-          argv = List("mise", "exec", "--", "lua", "scripts/check-commit-message.lua", "{{commit_msg_file}}")
-        }
-      }
+      ["conventional-commit"] = Builtins.check_conventional_commit
     }
   }
 }
@@ -26,6 +23,10 @@ hooks {
 exclude = List("vendor", "vendored", "third_party", "third-party", ".zig-cache", "zig-out", "zig-pkg")
 
 steps {
+  ["hk-config"] {
+    glob = List("hk.pkl", "mise.toml")
+    check = "hk validate --deny-warnings"
+  }
   ["zig-fmt"] {
     glob = "*.zig"
     check = "mise exec -- zig fmt --check {{files}}"
@@ -34,6 +35,10 @@ steps {
   ["names"] {
     glob = List("*.zig", "*.c", "*.m", "*.mm", "*.h", "*.lua")
     check = "mise exec -- lua scripts/check-names.lua {{files}}"
+  }
+  ["no-src-tests"] {
+    glob = "src/**/*.zig"
+    check = "sh -c 'if grep -En \"^[[:space:]]*test[[:space:]]\" \"$@\"; then echo \"Tests belong only in tests/\" >&2; exit 1; fi' _ {{files}}"
   }
   ["lua-syntax"] {
     glob = "*.lua"
